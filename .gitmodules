@@ -1,0 +1,10 @@
+[submodule "vendor/lime"]
+	path = vendor/lime
+	url = https://codeberg.org/gregburd/lime.git
+	branch = main
+	shallow = true
+[submodule "vendor/tre"]
+	path = vendor/tre
+	url = https://github.com/laurikari/tre.git
+	branch = master
+	shallow = true

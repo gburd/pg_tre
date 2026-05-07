@@ -1,0 +1,36 @@
+pg_tre third-party components
+=============================
+
+This extension statically links and ships components with their own
+licenses. Their terms apply to the corresponding parts of the binary
+distribution.
+
+1. TRE (approximate regex library)
+   ---------------------------------
+   Vendored at vendor/tre as a git submodule.
+   Upstream: https://github.com/laurikari/tre (pinned to tag v0.9.0).
+   License: BSD 2-clause (see vendor/tre/LICENSE).
+   Role: used as the approximate-match recheck engine. Statically linked
+   into pg_tre.so.
+
+2. Lime (parser generator)
+   -------------------------
+   Vendored at vendor/lime as a git submodule.
+   Upstream: https://codeberg.org/gregburd/lime.
+   License: Public Domain (Lemon lineage; see vendor/lime/README.md).
+   Role: build-time code generator only. Lime itself is NOT linked into
+   pg_tre.so; only the C code it emits from src/query/tre_grammar.y is
+   compiled in, and that code is under the pg_tre MIT license.
+
+3. sparsemap (compressed bitmap)
+   -----------------------------
+   Source files sparsemap.c / sparsemap.h at the repo root.
+   License: MIT (see the header of sparsemap.h).
+   Role: in-tree bitmap primitive used by posting trees, pending lists,
+   and range summaries. Statically linked into pg_tre.so.
+
+Summary for redistributors:
+  The combined binary pg_tre.so contains code under MIT (pg_tre core and
+  sparsemap), BSD 2-clause (TRE), and PostgreSQL license (PG headers).
+  All terms are redistribution-friendly; see each component's LICENSE
+  file for exact wording.

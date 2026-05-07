@@ -1,4 +1,6 @@
-comment = 'Approximate regex matching using TRE (edit-distance-based fuzzy regex)'
-default_version = '0.1.0'
+comment = 'Approximate-regex index for PostgreSQL (TRE-backed, native AM)'
+default_version = '1.0.0'
 module_pathname = '$libdir/pg_tre'
-relocatable = true
+relocatable = false
+superuser = true
+trusted = false

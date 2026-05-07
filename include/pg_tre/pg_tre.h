@@ -1,0 +1,34 @@
+/*
+ * include/pg_tre/pg_tre.h - public header for the pg_tre extension.
+ *
+ * Collects version macros, module-level GUCs, and forward declarations
+ * shared across the extension's translation units.
+ */
+
+#ifndef PG_TRE_H
+#define PG_TRE_H
+
+#include "postgres.h"
+
+/* On-disk format version advertised by meta page. */
+#define PG_TRE_FORMAT_VERSION 1
+
+/* String version returned by tre_version(). */
+#define PG_TRE_VERSION_STRING "pg_tre 1.0.0-dev"
+
+/* Module GUCs, defined in src/module.c. */
+extern int  pg_tre_default_max_cost;
+extern int  pg_tre_pending_list_limit_kb;
+extern int  pg_tre_range_size_blocks;
+extern int  pg_tre_bloom_tuple_bits;
+extern int  pg_tre_max_extraction_fanout;
+extern int  pg_tre_max_nfa_states;
+extern int  pg_tre_compile_timeout_ms;
+extern int  pg_tre_match_timeout_ms;
+extern bool pg_tre_fastupdate;
+
+/* Initialization entry points. */
+extern void pg_tre_init_guc(void);
+extern void pg_tre_init_rmgr(void);
+
+#endif /* PG_TRE_H */

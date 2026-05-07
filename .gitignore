@@ -1,0 +1,60 @@
+.memelord/
+.pi/
+.mcp.json
+.codex/
+opencode.json
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.bc
+*.a
+
+# PGXS generated files
+results/
+tmp_check/
+log/
+regression.diffs
+regression.out
+
+# Lime-generated parser
+src/query/tre_grammar.c
+src/query/tre_grammar.h
+src/query/tre_grammar.out
+
+# TRE autotools artifacts (submodule)
+vendor/tre/config.h
+vendor/tre/config.log
+vendor/tre/config.status
+vendor/tre/Makefile
+vendor/tre/**/Makefile
+vendor/tre/libtool
+vendor/tre/aclocal.m4
+vendor/tre/autom4te.cache/
+vendor/tre/build-aux/
+vendor/tre/m4/libtool.m4
+vendor/tre/m4/lt*.m4
+vendor/tre/.deps/
+vendor/tre/**/.deps/
+vendor/tre/.libs/
+vendor/tre/**/.libs/
+vendor/tre/*.la
+vendor/tre/**/*.la
+vendor/tre/*.lo
+vendor/tre/**/*.lo
+
+# Lime
+vendor/lime/builddir/
+vendor/lime/lime
+!vendor/lime/lime.c
+
+# Editor
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Build dir
+build/
+config/

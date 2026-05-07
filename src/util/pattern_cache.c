@@ -10,8 +10,8 @@
 
 #include "utils/memutils.h"
 
-#include "tre_cache.h"
-#include "tre_funcs.h"
+#include "pg_tre/pattern_cache.h"
+#include "pg_tre/tre_match.h"
 
 #define TRE_CACHE_SLOTS 32
 

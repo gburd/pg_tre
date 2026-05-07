@@ -1,15 +1,15 @@
 /*
- * tre_funcs.c - TRE wrapper implementation.
+ * src/util/tre_match.c - TRE wrapper implementation.
  *
- * This file includes TRE headers but NOT postgres.h.
- * All TRE memory management uses standard malloc/free.
+ * This file includes TRE headers but NOT postgres.h. All TRE memory
+ * management uses standard malloc/free; callers palloc-wrap results.
  */
 
 #include <stdlib.h>
 #include <string.h>
 
 #include "tre.h"
-#include "tre_funcs.h"
+#include "pg_tre/tre_match.h"
 
 void *
 tre_compile_pattern(const char *pattern, int pattern_len, int *errcode_out)

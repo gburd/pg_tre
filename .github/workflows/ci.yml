@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: build PG${{ matrix.pg }} / ${{ matrix.cc }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+        pg: ['18']
+        cc: [gcc, clang]
+        exclude:
+          - os: macos-14
+            cc: gcc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              autoconf automake libtool gettext autopoint m4 \
+              build-essential postgresql-server-dev-${{ matrix.pg }} \
+              postgresql-${{ matrix.pg }} clang
+
+      - name: Install build deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install autoconf automake libtool gettext m4 postgresql@${{ matrix.pg }}
+          echo "/opt/homebrew/opt/postgresql@${{ matrix.pg }}/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        env:
+          CC: ${{ matrix.cc }}
+        run: make
+
+      - name: Install
+        run: sudo make install
+
+      - name: Start PostgreSQL (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo systemctl start postgresql@${{ matrix.pg }}-main || \
+              sudo service postgresql start
+          sudo -u postgres psql -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
+          sudo systemctl restart postgresql@${{ matrix.pg }}-main || \
+              sudo service postgresql restart
+          sudo -u postgres createdb "$USER"
+
+      - name: Run regression tests
+        run: |
+          PG_CONFIG=$(which pg_config) make check

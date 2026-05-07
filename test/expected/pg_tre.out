@@ -1,0 +1,110 @@
+-- Regression test for pg_tre extension.
+CREATE EXTENSION pg_tre;
+CREATE EXTENSION
+-- The access method is registered.
+SELECT amname, amtype FROM pg_am WHERE amname = 'tre';
+ amname | amtype 
+--------+--------
+ tre    | i
+(1 row)
+
+-- Legacy UDFs: basic exact match (cost 0)
+SELECT tre_amatch('hello', 'hello', 0);
+ tre_amatch 
+------------
+ t
+(1 row)
+
+-- Approximate match: 'colour' matches regex 'color' within distance 1
+SELECT tre_amatch('colour', 'color', 1);
+ tre_amatch 
+------------
+ t
+(1 row)
+
+-- Regex approximate match: enviro.*ment matches 'environment' exactly
+SELECT tre_amatch('environment', 'enviro.*ment', 2);
+ tre_amatch 
+------------
+ t
+(1 row)
+
+-- Cost function returns the actual edit cost
+SELECT tre_amatch_cost('colour', 'color', 3);
+ tre_amatch_cost 
+-----------------
+               1
+(1 row)
+
+-- No match within threshold
+SELECT tre_amatch('abcdef', 'xyz', 1);
+ tre_amatch 
+------------
+ f
+(1 row)
+
+-- Custom per-operation costs
+SELECT tre_amatch('colour', 'color', 2, 1, 1, 1);
+ tre_amatch 
+------------
+ t
+(1 row)
+
+-- Detail function shows cost breakdown
+SELECT * FROM tre_amatch_detail('colour', 'color', 3);
+ cost | num_ins | num_del | num_subst | match_start | match_end 
+------+---------+---------+-----------+-------------+-----------
+    1 |       1 |       0 |         0 |           0 |         6
+(1 row)
+
+-- Version string
+SELECT tre_version();
+         tre_version          
+------------------------------
+ pg_tre 1.0.0-dev (TRE 0.9.0)
+(1 row)
+
+-- Edge cases: empty strings
+SELECT tre_amatch('', '', 0);
+ tre_amatch 
+------------
+ t
+(1 row)
+
+SELECT tre_amatch('a', '', 1);
+ tre_amatch 
+------------
+ t
+(1 row)
+
+-- NULL handling (STRICT functions return NULL on NULL input)
+SELECT tre_amatch(NULL, 'test', 1);
+ tre_amatch 
+------------
+ 
+(1 row)
+
+SELECT tre_amatch('test', NULL, 1);
+ tre_amatch 
+------------
+ 
+(1 row)
+
+-- CREATE INDEX succeeds syntactically (Phase 0 skeleton):
+-- the actual build is a stub and raises a NOTICE.
+CREATE TABLE tre_test (t text);
+CREATE TABLE
+INSERT INTO tre_test VALUES ('hello'), ('world');
+INSERT 0 2
+SET client_min_messages = 'notice';
+SET
+CREATE INDEX tre_test_idx ON tre_test USING tre (t);
+psql:test/sql/pg_tre.sql:45: NOTICE:  pg_tre: index build is a stub (Phase 0)
+HINT:  Phase 2 of the implementation plan adds real build.
+CREATE INDEX
+RESET client_min_messages;
+RESET
+DROP INDEX tre_test_idx;
+DROP INDEX
+DROP TABLE tre_test;
+DROP TABLE
