@@ -27,8 +27,6 @@
 #include <string.h>
 #include <ctype.h>
 
-PG_MODULE_MAGIC;
-
 typedef struct TrePatternData
 {
 	int32	vl_len_;		/* varlena header */

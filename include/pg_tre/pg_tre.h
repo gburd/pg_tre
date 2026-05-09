@@ -9,6 +9,7 @@
 #define PG_TRE_H
 
 #include "postgres.h"
+#include "fmgr.h"
 
 /* On-disk format version advertised by meta page. */
 #define PG_TRE_FORMAT_VERSION 1
