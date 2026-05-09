@@ -57,14 +57,22 @@ write side lands as prerequisite for real ambuild.
 
 ## Phase 3 -- Scan path, exact regex (k=0)
 
-- [ ] Lime codegen wired into build; tre_grammar.c / tre_grammar.h
+- [x] Lime codegen wired into build; tre_grammar.c / tre_grammar.h
   generated and compiled.
-- [ ] Hand-written tokenizer src/query/tokens.c.
-- [ ] Regex AST + k=0 extraction (src/query/extract.c).
+- [x] Hand-written tokenizer src/query/tokens.c (ASCII Phase 3, mode-sensitive).
+- [x] Regex AST constructors src/query/regex_ast.c.
+- [x] Parser driver src/query/parser.c wrapping Lime + tokenizer.
+- [x] tre_pattern type (in/out/recv/send) and constructors.
+- [x] %~~ operator wired into tre_text_ops opclass.
+- [x] Debug UDFs: tre_parse_debug(), tre_extract_debug().
+- [ ] Regex AST + k=0 extraction (src/query/extract.c) — stub returns always_true.
 - [ ] amgetbitmap pulls posting lists via sparsemap_intersection.
-- [ ] tre_pattern type (in/out/recv/send) and %~~ operator.
 - [ ] Differential test: 10k-row corpus x 100 regex patterns, index
   scan == seq scan.
+
+Partially complete. Parser, AST, type, and operator infrastructure
+landed. Extraction and amgetbitmap scan logic remain. Module builds
+and links; parser tests run.
 
 ## Phase 4 -- Incremental writes
 
