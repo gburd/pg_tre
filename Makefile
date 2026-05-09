@@ -64,7 +64,8 @@ OBJS = \
     src/query/tokens.o \
     src/query/parser.o \
     src/query/regex_ast.o \
-    src/query/extract.o
+    src/query/extract.o \
+    src/query/debug.o
 
 # Sparsemap is vendored in-tree; silence upstream missing-prototype
 # warnings without disabling them globally.

@@ -41,6 +41,20 @@ CREATE FUNCTION tre_version()
     LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 -- ---------------------------------------------------------------------
+-- Debug UDFs (Phase 3)
+-- ---------------------------------------------------------------------
+
+CREATE FUNCTION tre_parse_debug(text)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'tre_parse_debug'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_extract_debug(text)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'tre_extract_debug'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+-- ---------------------------------------------------------------------
 -- Access method registration
 -- ---------------------------------------------------------------------
 
