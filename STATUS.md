@@ -29,16 +29,23 @@ Legend:  `[x]` done -- `[~]` partial / stubbed -- `[ ]` not started
 - [x] WAL record declarations + rmgr registration glue
   (include/pg_tre/xlog.h, src/wal/xlog.c).
 - [x] RmgrId 140 registered only when preload-loaded.
-- [ ] Meta page read/write (src/pages/meta.c bodies).
+- [x] Buffer helpers (src/pages/buffer.c).
+- [x] Meta page read/write (src/pages/meta.c).
+- [x] WAL redo body for XLOG_PTRE_META_UPDATE (full-page image
+  replay).
+- [x] End-to-end verified: CREATE INDEX emits META_UPDATE record,
+  pg_ctl stop -m immediate + restart replays cleanly.
+- [x] Posting-tree API contract (include/pg_tre/posting.h).
+- [x] Regex AST contract (include/pg_tre/regex_ast.h).
 - [ ] Upper-tree Lehman-Yao page split (src/pages/upper.c bodies).
 - [ ] Posting-leaf sparsemap wrap / unwrap with in-place edits
   (src/pages/posting.c bodies).
-- [ ] WAL redo bodies for META_UPDATE and the empty-page init
-  records.
+- [ ] Pending-list page chain (src/pages/pending.c bodies).
 - [ ] TAP test for crash recovery of an empty index
   (test/t/001_crash_empty.pl).
-- [ ] Phase-1 exit gate: an empty index survives `pg_ctl stop -m
-  immediate` and replays cleanly.
+
+Remaining Phase 1 work folded into the Phase 2 worktree so the
+write side lands as prerequisite for real ambuild.
 
 ## Phase 2 -- Build path
 
