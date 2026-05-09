@@ -52,6 +52,8 @@ OBJS = \
     src/am/amvacuum.o \
     src/am/amcost.o \
     src/am/amoptions.o \
+    src/pages/buffer.o \
+    src/pages/meta.o \
     src/wal/xlog.o
 
 # Sparsemap is vendored in-tree; silence upstream missing-prototype

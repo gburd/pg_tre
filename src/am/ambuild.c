@@ -16,6 +16,7 @@
 #include "utils/elog.h"
 
 #include "pg_tre/amapi.h"
+#include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
 
@@ -25,12 +26,11 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     IndexBuildResult *result;
 
     /*
-     * Phase 0 behavior: build an "empty" index by letting ambuildempty
-     * initialize the meta/upper/pending pages, then report zero tuples
-     * indexed.  Insert/scan still raise NOT_IMPLEMENTED so users cannot
-     * accidentally rely on a half-working index.
+     * Phase 0 behavior: initialize meta page, then report zero tuples
+     * indexed.  Insert/scan still raise NOT_IMPLEMENTED.  Phase 2
+     * replaces this with a real tuplesort-backed build.
      */
-    pg_tre_ambuildempty(index);
+    pg_tre_build_empty(index);
 
     result = (IndexBuildResult *) palloc0(sizeof(IndexBuildResult));
     result->heap_tuples = 0;
@@ -46,5 +46,5 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 void
 pg_tre_ambuildempty(Relation index)
 {
-    /* Phase 1 initializes metapage + empty upper/range/pending here. */
+    pg_tre_build_empty(index);
 }

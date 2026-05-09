@@ -13,7 +13,9 @@
 #include "access/xlog.h"
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
+#include "access/xlogutils.h"
 #include "lib/stringinfo.h"
+#include "storage/bufmgr.h"
 #include "utils/elog.h"
 
 #include "pg_tre/xlog.h"
@@ -30,6 +32,37 @@ pg_tre_cleanup(void)
     /* Called at the end of WAL redo. */
 }
 
+/*
+ * Generic redo for records that were logged as full-page images
+ * (REGBUF_WILL_INIT + REGBUF_STANDARD).  XLogReadBufferForRedo will
+ * reconstitute the page from the backup block; we only need to mark
+ * it dirty and release.
+ */
+static void
+pg_tre_redo_fpi(XLogReaderState *record)
+{
+    int     blkno;
+    Buffer  buf;
+
+    for (blkno = 0; blkno < XLogRecMaxBlockId(record); blkno++)
+    {
+        XLogRedoAction action = XLogReadBufferForRedo(record, blkno, &buf);
+
+        if (action == BLK_NEEDS_REDO)
+        {
+            /*
+             * The record carries no delta -- a full-page image is
+             * enough to restore.  XLogReadBufferForRedo already
+             * applied it; just release.
+             */
+            PageSetLSN(BufferGetPage(buf), record->EndRecPtr);
+            MarkBufferDirty(buf);
+        }
+        if (BufferIsValid(buf))
+            UnlockReleaseBuffer(buf);
+    }
+}
+
 void
 pg_tre_redo(XLogReaderState *record)
 {
@@ -38,6 +71,9 @@ pg_tre_redo(XLogReaderState *record)
     switch (info)
     {
         case XLOG_PTRE_META_UPDATE:
+            pg_tre_redo_fpi(record);
+            break;
+
         case XLOG_PTRE_UPPER_INSERT:
         case XLOG_PTRE_UPPER_SPLIT:
         case XLOG_PTRE_POSTING_INSERT:
@@ -48,12 +84,6 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_PENDING_MERGE_B:
         case XLOG_PTRE_PENDING_MERGE_C:
         case XLOG_PTRE_VACUUM:
-            /*
-             * Phases 1-5 fill these in as each record type starts
-             * being emitted.  Reaching this branch in Phase 0 means
-             * we produced a record without a redo handler -- treat as
-             * a bug rather than silently losing data.
-             */
             elog(PANIC, "pg_tre: redo for info 0x%02X not yet implemented",
                  info);
             break;
