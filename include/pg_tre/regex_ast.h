@@ -70,8 +70,8 @@ typedef struct TreParseCtx
     RegexAst       *root;
     bool            syntax_error;
     char            errmsg[128];
-    /* Used by the Lime-generated parser to shuttle tokens. */
-    int             cur_pos;
+    /* Tokenizer state - use void* to avoid header coupling */
+    void           *tokenizer_state;
 } TreParseCtx;
 
 typedef struct TreToken
@@ -101,6 +101,9 @@ extern RegexClass *regex_ast_class_union(TreParseCtx *ctx,
  * Returns true on success, false on syntax error (ctx->errmsg filled). */
 extern bool tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len);
 
+/* Tokenizer function used by the parser driver. */
+extern int tre_tokenize_next(TreParseCtx *ctx, TreToken *out);
+
 /* ---- Trigram-query tree produced by extract.c ---- */
 
 typedef struct TrigramDisjunct
@@ -127,5 +130,8 @@ typedef struct TrigramQuery
 
 extern bool regex_extract_query(TreParseCtx *ctx, int32 max_cost,
                                 TrigramQuery *out);
+
+/* Debug pretty-printer for AST. */
+extern char *regex_ast_debug_dump(RegexAst *root);
 
 #endif /* PG_TRE_REGEX_AST_H */

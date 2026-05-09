@@ -112,3 +112,39 @@ pg_tre_build_empty(Relation index)
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
 }
+
+void
+pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
+                      BlockNumber root_range, uint64 n_trigrams,
+                      uint64 n_tuples_indexed)
+{
+    Buffer metabuf;
+    Page   metapage;
+    PgTreMetaPage meta;
+
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    meta = PgTreMetaPageGet(metapage);
+
+    /* Update tree roots and stats. */
+    meta->root_upper = root_upper;
+    meta->root_range = root_range;
+    meta->n_trigrams = n_trigrams;
+    meta->n_tuples_indexed = n_tuples_indexed;
+
+    /* WAL-log the update. */
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
+        PageSetLSN(metapage, recptr);
+    }
+
+    MarkBufferDirty(metabuf);
+    UnlockReleaseBuffer(metabuf);
+}

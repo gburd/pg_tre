@@ -1,7 +1,7 @@
 /*
 ** src/query/tre_grammar.y - POSIX regex + TRE approximate-match grammar.
 **
-** Phase 2 target: produce a bare AST for later analysis by extract.c.
+** Phase 3 target: produce a bare AST for later analysis by extract.c.
 ** Lime generates src/query/tre_grammar.c and tre_grammar.h from this
 ** file.  The generator is built from vendor/lime/lime.c.
 **
@@ -20,6 +20,9 @@
 %token_type     { TreToken }
 %extra_argument { TreParseCtx *ctx }
 %default_type   { RegexAst * }
+
+%type classbody { RegexClass * }
+%type classitem { RegexClass * }
 
 %left  PIPE.
 %left  CONCAT.

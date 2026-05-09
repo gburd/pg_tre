@@ -45,6 +45,7 @@ OBJS = \
     src/util/pattern_cache.o \
     src/util/tre_match.o \
     src/util/sparsemap.o \
+    src/util/hash.o \
     src/am/amapi.o \
     src/am/ambuild.o \
     src/am/aminsert.o \
@@ -54,14 +55,22 @@ OBJS = \
     src/am/amoptions.o \
     src/pages/buffer.o \
     src/pages/meta.o \
-    src/wal/xlog.o
+    src/pages/upper.o \
+    src/pages/posting.o \
+    src/pages/pending.o \
+    src/wal/xlog.o \
+    src/query/tre_grammar.o \
+    src/query/tokens.o \
+    src/query/parser.o \
+    src/query/regex_ast.o \
+    src/query/extract.o
 
 # Sparsemap is vendored in-tree; silence upstream missing-prototype
 # warnings without disabling them globally.
 src/util/sparsemap.o: CFLAGS += -Wno-missing-prototypes
 
-# Phase 1+ grammar is not yet wired in; when it is, add:
-#   OBJS += src/query/tre_grammar.o
+# Grammar-generated files may have warnings; disable pedantic checks.
+src/query/tre_grammar.o: CFLAGS += -Wno-unused-parameter -Wno-missing-prototypes
 
 # ------------------------------------------------------------------
 # Include paths & compile flags
@@ -121,11 +130,15 @@ $(LIME_BIN): $(LIME_DIR)/lime.c
 # ------------------------------------------------------------------
 $(GRAMMAR_C) $(GRAMMAR_H): $(GRAMMAR_Y) $(LIME_BIN)
 	@echo "==> generate regex parser"
-	$(LIME_BIN) -q -d$(@D) $<
+	$(LIME_BIN) -q -T$(LIME_DIR)/limpar.c -d$(@D) $<
 
 # Dependency: our objects on TRE's config, shlib on the static archive.
 src/util/tre_match.o src/util/pattern_cache.o src/module.o: $(TRE_CONFIG_H)
 pg_tre.so: $(TRE_LIB)
+
+# Query path depends on generated grammar.
+src/query/tokens.o src/query/extract.o: $(GRAMMAR_H)
+src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 
 # ------------------------------------------------------------------
 # Convenience targets
@@ -145,3 +158,8 @@ vendor-clean:
 
 distclean-full: clean vendor-clean
 	rm -f $(GRAMMAR_C) $(GRAMMAR_H)
+
+clean: clean-grammar
+
+clean-grammar:
+	rm -f $(GRAMMAR_C) $(GRAMMAR_H) src/query/tre_grammar.o

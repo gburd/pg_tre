@@ -32,4 +32,12 @@ extern void pg_tre_meta_read(Relation index, PgTreMetaPageData *out);
  */
 extern void pg_tre_build_empty(Relation index);
 
+/*
+ * Update the meta page's root pointers and stats.  Used by ambuild
+ * after bulk-loading the upper and range trees.
+ */
+extern void pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
+                                  BlockNumber root_range, uint64 n_trigrams,
+                                  uint64 n_tuples_indexed);
+
 #endif /* PG_TRE_META_H */
