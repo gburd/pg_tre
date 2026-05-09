@@ -1,13 +1,13 @@
 /*
  * src/am/ambuild.c - index build phase.
  *
- * Phase 2: tuplesort-backed bulk build.
+ * Phase 2: in-memory sort-based bulk build.
  *
  * Algorithm:
  *   1. Initialize empty meta page
  *   2. Scan heap, extract byte trigrams from indexed text column
- *   3. Hash each trigram to uint64, emit (hash, TID) into tuplesort
- *   4. Sort by (hash, TID)
+ *   3. Hash each trigram to uint64, accumulate (hash, TID) in memory
+ *   4. Sort by (hash, TID) using qsort
  *   5. For each run of same hash:
  *      - Accumulate TIDs into a PgTrePostingBuilder
  *      - Call finish() to get inline blob or posting root
@@ -19,6 +19,7 @@
  *   - Positions and tuple blooms (Phase 5)
  *   - Range summary tree (Phase 5)
  *   - Parallel build (Phase 2 optional; Phase 8 refinement)
+ *   - Disk-based external sort (Phase 8 for large builds)
  */
 
 #include "postgres.h"
@@ -39,7 +40,6 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
-#include "utils/tuplesort.h"
 
 #include "pg_tre/amapi.h"
 #include "pg_tre/hash.h"
@@ -49,7 +49,7 @@
 #include "pg_tre/posting.h"
 #include "pg_tre/upper.h"
 
-/* Tuplesort record: (trigram_hash, tid). */
+/* In-memory sort entry: (trigram_hash, tid). */
 typedef struct TrigramTidEntry
 {
     uint64      trigram_hash;
@@ -62,7 +62,12 @@ typedef struct BuildState
     Relation    heap;
     Relation    index;
     IndexInfo  *indexInfo;
-    Tuplesortstate *sortstate;
+
+    /* In-memory accumulator. */
+    TrigramTidEntry *entries;
+    int         n_entries;
+    int         entries_alloced;
+
     double      heap_tuples;
     MemoryContext tmpctx;
 } BuildState;
@@ -71,7 +76,6 @@ typedef struct BuildState
 typedef struct PostingAccum
 {
     uint64      trigram_hash;
-    PgTrePostingBuilder *builder;
     BlockNumber root;
     const uint8 *inline_data;
     Size        inline_bytes;
@@ -86,13 +90,13 @@ typedef struct UpperIterState
 } UpperIterState;
 
 /*
- * Comparison function for tuplesort: order by (trigram_hash, tid).
+ * qsort comparison function: order by (trigram_hash, tid).
  */
 static int
-compare_trigram_tid(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
+compare_trigram_tid(const void *a, const void *b)
 {
-    TrigramTidEntry *ea = (TrigramTidEntry *) a->tuple;
-    TrigramTidEntry *eb = (TrigramTidEntry *) b->tuple;
+    const TrigramTidEntry *ea = (const TrigramTidEntry *) a;
+    const TrigramTidEntry *eb = (const TrigramTidEntry *) b;
 
     if (ea->trigram_hash < eb->trigram_hash)
         return -1;
@@ -100,11 +104,15 @@ compare_trigram_tid(const SortTuple *a, const SortTuple *b, Tuplesortstate *stat
         return 1;
 
     /* Same hash: order by TID. */
-    return ItemPointerCompare(&ea->tid, &eb->tid);
+    {
+        ItemPointerData tid_a = ea->tid;
+        ItemPointerData tid_b = eb->tid;
+        return ItemPointerCompare(&tid_a, &tid_b);
+    }
 }
 
 /*
- * Extract trigrams from a text datum and insert them into tuplesort.
+ * Extract trigrams from a text datum and insert them into the build state.
  */
 static void
 extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
@@ -113,7 +121,6 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     char       *str;
     int         len;
     int         i;
-    TrigramTidEntry entry;
 
     if (isnull)
         return;
@@ -127,14 +134,24 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     for (i = 0; i <= len - 3; i++)
     {
         uint8   trigram[3];
+        TrigramTidEntry *entry;
+
         trigram[0] = (uint8) str[i];
         trigram[1] = (uint8) str[i + 1];
         trigram[2] = (uint8) str[i + 2];
 
-        entry.trigram_hash = pg_tre_hash_trigram(trigram);
-        entry.tid = *tid;
+        /* Grow array if needed. */
+        if (bstate->n_entries >= bstate->entries_alloced)
+        {
+            bstate->entries_alloced *= 2;
+            bstate->entries = (TrigramTidEntry *)
+                repalloc(bstate->entries,
+                         bstate->entries_alloced * sizeof(TrigramTidEntry));
+        }
 
-        tuplesort_putbinary(bstate->sortstate, &entry, sizeof(entry));
+        entry = &bstate->entries[bstate->n_entries++];
+        entry->trigram_hash = pg_tre_hash_trigram(trigram);
+        entry->tid = *tid;
     }
 }
 
@@ -185,10 +202,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 {
     IndexBuildResult *result;
     BuildState  bstate;
-    Tuplesortstate *sortstate;
     MemoryContext oldcxt;
-    TrigramTidEntry *entry;
-    bool        should_free;
     PostingAccum *accums;
     int         n_accums;
     int         accums_alloced;
@@ -196,41 +210,40 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     PgTrePostingBuilder *current_builder;
     BlockNumber root_upper;
     UpperIterState iter_state;
+    int         i;
 
     /* Phase 2 real build starts here. */
 
     /* Step 1: initialize empty meta page. */
     pg_tre_build_empty(index);
 
-    /* Step 2: set up tuplesort for (trigram_hash, tid) pairs. */
-    sortstate = tuplesort_begin_heap(
-        NULL,                          /* no tupdesc for binary sort */
-        0,                             /* no key columns (custom comparator) */
-        NULL,                          /* no sort keys */
-        maintenance_work_mem,
-        NULL,                          /* no coordinate for parallel */
-        0);                            /* no parallel workers */
-
-    /* Override comparison function. */
-    tuplesort_set_bound(sortstate, 0);
-
+    /* Step 2: set up in-memory accumulator. */
     bstate.heap = heap;
     bstate.index = index;
     bstate.indexInfo = indexInfo;
-    bstate.sortstate = sortstate;
+    bstate.entries_alloced = 1024 * 1024;  /* start with 1M entries */
+    bstate.entries = (TrigramTidEntry *)
+        palloc(bstate.entries_alloced * sizeof(TrigramTidEntry));
+    bstate.n_entries = 0;
     bstate.heap_tuples = 0.0;
     bstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
                                           "pg_tre build temp context",
                                           ALLOCSET_DEFAULT_SIZES);
 
-    /* Step 3: scan heap and insert trigrams into tuplesort. */
+    /* Step 3: scan heap and collect trigrams. */
     table_index_build_scan(heap, index, indexInfo, true, true,
                            build_callback, &bstate, NULL);
 
-    /* Step 4: sort. */
-    tuplesort_performsort(sortstate);
+    ereport(NOTICE,
+            (errmsg("pg_tre: collected %d trigram entries from %.0f heap tuples",
+                    bstate.n_entries, bstate.heap_tuples)));
 
-    /* Step 5: read sorted entries and build posting trees. */
+    /* Step 4: sort by (hash, tid). */
+    if (bstate.n_entries > 0)
+        qsort(bstate.entries, bstate.n_entries, sizeof(TrigramTidEntry),
+              compare_trigram_tid);
+
+    /* Step 5: process sorted entries and build posting trees. */
     oldcxt = MemoryContextSwitchTo(bstate.tmpctx);
 
     accums_alloced = 1024;
@@ -240,9 +253,10 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     current_hash = 0;
     current_builder = NULL;
 
-    while ((entry = (TrigramTidEntry *) tuplesort_getbinary(sortstate, true,
-                                                            &should_free)) != NULL)
+    for (i = 0; i < bstate.n_entries; i++)
     {
+        TrigramTidEntry *entry = &bstate.entries[i];
+
         if (current_builder == NULL || entry->trigram_hash != current_hash)
         {
             /* Finish the previous trigram's posting tree. */
@@ -280,9 +294,6 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         /* Add TID to the current posting builder. */
         pg_tre_posting_build_add(current_builder, &entry->tid,
                                  NULL, 0, NULL);
-
-        if (should_free)
-            pfree(entry);
     }
 
     /* Finish the last posting tree. */
@@ -310,7 +321,8 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         n_accums++;
     }
 
-    tuplesort_end(sortstate);
+    ereport(NOTICE,
+            (errmsg("pg_tre: built %d posting trees", n_accums)));
 
     /* Step 6: bulk-load upper tree from the posting list. */
     iter_state.accums = accums;
@@ -325,11 +337,16 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     MemoryContextSwitchTo(oldcxt);
     MemoryContextDelete(bstate.tmpctx);
+    pfree(bstate.entries);
 
     /* Return build result. */
     result = (IndexBuildResult *) palloc0(sizeof(IndexBuildResult));
     result->heap_tuples = bstate.heap_tuples;
     result->index_tuples = bstate.heap_tuples;  /* approximate */
+
+    ereport(NOTICE,
+            (errmsg("pg_tre: build complete, indexed %.0f heap tuples into %d trigrams",
+                    bstate.heap_tuples, n_accums)));
 
     return result;
 }

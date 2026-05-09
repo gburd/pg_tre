@@ -57,15 +57,84 @@ COMMENT ON ACCESS METHOD tre IS
     'approximate-regex index (pg_tre)';
 
 -- ---------------------------------------------------------------------
+-- tre_pattern type
+-- ---------------------------------------------------------------------
+
+CREATE TYPE tre_pattern;
+
+CREATE FUNCTION tre_pattern_in(cstring)
+    RETURNS tre_pattern
+    AS 'MODULE_PATHNAME', 'tre_pattern_in'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_pattern_out(tre_pattern)
+    RETURNS cstring
+    AS 'MODULE_PATHNAME', 'tre_pattern_out'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_pattern_recv(internal)
+    RETURNS tre_pattern
+    AS 'MODULE_PATHNAME', 'tre_pattern_recv'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_pattern_send(tre_pattern)
+    RETURNS bytea
+    AS 'MODULE_PATHNAME', 'tre_pattern_send'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE TYPE tre_pattern (
+    INPUT = tre_pattern_in,
+    OUTPUT = tre_pattern_out,
+    RECEIVE = tre_pattern_recv,
+    SEND = tre_pattern_send,
+    STORAGE = extended
+);
+
+-- Constructor functions
+
+CREATE FUNCTION tre_pattern(text)
+    RETURNS tre_pattern
+    AS 'MODULE_PATHNAME', 'tre_pattern_make'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_pattern(text, int4)
+    RETURNS tre_pattern
+    AS 'MODULE_PATHNAME', 'tre_pattern_make_k'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_pattern(text, int4, int4, int4, int4)
+    RETURNS tre_pattern
+    AS 'MODULE_PATHNAME', 'tre_pattern_make_full'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+-- ---------------------------------------------------------------------
+-- Operators
+-- ---------------------------------------------------------------------
+
+CREATE FUNCTION tre_match_scalar(text, tre_pattern)
+    RETURNS bool
+    AS 'MODULE_PATHNAME', 'tre_match_scalar'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE OPERATOR %~~ (
+    LEFTARG = text,
+    RIGHTARG = tre_pattern,
+    FUNCTION = tre_match_scalar,
+    RESTRICT = contsel
+);
+
+COMMENT ON OPERATOR %~~ (text, tre_pattern) IS
+    'approximate regex match (pg_tre)';
+
+-- ---------------------------------------------------------------------
 -- Opclass for text columns.
 --
 -- Strategy 1: text %~~ tre_pattern  (approximate regex match)
---
--- Phase 0 registers only the shape of the opclass so CREATE INDEX
--- parses cleanly; the %~~ operator and tre_pattern type are added in
--- Phase 3.
 -- ---------------------------------------------------------------------
+
+DROP OPERATOR CLASS IF EXISTS tre_text_ops USING tre CASCADE;
 
 CREATE OPERATOR CLASS tre_text_ops
     DEFAULT FOR TYPE text USING tre AS
+    OPERATOR 1 %~~ (text, tre_pattern),
     STORAGE text;

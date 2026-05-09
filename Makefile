@@ -46,6 +46,7 @@ OBJS = \
     src/util/tre_match.o \
     src/util/sparsemap.o \
     src/util/hash.o \
+    src/util/type_pattern.o \
     src/am/amapi.o \
     src/am/ambuild.o \
     src/am/aminsert.o \

@@ -31,4 +31,10 @@ extern bool pg_tre_fastupdate;
 extern void pg_tre_init_guc(void);
 extern void pg_tre_init_rmgr(void);
 
+/* Legacy UDF exports (for internal use). */
+extern Datum pg_tre_amatch(PG_FUNCTION_ARGS);
+extern Datum pg_tre_amatch_cost(PG_FUNCTION_ARGS);
+extern Datum pg_tre_amatch_with_costs(PG_FUNCTION_ARGS);
+extern Datum pg_tre_amatch_detail(PG_FUNCTION_ARGS);
+
 #endif /* PG_TRE_H */

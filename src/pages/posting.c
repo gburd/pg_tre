@@ -74,9 +74,6 @@ struct PgTrePostingScan
     Buffer      leaf_buf;
     sparsemap_t *leaf_map;
     BlockNumber next_leaf;
-
-    /* For inline postings, we wrap the data in-place. */
-    sparsemap_t inline_map_storage;
 };
 
 /* Default sparsemap buffer size for builder (will grow if needed). */
@@ -282,7 +279,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
          * enough that we can just error out with a clear message.
          */
         elog(ERROR, "pg_tre: multi-leaf posting trees not yet implemented "
-             "(Phase 4); trigram %016" INT64_MODIFIER "X has %d leaves",
+             "(Phase 4); trigram " UINT64_FORMAT " has %d leaves",
              b->trigram_hash, b->n_leaves);
     }
 }
@@ -330,9 +327,10 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
     if (inline_data != NULL)
     {
         /* Inline posting: wrap the data in-place and copy. */
-        sparsemap_t inline_map_storage;
-        sparsemap_open(&inline_map_storage, (uint8 *) inline_data, inline_bytes);
-        return sparsemap_copy(&inline_map_storage);
+        sparsemap_t *tmp = sparsemap_wrap((uint8 *) inline_data, inline_bytes);
+        sparsemap_t *result = sparsemap_copy(tmp);
+        free(tmp);
+        return result;
     }
     else if (root != InvalidBlockNumber)
     {
@@ -341,8 +339,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         Page    page;
         PgTrePostingLeafHeader *hdr;
         uint8  *map_data;
-        sparsemap_t leaf_map;
-        sparsemap_t *result;
+        sparsemap_t *tmp, *result;
 
         buf = pg_tre_read(index, root, PG_TRE_PAGE_POSTING_L,
                           BUFFER_LOCK_SHARE);
@@ -351,8 +348,9 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         map_data = (uint8 *) hdr + sizeof(PgTrePostingLeafHeader);
 
         /* Wrap and copy. */
-        sparsemap_open(&leaf_map, map_data, hdr->sparsemap_bytes);
-        result = sparsemap_copy(&leaf_map);
+        tmp = sparsemap_wrap(map_data, hdr->sparsemap_bytes);
+        result = sparsemap_copy(tmp);
+        free(tmp);
 
         UnlockReleaseBuffer(buf);
         return result;
@@ -372,27 +370,4 @@ pg_tre_posting_scan_end(PgTrePostingScan *s)
     if (s->leaf_map)
         free(s->leaf_map);
     pfree(s);
-}
-
-/* ---- Upper-tree lookup (both sides) ---- */
-
-bool
-pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
-{
-    /*
-     * Phase 2 implements this by reading the upper tree and searching
-     * for the trigram_hash.  For now, stub it to return "not found".
-     */
-    out->upper_buf = InvalidBuffer;
-    out->root = InvalidBlockNumber;
-    out->inline_data = NULL;
-    out->inline_bytes = 0;
-    return false;
-}
-
-void
-pg_tre_upper_release(PgTreUpperRef *ref)
-{
-    if (BufferIsValid(ref->upper_buf))
-        UnlockReleaseBuffer(ref->upper_buf);
 }

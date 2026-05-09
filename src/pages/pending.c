@@ -15,6 +15,9 @@
 
 #include "postgres.h"
 
+#include "utils/rel.h"
+#include "storage/itemptr.h"
+
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
 

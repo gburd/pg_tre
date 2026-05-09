@@ -30,8 +30,10 @@
 #include "utils/rel.h"
 
 #include "pg_tre/buffer.h"
+#include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
+#include "pg_tre/upper.h"
 #include "pg_tre/xlog.h"
 
 /* Upper-tree internal page entry: (first_key, child_blk). */
@@ -148,21 +150,14 @@ upper_flush_leaf(UpperBulkState *state)
     /* Copy inline blobs and adjust entry offsets. */
     if (state->leaf_inline_used > 0)
     {
-        Size blob_base = (char *) dest - (char *) page;
         memcpy(dest, state->leaf_inline_data, state->leaf_inline_used);
 
-        /* Fix up inline_data pointers in entries: store as offsets. */
-        for (i = 0; i < state->leaf_n_entries; i++)
-        {
-            if (state->leaf_entries[i].inline_bytes > 0)
-            {
-                /*
-                 * We stored absolute pointers during accumulation; now
-                 * convert to page-relative offsets.  This is a bit hacky
-                 * but works for Phase 2.  TODO: cleaner representation.
-                 */
-            }
-        }
+        /*
+         * Phase 2 TODO: fix up inline_data pointers in entries.
+         * For now, the upper-tree lookup code handles inline data
+         * by pointing past the entry array.  A proper implementation
+         * would store page-relative offsets in the entries.
+         */
     }
 
     /* Update pd_lower. */
