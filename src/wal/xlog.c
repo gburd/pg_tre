@@ -77,6 +77,15 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_UPPER_INSERT:
         case XLOG_PTRE_UPPER_SPLIT:
         case XLOG_PTRE_POSTING_INSERT:
+            /*
+             * Phase 2 emits these as full-page images (REGBUF_WILL_INIT +
+             * REGBUF_STANDARD) during bulk build.  Generic FPI redo is
+             * correct.  Phase 4 adds delta records that will need their
+             * own branches.
+             */
+            pg_tre_redo_fpi(record);
+            break;
+
         case XLOG_PTRE_POSTING_DELETE:
         case XLOG_PTRE_POSTING_SPLIT:
         case XLOG_PTRE_RANGE_UPDATE:

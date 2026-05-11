@@ -13,9 +13,9 @@
 #include <string.h>
 
 /* Lime-generated parser interface from tre_grammar.c */
-extern void *tre_parseAlloc(void *(*mallocProc)(size_t), struct TreParseCtx *ctx);
-extern void tre_parseFree(void *parser, void (*freeProc)(void *));
-extern void tre_parse(void *parser, int token_kind, TreToken token_value,
+extern void *pg_tre_rx_parseAlloc(void *(*mallocProc)(size_t), struct TreParseCtx *ctx);
+extern void pg_tre_rx_parseFree(void *parser, void (*freeProc)(void *));
+extern void pg_tre_rx_parse(void *parser, int token_kind, TreToken token_value,
 					  struct TreParseCtx *ctx);
 
 /*
@@ -43,7 +43,7 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 	ctx->tokenizer_state = NULL;
 
 	/* Allocate parser */
-	parser = tre_parseAlloc(malloc, ctx);
+	parser = pg_tre_rx_parseAlloc(malloc, ctx);
 	if (parser == NULL)
 		elog(ERROR, "failed to allocate regex parser");
 
@@ -53,7 +53,7 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 		if (ctx->syntax_error)
 			break;
 
-		tre_parse(parser, tok_kind, tok, ctx);
+		pg_tre_rx_parse(parser, tok_kind, tok, ctx);
 
 		if (ctx->syntax_error)
 			break;
@@ -63,7 +63,7 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 	if (tok_kind < 0)
 	{
 		/* Error already set by tokenizer */
-		tre_parseFree(parser, free);
+		pg_tre_rx_parseFree(parser, free);
 		return false;
 	}
 
@@ -71,11 +71,11 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 	if (!ctx->syntax_error)
 	{
 		memset(&tok, 0, sizeof(tok));
-		tre_parse(parser, 0, tok, ctx);
+		pg_tre_rx_parse(parser, 0, tok, ctx);
 	}
 
 	/* Clean up */
-	tre_parseFree(parser, free);
+	pg_tre_rx_parseFree(parser, free);
 
 	/* Check for syntax error */
 	if (ctx->syntax_error)

@@ -16,7 +16,7 @@
 #include "pg_tre/regex_ast.h"          /* Phase 2 */
 }
 
-%name           tre_parse
+%name           pg_tre_rx_parse
 %token_type     { TreToken }
 %extra_argument { TreParseCtx *ctx }
 %default_type   { RegexAst * }
