@@ -26,6 +26,7 @@
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/tiling.h"
+#include "pg_tre/uleven.h"
 
 /*
  * A spine entry: one trigram at a specific pattern offset.
@@ -122,6 +123,9 @@ extract_spine_from_ast(const RegexAst *ast, SpineEntry *out, int max_out,
 /*
  * Tile a trigram spine into k+1 groups.  Each tile receives roughly
  * spine_n / (k+1) trigrams.  Returns the tiled TrigramQuery in DNF mode.
+ *
+ * Phase 5.1: After tiling, expand each trigram with universal Levenshtein
+ * for k=1 or k=2 (per-tile edit budget = 1, following Navarro's argument).
  */
 static bool
 pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
@@ -129,6 +133,9 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
 {
     MemoryContext old = MemoryContextSwitchTo(cxt);
     int n_tiles, tile_size, i, t;
+    /* Per-tile edit budget: typically 1 regardless of global k, but we'll
+     * use min(k, 2) since uleven only supports k <= 2 */
+    int32 tile_k = (k > 2) ? 2 : k;
 
     if (spine_n <= 0 || k < 0)
     {
@@ -169,18 +176,80 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
         if (tile_len <= 0)
             continue;
 
-        out->conjuncts[t].n = tile_len;
-        out->conjuncts[t].alts = palloc(tile_len * sizeof(TrigramDisjunct));
-
-        for (i = 0; i < tile_len; i++)
+        /* Phase 5.1: Expand each trigram in this tile with uleven if k > 0.
+         * For k=0, no expansion needed (exact match). */
+        if (tile_k > 0)
         {
-            const SpineEntry *e = &spine[tile_start + i];
-            TrigramDisjunct *d = &out->conjuncts[t].alts[i];
+            /* Allocate temporary buffer for expanded trigrams.
+             * Each trigram can expand to ~hundreds (k=1) or thousands (k=2). */
+            uint8 expanded[4096][3];
+            int total_alts = 0;
 
-            d->trigram_hash = pg_tre_hash_trigram(e->trigram);
-            /* Widen position range by +/- k for edit distance tolerance */
-            d->min_offset = (e->pattern_offset > k) ? (e->pattern_offset - k) : 0;
-            d->max_offset = e->pattern_offset + k;
+            /* First pass: count total alternatives after expansion */
+            for (i = 0; i < tile_len; i++)
+            {
+                const SpineEntry *e = &spine[tile_start + i];
+                int n_expanded = pg_tre_uleven_expand(e->trigram, tile_k,
+                                                     expanded, 4096);
+                if (n_expanded < 0)
+                {
+                    /* Expansion overflowed; fall back to always_true */
+                    out->always_true = true;
+                    out->mode = TRIGRAM_QUERY_CNF;
+                    MemoryContextSwitchTo(old);
+                    return false;
+                }
+
+                if (total_alts + n_expanded > pg_tre_max_extraction_fanout)
+                {
+                    /* Fanout cap exceeded; fall back to always_true */
+                    out->always_true = true;
+                    out->mode = TRIGRAM_QUERY_CNF;
+                    MemoryContextSwitchTo(old);
+                    return false;
+                }
+
+                total_alts += n_expanded;
+            }
+
+            /* Allocate disjunct array for this tile */
+            out->conjuncts[t].n = total_alts;
+            out->conjuncts[t].alts = palloc(total_alts * sizeof(TrigramDisjunct));
+
+            /* Second pass: populate disjuncts with expanded trigrams */
+            int alt_idx = 0;
+            for (i = 0; i < tile_len; i++)
+            {
+                const SpineEntry *e = &spine[tile_start + i];
+                int n_expanded = pg_tre_uleven_expand(e->trigram, tile_k,
+                                                     expanded, 4096);
+                int j;
+
+                for (j = 0; j < n_expanded; j++)
+                {
+                    TrigramDisjunct *d = &out->conjuncts[t].alts[alt_idx++];
+                    d->trigram_hash = pg_tre_hash_trigram(expanded[j]);
+                    /* Widen position range by +/- k for edit distance tolerance */
+                    d->min_offset = (e->pattern_offset > k) ? (e->pattern_offset - k) : 0;
+                    d->max_offset = e->pattern_offset + k;
+                }
+            }
+        }
+        else
+        {
+            /* k=0: no expansion, just hash the original trigrams */
+            out->conjuncts[t].n = tile_len;
+            out->conjuncts[t].alts = palloc(tile_len * sizeof(TrigramDisjunct));
+
+            for (i = 0; i < tile_len; i++)
+            {
+                const SpineEntry *e = &spine[tile_start + i];
+                TrigramDisjunct *d = &out->conjuncts[t].alts[i];
+
+                d->trigram_hash = pg_tre_hash_trigram(e->trigram);
+                d->min_offset = e->pattern_offset;
+                d->max_offset = e->pattern_offset;
+            }
         }
     }
 

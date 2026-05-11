@@ -366,39 +366,11 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
     if (max_cost > 0)
     {
         /* Use tiling for k > 0: partition the pattern's trigram spine
-         * into k+1 tiles; at least one must match exactly. */
+         * into k+1 tiles; at least one must match exactly.
+         * Phase 5.1: tiling now includes uleven expansion per tile. */
         if (pg_tre_tile_query(ctx->root, max_cost, out, ctx->mcxt))
         {
-            /* Tiling succeeded; expand each tile's trigrams with uleven if k is small.
-             * For k=1 or k=2, we can enumerate near-neighbor trigrams. */
-            if (max_cost <= 2 && max_cost > 0)
-            {
-                int t, d;
-                for (t = 0; t < out->n; t++)
-                {
-                    TrigramConjunct *conj = &out->conjuncts[t];
-                    /* For each disjunct in this tile, expand it with uleven */
-                    for (d = 0; d < conj->n; d++)
-                    {
-                        TrigramDisjunct *dis = &conj->alts[d];
-                        uint8 original_tri[3];
-                        uint8 expanded[4096][3];
-                        int n_expanded;
-
-                        /* Extract the original trigram bytes from the hash.
-                         * Since we only have the hash, we can't expand directly.
-                         * Instead, we'll skip uleven expansion in Phase 5 initial cut
-                         * and add it in Phase 5.1 once we track trigram bytes alongside hashes.
-                         * For now, document this limitation. */
-                        (void) original_tri;
-                        (void) expanded;
-                        (void) n_expanded;
-                        /* TODO Phase 5.1: store trigram bytes alongside hash in SpineEntry,
-                         * then call pg_tre_uleven_expand here and add the expanded trigrams
-                         * as additional disjuncts within the tile. */
-                    }
-                }
-            }
+            /* Tiling succeeded with uleven expansion */
             return true;
         }
         else

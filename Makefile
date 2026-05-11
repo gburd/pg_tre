@@ -18,7 +18,7 @@ EXTENSION    = pg_tre
 MODULE_big   = pg_tre
 DATA         = sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -55,6 +55,7 @@ OBJS = \
     src/am/amvacuum.o \
     src/am/amcost.o \
     src/am/amoptions.o \
+    src/am/sel.o \
     src/pages/buffer.o \
     src/pages/meta.o \
     src/pages/upper.o \
@@ -151,7 +152,7 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # ------------------------------------------------------------------
 # Convenience targets
 # ------------------------------------------------------------------
-.PHONY: localcheck vendor-clean distclean-full
+.PHONY: localcheck tapcheck vendor-clean distclean-full
 
 # Local regression runner that sidesteps our nix-build pg_regress
 # exec-path quirk.  Invokes scripts/run-regress.sh against an already-
@@ -159,6 +160,19 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # Named localcheck to avoid overriding PGXS's standard `check` target.
 localcheck:
 	PG_CONFIG='$(PG_CONFIG)' $(SHELL) scripts/run-regress.sh
+
+# TAP test runner for Phase 7 durability testing.
+# Tests: crash recovery, streaming replication, REINDEX CONCURRENTLY,
+# pg_upgrade (dump/restore), and soak testing.
+# Requires prove(1) and PostgreSQL::Test::Cluster module.
+tapcheck:
+	@echo "Running TAP tests for pg_tre durability..."
+	@if ! command -v prove >/dev/null 2>&1; then \
+		echo "ERROR: prove not found. Install Test::More and Test::Harness."; \
+		exit 1; \
+	fi
+	PG_CONFIG='$(PG_CONFIG)' PERL5LIB='$(shell $(PG_CONFIG) --libdir)/perl5' \
+		prove -v test/t/*.pl
 
 vendor-clean:
 	-$(MAKE) -C $(TRE_DIR) distclean 2>/dev/null || true

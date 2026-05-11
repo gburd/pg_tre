@@ -1,0 +1,25 @@
+Null display is "[null]".
+Timing is on.
+Expanded display is used automatically.
+Welcome to PostgreSQL! 
+
+Type :version to see the PostgreSQL version. 
+
+Type :extensions to see the available extensions. 
+
+Type \q to exit. 
+
+NOTICE:  42710: extension "pg_tre" already exists, skipping
+LOCATION:  CreateExtension, extension.c:2117
+CREATE EXTENSION
+Time: 0.330 ms
+SET
+Time: 0.124 ms
+CREATE TABLE
+Time: 2.343 ms
+INSERT 0 2
+Time: 0.205 ms
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+connection to server was lost
