@@ -1,78 +1,803 @@
 /*
  * src/pages/pending.c - fast-update pending list.
  *
- * Phase 4: append-only page chain holding (trigram_hash, tid, position)
- * entries from recent inserts.  Merge sweep consumes the list and
- * updates posting trees.  Scans union the pending list into results
- * to preserve consistency pre-merge.
+ * Forward-linked chain of pages storing (trigram_hash, tid, position)
+ * triples appended by aminsert.  Drained by VACUUM (amvacuumcleanup)
+ * or explicit pg_tre_flush(), at which point entries are merged into
+ * per-trigram posting trees and the list is truncated.
  *
- * ---- Phase 2 stub ----
+ * Phase 4 implementation:
+ *   - Append path: single writer, exclusive lock on meta + tail page.
+ *   - Scan path: share-locks each page in turn, callback per entry.
+ *   - Merge path: rebuild the upper tree with merged postings.  This
+ *     avoids a real upper_insert (deferred to Phase 8 hardening) at
+ *     the cost of temporarily wasting pages that are replaced by the
+ *     rebuild; page reuse lands with the Lehman-Yao insert in Phase 8.
  *
- * For Phase 2 (build-only), the pending list is not used.  The meta
- * page initializes head/tail to InvalidBlockNumber.  This file provides
- * stub functions with clear TODO markers for Phase 4.
+ * WAL records emitted:
+ *   - XLOG_PTRE_PENDING_INSERT (FPI on the tail page + meta page)
+ *   - XLOG_PTRE_PENDING_MERGE_BEGIN / _COMMIT (FPI framing)
+ * Merge-produced posting / upper pages use the Phase 2 INSERT records.
  */
 
 #include "postgres.h"
 
-#include "utils/rel.h"
+#include <string.h>
+
+#include "access/xlog.h"
+#include "access/xloginsert.h"
+#include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "storage/itemptr.h"
+#include "storage/lockdefs.h"
+#include "utils/elog.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
 
+#include "pg_tre/buffer.h"
+#include "pg_tre/hash.h"
+#include "pg_tre/meta.h"
 #include "pg_tre/page.h"
+#include "pg_tre/pending.h"
 #include "pg_tre/pg_tre.h"
+#include "pg_tre/posting.h"
+#include "pg_tre/sparsemap.h"
+#include "pg_tre/upper.h"
+#include "pg_tre/xlog.h"
+
+/* --------------------------------------------------------------------
+ * Page layout helpers
+ * -------------------------------------------------------------------- */
+
+static inline PgTrePendingHeader *
+pending_header(Page page)
+{
+    return (PgTrePendingHeader *) PageGetContents(page);
+}
+
+static inline PgTrePendingEntry *
+pending_entries(Page page)
+{
+    return (PgTrePendingEntry *)
+        ((char *) PageGetContents(page) + MAXALIGN(sizeof(PgTrePendingHeader)));
+}
+
+static inline int
+pending_capacity(void)
+{
+    Size body = BLCKSZ
+              - MAXALIGN(SizeOfPageHeaderData)
+              - MAXALIGN(sizeof(PgTrePendingHeader))
+              - MAXALIGN(sizeof(PageTreOpaqueData));
+    return (int) (body / sizeof(PgTrePendingEntry));
+}
+
+static void
+pending_page_init(Page page)
+{
+    PgTrePendingHeader *hdr;
+
+    pg_tre_page_init(page, BLCKSZ, PG_TRE_PAGE_PENDING);
+    hdr = pending_header(page);
+    hdr->next_page = InvalidBlockNumber;
+    hdr->n_entries = 0;
+    hdr->used_bytes = 0;
+
+    ((PageHeader) page)->pd_lower =
+        (char *) pending_entries(page) - (char *) page;
+}
+
+/* --------------------------------------------------------------------
+ * Append path
+ * -------------------------------------------------------------------- */
 
 /*
- * Initialize an empty pending list (no-op for Phase 2, since
- * pg_tre_meta_init already sets head=tail=InvalidBlockNumber).
+ * Acquire a tail page to append into.  Allocates a new page if the
+ * current tail is full or the list is empty.  Caller receives an
+ * exclusive buffer lock on the returned buffer.  *meta_out is updated
+ * in the metapage when a new tail is allocated; the caller is
+ * responsible for WAL-logging that update.
+ *
+ * Returns the tail buffer and fills *meta_buf_out with the still-
+ * pinned metapage buffer (also exclusively locked) so the caller can
+ * batch a single WAL record covering both pages.
  */
-void
-pg_tre_pending_init_empty(Relation index)
+static void
+acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
+             bool *tail_is_new)
 {
-    /* Nothing to do; meta page already has InvalidBlockNumber. */
+    Buffer   metabuf;
+    Page     metapage;
+    PgTreMetaPage meta;
+    Buffer   tailbuf;
+
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    meta = PgTreMetaPageGet(metapage);
+
+    *tail_is_new = false;
+
+    if (meta->pending_tail == InvalidBlockNumber)
+    {
+        tailbuf = pg_tre_extend(index, PG_TRE_PAGE_PENDING);
+        pending_page_init(BufferGetPage(tailbuf));
+
+        meta->pending_head = BufferGetBlockNumber(tailbuf);
+        meta->pending_tail = meta->pending_head;
+        *tail_is_new = true;
+    }
+    else
+    {
+        tailbuf = pg_tre_read(index, meta->pending_tail,
+                              PG_TRE_PAGE_PENDING, BUFFER_LOCK_EXCLUSIVE);
+
+        if (pending_header(BufferGetPage(tailbuf))->n_entries >=
+            pending_capacity())
+        {
+            Buffer newbuf = pg_tre_extend(index, PG_TRE_PAGE_PENDING);
+            pending_page_init(BufferGetPage(newbuf));
+
+            pending_header(BufferGetPage(tailbuf))->next_page =
+                BufferGetBlockNumber(newbuf);
+            MarkBufferDirty(tailbuf);
+            UnlockReleaseBuffer(tailbuf);
+
+            meta->pending_tail = BufferGetBlockNumber(newbuf);
+            tailbuf = newbuf;
+            *tail_is_new = true;
+        }
+    }
+
+    *meta_buf_out = metabuf;
+    *tail_buf_out = tailbuf;
+}
+
+void
+pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
+                            const ItemPointerData *tids,
+                            const uint32 *positions, int n)
+{
+    Buffer  metabuf, tailbuf;
+    bool    tail_is_new;
+    PgTrePendingHeader *hdr;
+    PgTrePendingEntry  *entries;
+    Page    tailpage, metapage;
+    int     i, room;
+
+    if (n <= 0)
+        return;
+    if (n > PG_TRE_PENDING_BATCH_MAX)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("pg_tre: pending batch size %d exceeds max %d",
+                        n, PG_TRE_PENDING_BATCH_MAX)));
+
+    while (n > 0)
+    {
+        acquire_tail(index, &metabuf, &tailbuf, &tail_is_new);
+        tailpage = BufferGetPage(tailbuf);
+        metapage = BufferGetPage(metabuf);
+        hdr     = pending_header(tailpage);
+        entries = pending_entries(tailpage);
+
+        room = pending_capacity() - hdr->n_entries;
+        if (room <= 0)
+        {
+            /* Shouldn't happen: acquire_tail just checked.  Defensive. */
+            UnlockReleaseBuffer(tailbuf);
+            UnlockReleaseBuffer(metabuf);
+            continue;
+        }
+
+        int take = (n < room) ? n : room;
+        for (i = 0; i < take; i++)
+        {
+            PgTrePendingEntry *e = &entries[hdr->n_entries + i];
+            e->trigram_hash = *hashes++;
+            e->tid          = pg_tre_pack_tid((ItemPointer) tids);
+            e->position     = *positions++;
+            e->_pad         = 0;
+            tids++;
+        }
+        hdr->n_entries  += take;
+        hdr->used_bytes  = hdr->n_entries * sizeof(PgTrePendingEntry);
+        ((PageHeader) tailpage)->pd_lower =
+            (char *) &entries[hdr->n_entries] - (char *) tailpage;
+
+        PgTreMetaPageGet(metapage)->pending_n_entries += take;
+
+        MarkBufferDirty(tailbuf);
+        MarkBufferDirty(metabuf);
+
+        if (RelationNeedsWAL(index))
+        {
+            XLogRecPtr recptr;
+            XLogBeginInsert();
+            XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+            XLogRegisterBuffer(1, tailbuf,
+                               REGBUF_STANDARD |
+                               (tail_is_new ? REGBUF_WILL_INIT : 0));
+            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_INSERT);
+            PageSetLSN(tailpage, recptr);
+            PageSetLSN(metapage, recptr);
+        }
+
+        UnlockReleaseBuffer(tailbuf);
+        UnlockReleaseBuffer(metabuf);
+
+        hashes    += 0;    /* hashes already advanced above */
+        positions += 0;    /* positions already advanced above */
+        n         -= take;
+    }
+}
+
+void
+pg_tre_pending_append(Relation index, uint64 trigram_hash,
+                      ItemPointer tid, uint32 position)
+{
+    ItemPointerData one_tid = *tid;
+    pg_tre_pending_append_batch(index, &trigram_hash, &one_tid, &position, 1);
+}
+
+/* --------------------------------------------------------------------
+ * Scan path (union into live queries + merge ingest)
+ * -------------------------------------------------------------------- */
+
+void
+pg_tre_pending_scan(Relation index, PgTrePendingCallback callback, void *ctx)
+{
+    PgTreMetaPageData meta;
+    BlockNumber blk;
+
+    pg_tre_meta_read(index, &meta);
+    blk = meta.pending_head;
+
+    while (blk != InvalidBlockNumber)
+    {
+        Buffer  buf = pg_tre_read(index, blk, PG_TRE_PAGE_PENDING,
+                                  BUFFER_LOCK_SHARE);
+        Page    page = BufferGetPage(buf);
+        PgTrePendingHeader *hdr = pending_header(page);
+        PgTrePendingEntry  *ent = pending_entries(page);
+        BlockNumber next = hdr->next_page;
+        int n = hdr->n_entries;
+        int i;
+
+        for (i = 0; i < n; i++)
+        {
+            ItemPointerData tid;
+            pg_tre_unpack_tid(ent[i].tid, &tid);
+            callback(ent[i].trigram_hash, &tid, ent[i].position, ctx);
+        }
+
+        UnlockReleaseBuffer(buf);
+        blk = next;
+    }
+}
+
+/* --------------------------------------------------------------------
+ * Merge path
+ * --------------------------------------------------------------------
+ *
+ * Strategy: collect pending-list entries into an in-memory hash of
+ * (trigram_hash -> TID set), compute the union with each existing
+ * posting, and rebuild the upper tree from scratch using the merged
+ * postings plus any existing postings that weren't touched.
+ */
+
+typedef struct MergeEntry
+{
+    uint64       trigram_hash;
+    sparsemap_t *new_tids;       /* malloc-backed accumulator */
+    bool         seen_in_upper;  /* set during upper walk */
+    BlockNumber  merged_root;    /* posting root after merge */
+    uint8       *merged_inline;  /* inline blob after merge (palloc) */
+    Size         merged_inline_bytes;
+} MergeEntry;
+
+typedef struct MergeCtx
+{
+    MergeEntry **bucket_tab;     /* open addressing hash table */
+    int          bucket_cap;
+    int          n_entries;
+    MemoryContext mcxt;
+} MergeCtx;
+
+static int
+hash_bucket(uint64 h, int cap)
+{
+    return (int) (h % (uint64) cap);
+}
+
+static MergeEntry *
+merge_find(MergeCtx *mc, uint64 h, bool create)
+{
+    int idx = hash_bucket(h, mc->bucket_cap);
+    int probes = 0;
+
+    while (mc->bucket_tab[idx] != NULL)
+    {
+        if (mc->bucket_tab[idx]->trigram_hash == h)
+            return mc->bucket_tab[idx];
+        idx = (idx + 1) % mc->bucket_cap;
+        if (++probes > mc->bucket_cap)
+            elog(ERROR, "pg_tre: merge hash table full");
+    }
+
+    if (!create)
+        return NULL;
+
+    /* Rehash if load factor exceeded. */
+    if (mc->n_entries * 2 >= mc->bucket_cap)
+    {
+        int old_cap = mc->bucket_cap;
+        MergeEntry **old_tab = mc->bucket_tab;
+        int i;
+
+        mc->bucket_cap = old_cap * 2;
+        mc->bucket_tab = MemoryContextAllocZero(mc->mcxt,
+                            mc->bucket_cap * sizeof(MergeEntry *));
+
+        for (i = 0; i < old_cap; i++)
+        {
+            if (old_tab[i] == NULL)
+                continue;
+            int j = hash_bucket(old_tab[i]->trigram_hash, mc->bucket_cap);
+            while (mc->bucket_tab[j] != NULL)
+                j = (j + 1) % mc->bucket_cap;
+            mc->bucket_tab[j] = old_tab[i];
+        }
+        pfree(old_tab);
+
+        return merge_find(mc, h, create);
+    }
+
+    {
+        MergeEntry *e = MemoryContextAllocZero(mc->mcxt, sizeof(*e));
+        e->trigram_hash        = h;
+        e->new_tids            = sparsemap(1024);
+        e->merged_root         = InvalidBlockNumber;
+        e->merged_inline       = NULL;
+        e->merged_inline_bytes = 0;
+        e->seen_in_upper       = false;
+
+        mc->bucket_tab[idx] = e;
+        mc->n_entries++;
+        return e;
+    }
 }
 
 /*
- * Append one entry to the pending list.  Phase 4 allocates a tail
- * page if needed, packs the entry, WAL-logs, and updates meta.
+ * Collect pending-list entries into the merge hash.
  */
-void
-pg_tre_pending_append(Relation index, uint64 trigram_hash, ItemPointer tid,
-                      uint32 position)
+static void
+collect_pending_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
 {
-    /*
-     * Phase 4: extend pending list tail page, pack PgTrePendingEntry,
-     * update meta.pending_tail and meta.pending_n_entries, WAL-log.
-     */
-    elog(ERROR, "pg_tre: pending list not yet implemented (Phase 4)");
+    MergeCtx *mc = (MergeCtx *) ctx;
+    MergeEntry *e;
+    uint64 packed;
+    uint64 rc;
+
+    (void) position;     /* Phase 4 ignores positions; Phase 5 uses them */
+    e = merge_find(mc, hash, true);
+    packed = pg_tre_pack_tid(tid);
+
+    rc = sparsemap_add(e->new_tids, packed);
+    if (rc == SPARSEMAP_IDX_MAX)
+    {
+        size_t cap = sparsemap_get_capacity(e->new_tids);
+        size_t nxt = cap == 0 ? 1024 : cap * 2;
+        sparsemap_t *grown = sparsemap_set_data_size(e->new_tids, NULL, nxt);
+        if (grown == NULL)
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                errmsg("pg_tre: merge accumulator grow failed")));
+        e->new_tids = grown;
+        rc = sparsemap_add(e->new_tids, packed);
+        if (rc == SPARSEMAP_IDX_MAX)
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("pg_tre: sparsemap_add post-grow failed")));
+    }
 }
 
 /*
- * Iterate over pending-list entries, invoking callback for each.
- * Phase 4 implements sequential scan of the page chain from head to tail.
+ * Iterator over merged postings for upper-tree bulkload.  Walks both
+ * the existing upper tree AND the hash of pending-merged entries,
+ * yielding them in sorted (trigram_hash) order.  For each trigram:
+ *   - if new in pending and absent in upper: union new only
+ *   - if in both: union existing + new
+ *   - if only in upper: pass through unchanged
  */
-void
-pg_tre_pending_scan(Relation index,
-                    void (*callback)(uint64 hash, ItemPointer tid,
-                                     uint32 position, void *ctx),
-                    void *ctx)
+typedef struct UpperRebuildIter
 {
-    /*
-     * Phase 4: walk pages from meta.pending_head to meta.pending_tail,
-     * unpacking PgTrePendingEntry[] and invoking callback.
-     */
-    elog(ERROR, "pg_tre: pending list scan not yet implemented (Phase 4)");
+    MergeEntry **sorted;
+    int          n_sorted;
+    int          i_sorted;
+
+    /* For upper-tree walk (existing entries): */
+    Relation     index;
+    Buffer       upper_buf;      /* pinned + share-locked */
+    int          upper_idx;
+    int          upper_n;
+    PgTreUpperLeafEntry *upper_entries;
+
+    MemoryContext mcxt;
+    MergeCtx    *mc;
+} UpperRebuildIter;
+
+static int
+cmp_merge_hash(const void *a, const void *b)
+{
+    MergeEntry * const *ea = a;
+    MergeEntry * const *eb = b;
+    if ((*ea)->trigram_hash < (*eb)->trigram_hash) return -1;
+    if ((*ea)->trigram_hash > (*eb)->trigram_hash) return 1;
+    return 0;
 }
 
-/*
- * Consume the pending list and merge it into posting trees.  Phase 4
- * implements sort-merge bulk update with WAL consistency.
- */
-void
+/* Pre-materialize the "merged posting" for each MergeEntry: union
+ * existing posting with new_tids, serialize.  Called once before
+ * rebuild iteration starts. */
+static void
+materialize_merged_postings(Relation index, MergeCtx *mc)
+{
+    int i;
+    for (i = 0; i < mc->bucket_cap; i++)
+    {
+        MergeEntry *e = mc->bucket_tab[i];
+        PgTreUpperRef ref;
+        sparsemap_t *existing;
+        sparsemap_t *merged;
+        uint64 min_idx, max_idx, idx;
+        size_t sz;
+        uint8 *out_buf;
+        Size out_cap;
+        sparsemap_t *fresh;
+
+        if (e == NULL)
+            continue;
+
+        existing = NULL;
+        if (pg_tre_upper_lookup(index, e->trigram_hash, &ref))
+        {
+            existing = pg_tre_posting_materialize(index, ref.root,
+                                                  ref.inline_data,
+                                                  ref.inline_bytes);
+            pg_tre_upper_release(&ref);
+            e->seen_in_upper = true;
+        }
+
+        if (existing != NULL)
+        {
+            merged = sparsemap_union(existing, e->new_tids);
+            free(existing);
+        }
+        else
+        {
+            merged = sparsemap_copy(e->new_tids);
+        }
+        free(e->new_tids);
+        e->new_tids = merged;
+
+        /*
+         * Re-serialize to a palloc'd buffer (same trick as posting.c's
+         * build_finish).
+         */
+        sz = sparsemap_get_size(merged);
+        out_cap = (sz == 0) ? 16 : sz + 16;
+        out_buf = MemoryContextAllocZero(mc->mcxt, out_cap);
+        fresh = sparsemap_wrap(out_buf, out_cap);
+
+        min_idx = sparsemap_minimum(merged);
+        max_idx = sparsemap_maximum(merged);
+        if (sparsemap_cardinality(merged) > 0)
+        {
+            for (idx = min_idx; idx <= max_idx; idx++)
+            {
+                if (sparsemap_contains(merged, idx))
+                {
+                    if (sparsemap_add(fresh, idx) == SPARSEMAP_IDX_MAX)
+                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("pg_tre: merge serialize overflow")));
+                }
+                if (idx == max_idx) break;
+            }
+        }
+        sz = sparsemap_get_size(fresh);
+        free(fresh);
+
+        /* Decide inline vs on-disk leaf. */
+        if (sz <= PG_TRE_INLINE_POSTING_MAX)
+        {
+            e->merged_inline       = out_buf;
+            e->merged_inline_bytes = sz;
+            e->merged_root         = InvalidBlockNumber;
+        }
+        else
+        {
+            /*
+             * For merged postings too big for inline: build a single
+             * posting leaf via the Phase 2 builder.  We can't reuse
+             * write_single_leaf directly (static), but the builder API
+             * works fine.
+             */
+            PgTrePostingBuilder *b = pg_tre_posting_build_begin(
+                                          index, e->trigram_hash, false);
+            uint64 k;
+            if (sparsemap_cardinality(merged) > 0)
+            {
+                for (k = min_idx; k <= max_idx; k++)
+                {
+                    if (sparsemap_contains(merged, k))
+                    {
+                        ItemPointerData tid;
+                        pg_tre_unpack_tid(k, &tid);
+                        pg_tre_posting_build_add(b, &tid, NULL, 0, NULL);
+                    }
+                    if (k == max_idx) break;
+                }
+            }
+            {
+                const uint8 *id;
+                Size ib;
+                e->merged_root = pg_tre_posting_build_finish(b, &id, &ib);
+                if (e->merged_root == InvalidBlockNumber)
+                {
+                    /* Unexpected: builder chose inline after all. */
+                    e->merged_inline = (uint8 *) id;
+                    e->merged_inline_bytes = ib;
+                }
+            }
+            pg_tre_posting_build_free(b);
+            pfree(out_buf);
+        }
+
+        free(merged);
+        e->new_tids = NULL;
+    }
+}
+
+/* Iterator that produces sorted (hash, root_or_inline) entries merging
+ * the existing upper-tree leaf with MergeEntry overrides. */
+typedef struct RebuildState
+{
+    MergeEntry **sorted;
+    int          n_sorted;
+    int          i_sorted;
+
+    /* Snapshot of existing upper-tree leaf entries (palloc'd copy). */
+    PgTreUpperLeafEntry *existing;
+    int          n_existing;
+    int          i_existing;
+
+    /* When we pass through an existing entry, we need the inline bytes
+     * to remain valid after the upper rebuild has released its buffer.
+     * So materialize entries to palloc'd copies up front. */
+    uint8      **existing_inline;
+} RebuildState;
+
+static bool
+rebuild_iter(void *ctx, uint64 *hash, BlockNumber *root,
+             const uint8 **inline_data, Size *inline_bytes)
+{
+    RebuildState *r = ctx;
+
+    while (true)
+    {
+        MergeEntry            *m = (r->i_sorted   < r->n_sorted)
+                                      ? r->sorted[r->i_sorted] : NULL;
+        PgTreUpperLeafEntry   *e = (r->i_existing < r->n_existing)
+                                      ? &r->existing[r->i_existing] : NULL;
+
+        if (m == NULL && e == NULL)
+            return false;
+
+        /* Choose the smallest hash from the two streams. */
+        if (m == NULL ||
+            (e != NULL && e->trigram_hash < m->trigram_hash))
+        {
+            *hash         = e->trigram_hash;
+            *root         = e->posting_root;
+            *inline_data  = r->existing_inline[r->i_existing];
+            *inline_bytes = e->inline_bytes;
+            r->i_existing++;
+            return true;
+        }
+
+        if (e == NULL || m->trigram_hash < e->trigram_hash)
+        {
+            *hash         = m->trigram_hash;
+            *root         = m->merged_root;
+            *inline_data  = m->merged_inline;
+            *inline_bytes = m->merged_inline_bytes;
+            r->i_sorted++;
+            return true;
+        }
+
+        /* Equal: emit merged (which already includes existing). */
+        *hash         = m->trigram_hash;
+        *root         = m->merged_root;
+        *inline_data  = m->merged_inline;
+        *inline_bytes = m->merged_inline_bytes;
+        r->i_sorted++;
+        r->i_existing++;
+        return true;
+    }
+}
+
+/* Snapshot the existing upper-tree leaf's entries into palloc'd
+ * storage so we can release the buffer before rebuilding. */
+static void
+snapshot_existing_upper(Relation index, RebuildState *r,
+                        MemoryContext mcxt)
+{
+    PgTreMetaPageData meta;
+    Buffer  buf;
+    Page    page;
+    PageTreOpaque opq;
+    int     i;
+
+    pg_tre_meta_read(index, &meta);
+    if (meta.root_upper == InvalidBlockNumber)
+    {
+        r->existing        = NULL;
+        r->existing_inline = NULL;
+        r->n_existing      = 0;
+        r->i_existing      = 0;
+        return;
+    }
+
+    buf = pg_tre_read(index, meta.root_upper, PG_TRE_PAGE_INVALID,
+                      BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    opq  = PageTreGetOpaque(page);
+
+    if (opq->page_kind != PG_TRE_PAGE_UPPER_L)
+    {
+        /*
+         * Multi-level upper tree support requires a walk; Phase 4
+         * fixtures stay inside a single leaf.  Raise cleanly if we hit
+         * a larger tree; Phase 8 generalizes.
+         */
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("pg_tre: pending-list merge on multi-level upper "
+                        "tree not yet supported"),
+                 errhint("Rebuild the index with REINDEX to consolidate.")));
+    }
+
+    {
+        int n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData)) /
+                sizeof(PgTreUpperLeafEntry);
+        PgTreUpperLeafEntry *src =
+            (PgTreUpperLeafEntry *) PageGetContents(page);
+
+        r->n_existing      = n;
+        r->i_existing      = 0;
+        r->existing        = MemoryContextAlloc(mcxt,
+                               n * sizeof(PgTreUpperLeafEntry));
+        r->existing_inline = MemoryContextAllocZero(mcxt,
+                               n * sizeof(uint8 *));
+
+        for (i = 0; i < n; i++)
+        {
+            r->existing[i] = src[i];
+            if (src[i].inline_bytes > 0)
+            {
+                /* Inline data follows the entry array; but Agent B's
+                 * upper.c stores it differently.  For Phase 4 we rely
+                 * on pg_tre_upper_lookup to fetch inline bytes on
+                 * demand rather than coping from the buffer layout. */
+                PgTreUpperRef ref;
+                if (pg_tre_upper_lookup(index, src[i].trigram_hash, &ref))
+                {
+                    if (ref.inline_bytes > 0 && ref.inline_data != NULL)
+                    {
+                        uint8 *copy = MemoryContextAlloc(mcxt,
+                                         ref.inline_bytes);
+                        memcpy(copy, ref.inline_data, ref.inline_bytes);
+                        r->existing_inline[i]    = copy;
+                        r->existing[i].inline_bytes = ref.inline_bytes;
+                    }
+                    pg_tre_upper_release(&ref);
+                }
+            }
+        }
+    }
+
+    UnlockReleaseBuffer(buf);
+}
+
+/* Truncate the pending list (unlink pages from meta, rely on VACUUM
+ * to reclaim -- we simply set head=tail=invalid). */
+static void
+truncate_pending_list(Relation index)
+{
+    Buffer metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                                  BUFFER_LOCK_EXCLUSIVE);
+    Page   page = BufferGetPage(metabuf);
+    PgTreMetaPage m = PgTreMetaPageGet(page);
+
+    m->pending_head       = InvalidBlockNumber;
+    m->pending_tail       = InvalidBlockNumber;
+    m->pending_n_entries  = 0;
+
+    MarkBufferDirty(metabuf);
+
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_MERGE_C);
+        PageSetLSN(page, recptr);
+    }
+
+    UnlockReleaseBuffer(metabuf);
+}
+
+uint64
 pg_tre_pending_merge(Relation index)
 {
-    /*
-     * Phase 4: read pending list, sort by trigram_hash, update posting
-     * trees in batch, WAL-log merge, reset meta.pending_head/tail.
-     */
-    elog(ERROR, "pg_tre: pending list merge not yet implemented (Phase 4)");
+    PgTreMetaPageData meta;
+    MemoryContext     merge_cxt, old;
+    MergeCtx          mc;
+    RebuildState      rs;
+    int               i, k;
+    BlockNumber       new_root;
+    uint64            n_merged;
+
+    pg_tre_meta_read(index, &meta);
+    if (meta.pending_head == InvalidBlockNumber)
+        return 0;
+
+    merge_cxt = AllocSetContextCreate(CurrentMemoryContext,
+                                      "pg_tre merge", ALLOCSET_DEFAULT_SIZES);
+    old = MemoryContextSwitchTo(merge_cxt);
+
+    memset(&mc, 0, sizeof(mc));
+    mc.bucket_cap = 256;
+    mc.bucket_tab = MemoryContextAllocZero(merge_cxt,
+                       mc.bucket_cap * sizeof(MergeEntry *));
+    mc.mcxt       = merge_cxt;
+
+    pg_tre_pending_scan(index, collect_pending_cb, &mc);
+    n_merged = meta.pending_n_entries;
+
+    materialize_merged_postings(index, &mc);
+
+    /* Build a sorted array of MergeEntry pointers. */
+    rs.sorted  = MemoryContextAlloc(merge_cxt,
+                    mc.n_entries * sizeof(MergeEntry *));
+    k = 0;
+    for (i = 0; i < mc.bucket_cap; i++)
+        if (mc.bucket_tab[i] != NULL)
+            rs.sorted[k++] = mc.bucket_tab[i];
+    Assert(k == mc.n_entries);
+    qsort(rs.sorted, k, sizeof(MergeEntry *), cmp_merge_hash);
+    rs.n_sorted  = k;
+    rs.i_sorted  = 0;
+
+    snapshot_existing_upper(index, &rs, merge_cxt);
+
+    /* Rebuild the upper tree from the merged stream. */
+    new_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
+
+    /* Update meta: new root_upper and truncate pending list. */
+    pg_tre_meta_set_roots(index, new_root, meta.root_range,
+                          (uint64) k, meta.n_tuples_indexed);
+    truncate_pending_list(index);
+
+    /* Free sparsemap handles (new_tids cleared in materialize). */
+    for (i = 0; i < mc.bucket_cap; i++)
+    {
+        if (mc.bucket_tab[i] && mc.bucket_tab[i]->new_tids)
+            free(mc.bucket_tab[i]->new_tids);
+    }
+
+    MemoryContextSwitchTo(old);
+    MemoryContextDelete(merge_cxt);
+
+    return n_merged;
 }

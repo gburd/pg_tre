@@ -28,6 +28,7 @@
 
 #include "pg_tre/amapi.h"
 #include "pg_tre/page.h"
+#include "pg_tre/pending.h"
 #include "pg_tre/posting.h"
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/sparsemap.h"
@@ -121,20 +122,127 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 }
 
 /*
+ * Pending-list overlay: for each trigram that appears in the query,
+ * collect the set of TIDs referenced in the pending list.  This map
+ * is built once per scan, then OR-ed into each disjunct's posting
+ * during resolve_conjunct below.
+ */
+typedef struct PendingOverlayEntry
+{
+    uint64       trigram_hash;
+    sparsemap_t *tids;         /* malloc-backed */
+} PendingOverlayEntry;
+
+typedef struct PendingOverlay
+{
+    PendingOverlayEntry *entries;
+    int                  n;
+    int                  alloced;
+    MemoryContext        mcxt;
+    /* Fast look-up bloom: which trigram_hashes appeared in the query? */
+    const TrigramQuery  *q;
+} PendingOverlay;
+
+static bool
+query_wants_trigram(const TrigramQuery *q, uint64 h)
+{
+    int i, j;
+    for (i = 0; i < q->n; i++)
+    {
+        const TrigramConjunct *c = &q->conjuncts[i];
+        for (j = 0; j < c->n; j++)
+            if (c->alts[j].trigram_hash == h)
+                return true;
+    }
+    return false;
+}
+
+static PendingOverlayEntry *
+overlay_find_or_create(PendingOverlay *ov, uint64 h)
+{
+    int i;
+    for (i = 0; i < ov->n; i++)
+        if (ov->entries[i].trigram_hash == h)
+            return &ov->entries[i];
+
+    if (ov->n >= ov->alloced)
+    {
+        MemoryContext old = MemoryContextSwitchTo(ov->mcxt);
+        ov->alloced = (ov->alloced == 0) ? 16 : ov->alloced * 2;
+        ov->entries = ov->entries
+            ? repalloc(ov->entries, ov->alloced * sizeof(*ov->entries))
+            : palloc(ov->alloced * sizeof(*ov->entries));
+        MemoryContextSwitchTo(old);
+    }
+
+    ov->entries[ov->n].trigram_hash = h;
+    ov->entries[ov->n].tids         = sparsemap(512);
+    return &ov->entries[ov->n++];
+}
+
+static void
+overlay_collect_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
+{
+    PendingOverlay *ov = ctx;
+    PendingOverlayEntry *e;
+    uint64 packed;
+    uint64 rc;
+
+    (void) position;
+
+    if (!query_wants_trigram(ov->q, hash))
+        return;
+
+    e = overlay_find_or_create(ov, hash);
+    packed = pg_tre_pack_tid(tid);
+    rc = sparsemap_add(e->tids, packed);
+    if (rc == SPARSEMAP_IDX_MAX)
+    {
+        size_t cap = sparsemap_get_capacity(e->tids);
+        sparsemap_t *g = sparsemap_set_data_size(e->tids, NULL,
+                                                  cap == 0 ? 1024 : cap * 2);
+        if (g == NULL) return;  /* best-effort */
+        e->tids = g;
+        sparsemap_add(e->tids, packed);
+    }
+}
+
+static void
+overlay_build(PendingOverlay *ov, Relation index, const TrigramQuery *q,
+              MemoryContext mcxt)
+{
+    memset(ov, 0, sizeof(*ov));
+    ov->mcxt = mcxt;
+    ov->q    = q;
+    pg_tre_pending_scan(index, overlay_collect_cb, ov);
+}
+
+static sparsemap_t *
+overlay_lookup(const PendingOverlay *ov, uint64 h)
+{
+    int i;
+    for (i = 0; i < ov->n; i++)
+        if (ov->entries[i].trigram_hash == h)
+            return ov->entries[i].tids;
+    return NULL;
+}
+
+static void
+overlay_free(PendingOverlay *ov)
+{
+    int i;
+    for (i = 0; i < ov->n; i++)
+        if (ov->entries[i].tids)
+            free(ov->entries[i].tids);
+}
+
+/*
  * Build the candidate TID sparsemap for one conjunct: OR of its
- * disjuncts.  Returns a palloc'd sparsemap or NULL when the OR is
- * empty (no TIDs match any disjunct in this conjunct -- the whole
- * query has zero matches).
- *
- * Caller is responsible for freeing via free() (it's an owned
- * sparsemap handle) and pfreeing the backing buffer... but since
- * materialized sparsemaps are wrap()-ed over palloc'd buffers that
- * live in CurrentMemoryContext, releasing the context reclaims
- * everything.
+ * disjuncts, including the pending-list overlay for each trigram.
  */
 static sparsemap_t *
-resolve_conjunct(Relation index, const TrigramConjunct *conj,
-                 MemoryContext cxt)
+resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
+                              MemoryContext cxt, const PendingOverlay *ov)
 {
     sparsemap_t *accum = NULL;
     int i;
@@ -142,15 +250,34 @@ resolve_conjunct(Relation index, const TrigramConjunct *conj,
     for (i = 0; i < conj->n; i++)
     {
         PgTreUpperRef ref;
-        sparsemap_t  *sm;
+        sparsemap_t  *sm = NULL;
+        sparsemap_t  *pend;
 
-        if (!pg_tre_upper_lookup(index, conj->alts[i].trigram_hash, &ref))
-            continue;               /* trigram absent from index */
+        if (pg_tre_upper_lookup(index, conj->alts[i].trigram_hash, &ref))
+        {
+            sm = pg_tre_posting_materialize(index, ref.root,
+                                            ref.inline_data,
+                                            ref.inline_bytes);
+            pg_tre_upper_release(&ref);
+        }
 
-        sm = pg_tre_posting_materialize(index, ref.root,
-                                        ref.inline_data,
-                                        ref.inline_bytes);
-        pg_tre_upper_release(&ref);
+        pend = overlay_lookup(ov, conj->alts[i].trigram_hash);
+        if (pend != NULL)
+        {
+            if (sm == NULL)
+            {
+                sm = sparsemap_copy(pend);
+            }
+            else
+            {
+                sparsemap_t *u = sparsemap_union(sm, pend);
+                free(sm);
+                sm = u;
+            }
+        }
+
+        if (sm == NULL)
+            continue;   /* neither index nor pending has this trigram */
 
         if (accum == NULL)
         {
@@ -158,16 +285,15 @@ resolve_conjunct(Relation index, const TrigramConjunct *conj,
         }
         else
         {
-            MemoryContext old = MemoryContextSwitchTo(cxt);
             sparsemap_t *merged = sparsemap_union(accum, sm);
-            MemoryContextSwitchTo(old);
             free(accum);
             free(sm);
             accum = merged;
         }
     }
 
-    return accum;   /* may be NULL: no posting found for any alt */
+    (void) cxt;
+    return accum;
 }
 
 /*
@@ -230,44 +356,56 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
     old = MemoryContextSwitchTo(st->scan_cxt);
 
     /*
-     * Walk conjuncts (AND): for each, compute the OR of its disjuncts;
-     * intersect into `result`.  Bail early if any conjunct produces
-     * NULL -- that means no rows match the AND-of-ORs query.
+     * Build the pending-list overlay once.  If the index has no
+     * pending entries, this is a single metapage read and returns
+     * immediately.
      */
-    for (i = 0; i < st->q.n; i++)
     {
-        sparsemap_t *sm = resolve_conjunct(scan->indexRelation,
-                                           &st->q.conjuncts[i],
-                                           st->scan_cxt);
-        if (sm == NULL)
-        {
-            /* No posting found for any disjunct in this conjunct --
-             * nothing matches. */
-            if (result != NULL) free(result);
-            result = NULL;
-            goto done;
-        }
+        PendingOverlay ov;
+        overlay_build(&ov, scan->indexRelation, &st->q, st->scan_cxt);
 
-        if (result == NULL)
+        /*
+         * Walk conjuncts (AND): for each, compute the OR of its disjuncts;
+         * intersect into `result`.  Bail early if any conjunct produces
+         * NULL -- that means no rows match the AND-of-ORs query.
+         */
+        for (i = 0; i < st->q.n; i++)
         {
-            result = sm;
-        }
-        else
-        {
-            sparsemap_t *merged = sparsemap_intersection(result, sm);
-            free(result);
-            free(sm);
-            result = merged;
-            if (result == NULL ||
-                (sparsemap_get_size(result) != 0 &&
-                 sparsemap_cardinality(result) == 0))
+            sparsemap_t *sm = resolve_conjunct_with_overlay(
+                                  scan->indexRelation,
+                                  &st->q.conjuncts[i],
+                                  st->scan_cxt, &ov);
+            if (sm == NULL)
             {
-                /* Intersection empty. */
-                if (result) free(result);
+                if (result != NULL) free(result);
                 result = NULL;
+                overlay_free(&ov);
                 goto done;
             }
+
+            if (result == NULL)
+            {
+                result = sm;
+            }
+            else
+            {
+                sparsemap_t *merged = sparsemap_intersection(result, sm);
+                free(result);
+                free(sm);
+                result = merged;
+                if (result == NULL ||
+                    (sparsemap_get_size(result) != 0 &&
+                     sparsemap_cardinality(result) == 0))
+                {
+                    if (result) free(result);
+                    result = NULL;
+                    overlay_free(&ov);
+                    goto done;
+                }
+            }
         }
+
+        overlay_free(&ov);
     }
 
 done:

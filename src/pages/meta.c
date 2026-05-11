@@ -133,7 +133,11 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
     meta->n_trigrams = n_trigrams;
     meta->n_tuples_indexed = n_tuples_indexed;
 
-    /* WAL-log the update. */
+    MarkBufferDirty(metabuf);
+
+    /* WAL-log the update.  MarkBufferDirty must precede
+     * XLogRegisterBuffer (PG18 asserts buffer is dirty + exclusively
+     * locked). */
     if (RelationNeedsWAL(index))
     {
         XLogRecPtr recptr;
@@ -145,6 +149,5 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
         PageSetLSN(metapage, recptr);
     }
 
-    MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
 }

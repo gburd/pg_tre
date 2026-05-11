@@ -77,11 +77,14 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_UPPER_INSERT:
         case XLOG_PTRE_UPPER_SPLIT:
         case XLOG_PTRE_POSTING_INSERT:
+        case XLOG_PTRE_PENDING_INSERT:
+        case XLOG_PTRE_PENDING_MERGE_B:
+        case XLOG_PTRE_PENDING_MERGE_C:
             /*
-             * Phase 2 emits these as full-page images (REGBUF_WILL_INIT +
-             * REGBUF_STANDARD) during bulk build.  Generic FPI redo is
-             * correct.  Phase 4 adds delta records that will need their
-             * own branches.
+             * Phase 2/4 emit these as full-page images.  The generic
+             * FPI replay is correct for all of them today; Phase 7/8
+             * hardening can introduce delta records that add their own
+             * branches here.
              */
             pg_tre_redo_fpi(record);
             break;
@@ -89,9 +92,6 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_POSTING_DELETE:
         case XLOG_PTRE_POSTING_SPLIT:
         case XLOG_PTRE_RANGE_UPDATE:
-        case XLOG_PTRE_PENDING_INSERT:
-        case XLOG_PTRE_PENDING_MERGE_B:
-        case XLOG_PTRE_PENDING_MERGE_C:
         case XLOG_PTRE_VACUUM:
             elog(PANIC, "pg_tre: redo for info 0x%02X not yet implemented",
                  info);
