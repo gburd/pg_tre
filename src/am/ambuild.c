@@ -48,6 +48,7 @@
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/posting.h"
+#include "pg_tre/range.h"
 #include "pg_tre/upper.h"
 
 /* In-memory sort entry: (trigram_hash, tid, position). */
@@ -543,9 +544,21 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     root_upper = pg_tre_upper_bulkload(index, upper_iter, &iter_state);
 
-    /* Step 7: update meta page with roots and stats. */
-    pg_tre_meta_set_roots(index, root_upper, InvalidBlockNumber,
-                          (uint64) n_accums, (uint64) bstate.heap_tuples);
+    /* Step 6.5: bulk-load range tier from postings (Phase 5). */
+    {
+        BlockNumber root_range = InvalidBlockNumber;
+
+        if (pg_tre_tuple_bloom_enable)
+        {
+            /* Reset iterator and build range tree. */
+            iter_state.current = 0;
+            root_range = pg_tre_range_bulkload(index, upper_iter, &iter_state);
+        }
+
+        /* Step 7: update meta page with roots and stats. */
+        pg_tre_meta_set_roots(index, root_upper, root_range,
+                              (uint64) n_accums, (uint64) bstate.heap_tuples);
+    }
 
     MemoryContextSwitchTo(oldcxt);
     MemoryContextDelete(bstate.tmpctx);
