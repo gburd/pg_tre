@@ -97,8 +97,14 @@ typedef struct PgTreMetaPageData
     uint64      n_tuples_indexed;       /* approximate tuple count */
     TransactionId created_xid;
 
+    /* Phase 6: posting cardinality statistics for cost estimation */
+    uint64      mean_posting_cardinality;   /* average posting list size */
+    uint64      min_posting_cardinality;
+    uint64      max_posting_cardinality;
+    uint64      stddev_posting_cardinality; /* approximate stddev */
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[32];
+    uint32      reserved[28];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;

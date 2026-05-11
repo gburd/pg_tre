@@ -18,7 +18,7 @@ EXTENSION    = pg_tre
 MODULE_big   = pg_tre
 DATA         = sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
