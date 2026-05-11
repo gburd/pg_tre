@@ -45,6 +45,7 @@ OBJS = \
     src/util/pattern_cache.o \
     src/util/tre_match.o \
     src/util/sparsemap.o \
+    src/util/bloom.o \
     src/util/hash.o \
     src/util/type_pattern.o \
     src/am/amapi.o \

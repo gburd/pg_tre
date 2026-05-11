@@ -96,13 +96,9 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
     pattern_str = tre_pattern_get_text(pat, &pattern_len);
     max_cost = tre_pattern_get_max_cost(pat);
 
-    if (max_cost > 0)
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("pg_tre: approximate matching (max_cost > 0) "
-                        "lands in Phase 5"),
-                 errhint("Use tre_pattern(..., 0) or the legacy "
-                         "tre_amatch() function for now.")));
+    /* Phase 5: k > 0 is now supported via tiling + three-tier filtering.
+     * Extraction may still return always_true if the pattern defeats tiling
+     * (too short, no literal runs, etc.); amgetbitmap handles that case. */
 
     /* Parse regex into AST. */
     if (!tre_parse_regex(&st->parse_ctx, pattern_str, pattern_len))
@@ -111,8 +107,8 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
                  errmsg("pg_tre: invalid regex pattern: %s",
                         st->parse_ctx.errmsg)));
 
-    /* Extract trigram query. */
-    if (!regex_extract_query(&st->parse_ctx, 0, &st->q))
+    /* Extract trigram query (now handles k > 0 via tiling). */
+    if (!regex_extract_query(&st->parse_ctx, max_cost, &st->q))
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: trigram extraction failed")));

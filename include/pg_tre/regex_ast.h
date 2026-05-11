@@ -119,13 +119,20 @@ typedef struct TrigramConjunct
     TrigramDisjunct  *alts;   /* OR of these; any one must match */
 } TrigramConjunct;
 
+typedef enum TrigramQueryMode
+{
+    TRIGRAM_QUERY_CNF = 0,   /* conjunctive normal form: AND of ORs (default) */
+    TRIGRAM_QUERY_DNF = 1    /* disjunctive normal form: OR of ANDs (tiled k>0) */
+} TrigramQueryMode;
+
 typedef struct TrigramQuery
 {
     int32             n;       /* 0 means ALL_TIDS (defeated extraction) */
-    TrigramConjunct  *conjuncts;   /* AND across all */
+    TrigramConjunct  *conjuncts;   /* AND across all (CNF) or OR (DNF) */
     int32             min_match_len;
     int32             global_max_cost;
     bool              always_true;  /* extraction gave up */
+    TrigramQueryMode  mode;         /* CNF or DNF */
 } TrigramQuery;
 
 extern bool regex_extract_query(TreParseCtx *ctx, int32 max_cost,

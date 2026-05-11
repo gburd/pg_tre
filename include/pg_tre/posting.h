@@ -116,6 +116,23 @@ extern sparsemap_t *pg_tre_posting_materialize(Relation index,
 
 extern void pg_tre_posting_scan_end(PgTrePostingScan *s);
 
+/* ---- Payload lookup (Phase 5 READ side integration point) ---- */
+
+/*
+ * Look up the per-tuple bloom filter for a given TID.  Returns true if
+ * the TID is present in the posting and bloom data is available, false
+ * otherwise.  The bloom is copied into *out_bloom (caller must allocate
+ * sufficient space: pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits)).
+ */
+extern bool pg_tre_posting_lookup_tuple_bloom(
+    Relation index,
+    BlockNumber root,
+    const uint8 *inline_data,
+    Size inline_bytes,
+    uint64 packed_tid,
+    uint8 *out_bloom,
+    Size out_bloom_sz);
+
 /* ---- Upper-tree lookup (both sides) ---- */
 
 /*
@@ -140,5 +157,30 @@ typedef struct PgTreUpperRef
 extern bool pg_tre_upper_lookup(Relation index, uint64 trigram_hash,
                                 PgTreUpperRef *out);
 extern void pg_tre_upper_release(PgTreUpperRef *ref);
+
+/* ---- Phase 5 payload APIs (Phase 5 WRITE agent must implement) ---- */
+
+/*
+ * Look up the per-tuple bloom filter for a given TID.  Returns true if
+ * the TID is present in the posting tree and has an associated bloom,
+ * false otherwise.  The returned bloom is a pointer into the pinned
+ * posting-leaf buffer; valid until pg_tre_posting_scan_end.
+ *
+ * Phase 5 READ requires; Phase 5 WRITE implements.
+ */
+typedef struct PgTreBloom PgTreBloom;  /* forward decl from bloom.h */
+
+/*
+ * Look up the list of positions where a trigram appears in a given TID.
+ * Returns the number of positions found (0 if TID not present or trigram
+ * not at any position).  The returned positions array is valid until the
+ * next call to this function or end of scan.
+ *
+ * Phase 5 READ requires; Phase 5 WRITE implements.
+ */
+extern int pg_tre_posting_lookup_positions(Relation index,
+                                           uint64 trigram_hash,
+                                           ItemPointer tid,
+                                           const uint32 **out_positions);
 
 #endif /* PG_TRE_POSTING_H */

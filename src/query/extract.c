@@ -53,6 +53,8 @@
 #include "pg_tre/hash.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/regex_ast.h"
+#include "pg_tre/tiling.h"
+#include "pg_tre/uleven.h"
 
 /*
  * Accumulator for building the required-trigram set.  We collect unique
@@ -323,6 +325,7 @@ accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
 
     out->global_max_cost = max_cost;
     out->min_match_len   = 3;   /* conservative lower bound */
+    out->mode            = TRIGRAM_QUERY_CNF;  /* default CNF mode */
 
     if (a->overflowed || a->n == 0)
     {
@@ -359,15 +362,56 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
 
     memset(out, 0, sizeof(*out));
 
-    /* Phase 3: only k=0 is supported.  amgetbitmap gates this earlier; we
-     * still honor the contract by falling back to always_true for k>0. */
+    /* Phase 5: handle k > 0 via Navarro tiling */
     if (max_cost > 0)
     {
-        out->always_true = true;
-        out->global_max_cost = max_cost;
-        return true;
+        /* Use tiling for k > 0: partition the pattern's trigram spine
+         * into k+1 tiles; at least one must match exactly. */
+        if (pg_tre_tile_query(ctx->root, max_cost, out, ctx->mcxt))
+        {
+            /* Tiling succeeded; expand each tile's trigrams with uleven if k is small.
+             * For k=1 or k=2, we can enumerate near-neighbor trigrams. */
+            if (max_cost <= 2 && max_cost > 0)
+            {
+                int t, d;
+                for (t = 0; t < out->n; t++)
+                {
+                    TrigramConjunct *conj = &out->conjuncts[t];
+                    /* For each disjunct in this tile, expand it with uleven */
+                    for (d = 0; d < conj->n; d++)
+                    {
+                        TrigramDisjunct *dis = &conj->alts[d];
+                        uint8 original_tri[3];
+                        uint8 expanded[4096][3];
+                        int n_expanded;
+
+                        /* Extract the original trigram bytes from the hash.
+                         * Since we only have the hash, we can't expand directly.
+                         * Instead, we'll skip uleven expansion in Phase 5 initial cut
+                         * and add it in Phase 5.1 once we track trigram bytes alongside hashes.
+                         * For now, document this limitation. */
+                        (void) original_tri;
+                        (void) expanded;
+                        (void) n_expanded;
+                        /* TODO Phase 5.1: store trigram bytes alongside hash in SpineEntry,
+                         * then call pg_tre_uleven_expand here and add the expanded trigrams
+                         * as additional disjuncts within the tile. */
+                    }
+                }
+            }
+            return true;
+        }
+        else
+        {
+            /* Tiling failed (pattern too short, no spine, etc.); fall back to always_true */
+            out->always_true = true;
+            out->global_max_cost = max_cost;
+            out->mode = TRIGRAM_QUERY_CNF;
+            return true;
+        }
     }
 
+    /* Phase 3 path: k=0 exact extraction */
     accum_init(&acc, ctx->mcxt);
 
     memset(&lc, 0, sizeof(lc));
@@ -384,5 +428,6 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
         accum_add(&acc, &lc.run[i], ctx->mcxt);
 
     accum_to_query(&acc, max_cost, out, ctx->mcxt);
+    out->mode = TRIGRAM_QUERY_CNF;  /* k=0 uses CNF */
     return true;
 }

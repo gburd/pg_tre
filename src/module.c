@@ -34,6 +34,7 @@ int  pg_tre_max_nfa_states         = 10000;
 int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
+bool pg_tre_tuple_bloom_enable     = true;
 
 void
 pg_tre_init_guc(void)
@@ -91,6 +92,12 @@ pg_tre_init_guc(void)
         NULL,
         &pg_tre_fastupdate,
         true, PGC_USERSET, 0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("pg_tre.tuple_bloom_enable",
+        "Enable per-tuple bloom filters in posting leaves (Phase 5).",
+        NULL,
+        &pg_tre_tuple_bloom_enable,
+        true, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     MarkGUCPrefixReserved("pg_tre");
 }

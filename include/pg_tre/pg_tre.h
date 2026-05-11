@@ -27,6 +27,7 @@ extern int  pg_tre_max_nfa_states;
 extern int  pg_tre_compile_timeout_ms;
 extern int  pg_tre_match_timeout_ms;
 extern bool pg_tre_fastupdate;
+extern bool pg_tre_tuple_bloom_enable;
 
 /* Initialization entry points. */
 extern void pg_tre_init_guc(void);
