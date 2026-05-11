@@ -207,10 +207,51 @@ Blocked by: Phase 5 ambuild segfault, Phase 6 missing function exports.
 
 ## Phase 9 -- Docs & release
 
-- [ ] Full user docs (doc/pg_tre.md).
-- [ ] Migration guide 0.1.0 -> 1.0.0.
-- [ ] PGXN META.json, Homebrew tap, Debian/RPM templates.
-- [ ] Release checklist executed; 1.0.0 tag.
+- [x] Full user docs (doc/pg_tre.md) — 20 KB, 590 lines
+  * Introduction: what pg_tre does, when to use vs alternatives
+  * Installation: requirements, build, preload requirement
+  * Reference: types, operators, functions, GUCs, reloptions
+  * Usage cookbook: 5 query patterns with EXPLAIN output
+  * Performance notes: three-tier funnel, selectivity, debugging
+  * Known limitations: Phase 4 posting budget, UTF-8, DoS, positional
+  * Troubleshooting: common errors and fixes
+  * Internals pointers: links to design.md, onpage_format.md
+- [x] CHANGELOG.md — phase-by-phase history, commit-level detail
+  * Phases 0-7 complete sections
+  * Version history (0.1.0 baseline)
+  * Upgrade notes 0.1.0 → 1.0.0
+  * Links to documentation
+- [x] Migration guide (doc/migration-from-0.1.0.md) — 407 lines
+  * Prerequisites and upgrade steps
+  * What changes (added/unchanged/removed)
+  * Behavior changes (NOTICE output, safety limits)
+  * Rollback procedure
+  * Troubleshooting common upgrade issues
+  * Testing checklist
+- [x] Release checklist (doc/release-checklist.md) — 10 KB
+  * Pre-release QA: code quality, durability, safety, cross-platform
+  * Release process: tagging, announcement, distribution
+  * Post-release monitoring and versioning policy
+  * Rollback plan for critical bugs
+- [x] Announcement draft (doc/announcement.md) — 5 KB
+  * 1-2 paragraph summary for pgsql-announce
+  * Quick start example
+  * Performance numbers
+  * Links to documentation and repository
+- [x] README.md rewrite — reflects 1.0.0-rc1 candidate status
+  * Status badge: "1.0.0-rc1 candidate"
+  * Feature bullets: three-tier, k ≤ 3, native AM, WAL-logged, streaming replication
+  * Quick start: 5-line SQL example
+  * Links to doc/pg_tre.md, doc/design.md, CHANGELOG.md
+  * Testing status: regression tests PASS, TAP infrastructure READY
+  * Known blockers: FIXED (commit ff69090)
+- [ ] PGXN META.json (deferred: template in doc/pgxn-meta-template.json)
+- [ ] Homebrew formula (deferred: template in doc/homebrew-formula.rb)
+- [ ] Debian/RPM packaging (deferred: templates in doc/debian/, doc/rpm/)
+- [ ] Release checklist executed; 1.0.0 tag (pending: TAP tests + final review)
+
+Phase 9 DOCUMENTATION COMPLETE.  Packaging templates deferred to post-1.0.0.
+Release tag pending TAP test execution and final QA review.
 
 ## Known issues today
 
