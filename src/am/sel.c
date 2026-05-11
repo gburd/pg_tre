@@ -66,7 +66,16 @@ estimate_trigram_selectivity(TrigramQuery *q, PgTreMetaPageData *meta)
 
 	if (meta->n_trigrams == 0)
 	{
-		mean_density = 0.0001;
+		/* No stats yet: assume trigrams match a small fraction of rows. */
+		mean_density = 0.01;
+	}
+	else if (meta->mean_posting_cardinality == 0)
+	{
+		/* Stats partially populated: estimate via n_trigrams distribution.
+		 * Each trigram occurrence touches avg 1 row, so per-trigram density
+		 * is roughly 1/n_trigrams for random text. */
+		mean_density = 1.0 / (double) meta->n_trigrams;
+		if (mean_density < 0.0001) mean_density = 0.0001;
 	}
 	else
 	{
@@ -202,6 +211,18 @@ tre_pattern_sel(PG_FUNCTION_ARGS)
 	index = index_open(indexoid, AccessShareLock);
 	pg_tre_meta_read(index, &meta);
 	index_close(index, AccessShareLock);
+
+	/*
+	 * If the metapage stats are stale (indexed tuple count is much less
+	 * than the relation's current tuple count), prefer the relation stats.
+	 * This matters after INSERT + VACUUM cycles where pending merge
+	 * updates n_tuples_indexed only approximately.
+	 */
+	if (vardata.rel && vardata.rel->tuples > 0 &&
+	    vardata.rel->tuples > (double) meta.n_tuples_indexed * 2.0)
+	{
+		meta.n_tuples_indexed = (uint64) vardata.rel->tuples;
+	}
 
 	sel = estimate_trigram_selectivity(&q, &meta);
 

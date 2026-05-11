@@ -130,11 +130,16 @@ CREATE FUNCTION tre_match_scalar(text, tre_pattern)
     AS 'MODULE_PATHNAME', 'tre_match_scalar'
     LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION tre_pattern_sel(internal, oid, internal, int4)
+    RETURNS float8
+    AS 'MODULE_PATHNAME', 'tre_pattern_sel'
+    LANGUAGE C STRICT;
+
 CREATE OPERATOR %~~ (
     LEFTARG = text,
     RIGHTARG = tre_pattern,
     FUNCTION = tre_match_scalar,
-    RESTRICT = contsel
+    RESTRICT = tre_pattern_sel
 );
 
 COMMENT ON OPERATOR %~~ (text, tre_pattern) IS

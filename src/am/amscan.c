@@ -664,15 +664,28 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
         overlay_free(&ov);
     }
 
-    /* Phase 5 tier-3: apply per-tuple bloom filtering */
-    if (result != NULL && st->q.global_max_cost >= 0)
+    /* Phase 5 tier-3: apply per-tuple bloom filtering.
+     *
+     * Disabled pending a fix for a crash in sparsemap_rank during
+     * pg_tre_posting_lookup_tuple_bloom.  Tier-3 is an optimization;
+     * correctness does not depend on it -- the executor's recheck
+     * filters any false positives from tier-2.  Re-enable when the
+     * sparsemap_rank bug is resolved.
+     */
+    if (false && result != NULL && st->q.global_max_cost >= 0)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
                                          result, st->scan_cxt);
     }
 
-    /* Phase 5.1: apply positional filtering */
-    if (result != NULL && sparsemap_cardinality(result) > 0)
+    /* Phase 5.1: apply positional filtering.
+     *
+     * Disabled pending a fix for a crash in sparsemap_rank during
+     * pg_tre_posting_lookup_positions.  Correctness does not depend on
+     * positional filtering -- the executor's recheck handles false
+     * positives.  Re-enable when the sparsemap_rank bug is resolved.
+     */
+    if (false && result != NULL && sparsemap_cardinality(result) > 0)
     {
         sparsemap_t *filtered = sparsemap(sparsemap_get_capacity(result));
         if (filtered != NULL)

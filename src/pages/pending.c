@@ -813,9 +813,23 @@ pg_tre_pending_merge(Relation index)
     /* Rebuild the upper tree from the merged stream. */
     new_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
 
-    /* Update meta: new root_upper and truncate pending list. */
-    pg_tre_meta_set_roots(index, new_root, meta.root_range,
-                          (uint64) k, meta.n_tuples_indexed);
+    /*
+     * Update meta: new root_upper, truncate pending list, bump
+     * n_tuples_indexed by the distinct TIDs we saw in the pending
+     * list (approximation -- a TID appears multiple times with
+     * different trigrams).  For a better estimate we'd use
+     * RelationEstimateSize on the heap, but for Phase 4 the
+     * approximation is enough for the planner to make reasonable
+     * decisions post-merge.
+     */
+    {
+        uint64 new_n_tuples = meta.n_tuples_indexed;
+        uint64 tid_est = n_merged / 5;   /* avg ~5 trigrams per row */
+        if (tid_est > 0)
+            new_n_tuples += tid_est;
+        pg_tre_meta_set_roots(index, new_root, meta.root_range,
+                              (uint64) k, new_n_tuples);
+    }
     truncate_pending_list(index);
 
     /* No sparsemap handles to free (tids arrays are palloc'd in merge_cxt

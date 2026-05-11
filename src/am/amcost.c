@@ -160,6 +160,13 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 						memset(&q, 0, sizeof(q));
 						if (extract_query_from_pattern(pat, &q))
 						{
+							/* Prefer relation tuple count when meta is stale. */
+							if (path->indexinfo->tuples > 0 &&
+							    path->indexinfo->tuples >
+							    (double) meta.n_tuples_indexed * 2.0)
+							{
+								meta.n_tuples_indexed = (uint64) path->indexinfo->tuples;
+							}
 							sel = estimate_trigram_selectivity(&q, &meta);
 							have_query = true;
 						}
@@ -219,6 +226,11 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 	{
 		indexCost += numIndexTuples * cpu_operator_cost * 10.0;
 	}
+
+	*indexTotalCost = *indexStartupCost + indexCost;
+	*indexSelectivity = sel;
+	*indexCorrelation = 0.0;
+	*indexPages = numIndexPages;
 
 	*indexTotalCost = *indexStartupCost + indexCost;
 	*indexSelectivity = sel;
