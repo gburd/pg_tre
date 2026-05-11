@@ -53,3 +53,10 @@ extern bytea *pg_tre_amoptions(Datum reloptions, bool validate);
 extern bool pg_tre_amvalidate(Oid opclassoid);
 
 #endif /* PG_TRE_AMAPI_H */
+
+/* Accessors for TrePattern, consumed by src/am/amscan.c.  Bodies live
+ * in src/util/type_pattern.c.  We declare them here (rather than in
+ * a new header) to avoid pulling varlena internals into amapi.h. */
+struct TrePatternData;
+extern char  *tre_pattern_get_text(struct TrePatternData *p, int *len_out);
+extern int32  tre_pattern_get_max_cost(struct TrePatternData *p);

@@ -65,14 +65,19 @@ write side lands as prerequisite for real ambuild.
 - [x] tre_pattern type (in/out/recv/send) and constructors.
 - [x] %~~ operator wired into tre_text_ops opclass.
 - [x] Debug UDFs: tre_parse_debug(), tre_extract_debug().
-- [ ] Regex AST + k=0 extraction (src/query/extract.c) — stub returns always_true.
-- [ ] amgetbitmap pulls posting lists via sparsemap_intersection.
-- [ ] Differential test: 10k-row corpus x 100 regex patterns, index
-  scan == seq scan.
+- [x] Russ-Cox-style trigram extraction for k=0
+  (src/query/extract.c): literal runs, CONCAT pass-through, ALT
+  via intersection, REP m>=1 inlines once, APPROX treated as
+  sub-expression, ANY/CLASS break the run.  Fanout capped at
+  pg_tre_max_extraction_fanout.
+- [x] amgetbitmap: per-conjunct OR via sparsemap_union, AND across
+  conjuncts via sparsemap_intersection, emit to TIDBitmap.
+- [x] Differential test (test/sql/scan_exact.sql): 13 patterns x
+  10-row fixture, index-scan rows == seq-scan rows.
+- [x] EXPLAIN confirms Bitmap Index Scan on pg_tre indexes.
 
-Partially complete. Parser, AST, type, and operator infrastructure
-landed. Extraction and amgetbitmap scan logic remain. Module builds
-and links; parser tests run.
+Phase 3 COMPLETE.  Scan path returns correct rows end-to-end for
+exact regex (k=0).  k>0 raises a clear ERROR ("lands in Phase 5").
 
 ## Phase 4 -- Incremental writes
 

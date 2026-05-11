@@ -1,0 +1,156 @@
+-- Phase 3 scan test: exact regex via the index, differential against seq-scan.
+--
+-- For each pattern, compare the row-id set returned by:
+--   (a) SEQ scan with tre_amatch(body, pat, 0)
+--   (b) INDEX scan with body %~~ tre_pattern(pat, 0)
+-- They must match exactly.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/scan_exact.sql:8: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS scan_exact_docs;
+psql:test/sql/scan_exact.sql:10: NOTICE:  table "scan_exact_docs" does not exist, skipping
+DROP TABLE
+CREATE TABLE scan_exact_docs (id serial PRIMARY KEY, body text);
+CREATE TABLE
+INSERT INTO scan_exact_docs(body) VALUES
+  ('hello world'),
+  ('hello there, friend'),
+  ('goodbye world'),
+  ('colour television'),
+  ('colour is color'),
+  ('approximate regex matching'),
+  ('the quick brown fox'),
+  ('jumped over the lazy dog'),
+  ('PostgreSQL is fast'),
+  ('pg_tre indexes regexes');
+INSERT 0 10
+SET client_min_messages = 'warning';
+SET
+CREATE INDEX scan_exact_idx ON scan_exact_docs USING tre (body);
+CREATE INDEX
+RESET client_min_messages;
+RESET
+-- Differential helper: returns 'OK ...' or 'BAD ...' for one pattern.
+CREATE OR REPLACE FUNCTION scan_exact_diff(pat text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+  seq_ids int[];
+  idx_ids int[];
+BEGIN
+  SET LOCAL enable_indexscan=off;
+  SET LOCAL enable_bitmapscan=off;
+  SET LOCAL enable_seqscan=on;
+  EXECUTE format('SELECT array_agg(id ORDER BY id) FROM scan_exact_docs '
+                 'WHERE tre_amatch(body, %L, 0)', pat)
+    INTO seq_ids;
+
+  SET LOCAL enable_seqscan=off;
+  SET LOCAL enable_indexscan=on;
+  SET LOCAL enable_bitmapscan=on;
+  EXECUTE format('SELECT array_agg(id ORDER BY id) FROM scan_exact_docs '
+                 'WHERE body %%~~ tre_pattern(%L, 0)', pat)
+    INTO idx_ids;
+
+  IF seq_ids IS NOT DISTINCT FROM idx_ids THEN
+    RETURN 'OK  ' || pat;
+  END IF;
+  RETURN format('BAD %s  seq=%s  idx=%s', pat, seq_ids, idx_ids);
+END$$;
+CREATE FUNCTION
+SELECT scan_exact_diff('hello');
+ scan_exact_diff 
+-----------------
+ OK  hello
+(1 row)
+
+SELECT scan_exact_diff('world');
+ scan_exact_diff 
+-----------------
+ OK  world
+(1 row)
+
+SELECT scan_exact_diff('color');
+ scan_exact_diff 
+-----------------
+ OK  color
+(1 row)
+
+SELECT scan_exact_diff('the');
+ scan_exact_diff 
+-----------------
+ OK  the
+(1 row)
+
+SELECT scan_exact_diff('quick');
+ scan_exact_diff 
+-----------------
+ OK  quick
+(1 row)
+
+SELECT scan_exact_diff('fox');
+ scan_exact_diff 
+-----------------
+ OK  fox
+(1 row)
+
+SELECT scan_exact_diff('regex');
+ scan_exact_diff 
+-----------------
+ OK  regex
+(1 row)
+
+SELECT scan_exact_diff('television');
+ scan_exact_diff 
+-----------------
+ OK  television
+(1 row)
+
+SELECT scan_exact_diff('approximate');
+ scan_exact_diff 
+-----------------
+ OK  approximate
+(1 row)
+
+SELECT scan_exact_diff('PostgreSQL');
+ scan_exact_diff 
+-----------------
+ OK  PostgreSQL
+(1 row)
+
+SELECT scan_exact_diff('pg_tre');
+ scan_exact_diff 
+-----------------
+ OK  pg_tre
+(1 row)
+
+SELECT scan_exact_diff('zebra');                        -- no match
+ scan_exact_diff 
+-----------------
+ OK  zebra
+(1 row)
+
+SELECT scan_exact_diff('xyz');                          -- no match
+ scan_exact_diff 
+-----------------
+ OK  xyz
+(1 row)
+
+-- Verify EXPLAIN picks the bitmap index scan.
+SET enable_seqscan = off;
+SET
+EXPLAIN (COSTS OFF)
+SELECT id FROM scan_exact_docs WHERE body %~~ tre_pattern('hello', 0);
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Bitmap Heap Scan on scan_exact_docs
+   Recheck Cond: (body %~~ 'hello'::tre_pattern)
+   ->  Bitmap Index Scan on scan_exact_idx
+         Index Cond: (body %~~ 'hello'::tre_pattern)
+(4 rows)
+
+DROP FUNCTION scan_exact_diff(text);
+DROP FUNCTION
+DROP INDEX scan_exact_idx;
+DROP INDEX
+DROP TABLE scan_exact_docs;
+DROP TABLE

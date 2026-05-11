@@ -22,7 +22,8 @@ CREATEDB="$BINDIR/createdb"
 
 DBNAME="${DBNAME:-contrib_regression}"
 
-TESTS=("${@:-pg_tre}")
+TESTS=("$@")
+if [ ${#TESTS[@]} -eq 0 ]; then TESTS=(pg_tre scan_exact); fi
 
 mkdir -p test/results
 rm -f test/results/*.out test/results/*.diff

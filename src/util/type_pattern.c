@@ -348,3 +348,19 @@ tre_match_scalar(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(result);
 }
+
+/* ---- Accessors consumed by src/am/amscan.c ---- */
+
+char *
+tre_pattern_get_text(TrePattern p, int *len_out)
+{
+	if (len_out)
+		*len_out = p->pattern_len;
+	return TRE_PATTERN_DATA(p);
+}
+
+int32
+tre_pattern_get_max_cost(TrePattern p)
+{
+	return p->max_cost;
+}
