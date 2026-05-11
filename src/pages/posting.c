@@ -767,12 +767,11 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
 }
 
 /*
- * STUB: Look up positions where a trigram appears in a TID.
- * Phase 5 READ requires; Phase 5 WRITE implements.
+ * Look up positions where a trigram appears in a TID.
+ * Returns the number of positions found (0 if TID not present).
+ * The returned positions array points into internal storage.
  *
- * For now, returns 0 (no positions found), so positional filtering
- * is disabled in Phase 5 initial cut.  Phase 5 WRITE will implement
- * the real lookup from the payload area.
+ * Phase 5.1: Implements position lookup from payload area.
  */
 int
 pg_tre_posting_lookup_positions(Relation index,
@@ -782,13 +781,89 @@ pg_tre_posting_lookup_positions(Relation index,
                                 uint64 packed_tid,
                                 const uint32 **out_positions)
 {
-    (void) index;
-    (void) root;
-    (void) inline_data;
-    (void) inline_bytes;
-    (void) packed_tid;
-    (void) out_positions;
-    
-    /* STUB: return 0 positions found */
-    return 0;
+    static uint32 positions_buf[1024];  /* thread-local buffer */
+    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+    sparsemap_t *smap = NULL;
+    size_t rank;
+    const uint8 *payload_base;
+    const uint8 *entry_ptr;
+    uint16 n_positions;
+    const uint32 *positions_ptr;
+
+    /* Step 1: determine if TID is present in the sparsemap. */
+    if (inline_data != NULL)
+    {
+        /* Inline case: Phase 5 assumes no payload in inline for now */
+        return 0;
+    }
+
+    if (!BlockNumberIsValid(root))
+        return 0;  /* no posting tree */
+
+    /* Step 2: read posting leaf page */
+    {
+        Buffer buf;
+        Page page;
+        PgTrePostingLeafHeader *hdr;
+        Size smap_size;
+
+        buf = ReadBuffer(index, root);
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+        hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
+
+        /* Check if this leaf has payload */
+        if (hdr->payload_offset == 0)
+        {
+            UnlockReleaseBuffer(buf);
+            return 0;  /* no payload */
+        }
+
+        /* Wrap sparsemap */
+        smap_size = hdr->payload_offset - sizeof(PgTrePostingLeafHeader);
+        smap = sparsemap_wrap((uint8 *) (hdr + 1), smap_size);
+
+        /* Check if TID is present */
+        if (!sparsemap_contains(smap, packed_tid))
+        {
+            UnlockReleaseBuffer(buf);
+            return 0;  /* TID not in posting */
+        }
+
+        /* Get rank (entry index) for this TID */
+        rank = sparsemap_rank(smap, 0, packed_tid, true);
+
+        /* Payload starts at payload_offset from page start */
+        payload_base = (const uint8 *) page + hdr->payload_offset;
+
+        /* Walk payload entries to find our rank */
+        entry_ptr = payload_base;
+        {
+            size_t entry_idx;
+            for (entry_idx = 0; entry_idx < rank; entry_idx++)
+            {
+                uint16 entry_n_positions;
+                memcpy(&entry_n_positions, entry_ptr, sizeof(uint16));
+                entry_ptr += sizeof(uint16);
+                entry_ptr += entry_n_positions * sizeof(uint32);
+                entry_ptr += bloom_bytes;
+            }
+        }
+
+        /* Now entry_ptr points at our TID's payload entry */
+        memcpy(&n_positions, entry_ptr, sizeof(uint16));
+        entry_ptr += sizeof(uint16);
+
+        if (n_positions > 1024)
+            n_positions = 1024;  /* cap at buffer size */
+
+        positions_ptr = (const uint32 *) entry_ptr;
+
+        /* Copy positions to thread-local buffer */
+        memcpy(positions_buf, positions_ptr, n_positions * sizeof(uint32));
+        *out_positions = positions_buf;
+
+        UnlockReleaseBuffer(buf);
+        return (int) n_positions;
+    }
 }

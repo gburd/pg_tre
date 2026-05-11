@@ -671,6 +671,158 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                                          result, st->scan_cxt);
     }
 
+    /* Phase 5.1: apply positional filtering */
+    if (result != NULL && sparsemap_cardinality(result) > 0)
+    {
+        sparsemap_t *filtered = sparsemap(sparsemap_get_capacity(result));
+        if (filtered != NULL)
+        {
+            uint64 tid_idx = sparsemap_minimum(result);
+            uint64 tid_maxidx = sparsemap_maximum(result);
+
+            while (tid_idx <= tid_maxidx)
+            {
+                if (sparsemap_contains(result, tid_idx))
+                {
+                    bool passes = true;
+                    int i, j;
+
+                    /* For each conjunct/tile, check if required trigrams
+                     * appear at valid positions */
+                    for (i = 0; i < st->q.n && passes; i++)
+                    {
+                        const TrigramConjunct *conj = &st->q.conjuncts[i];
+
+                        if (st->q.mode == TRIGRAM_QUERY_CNF)
+                        {
+                            /* CNF: at least one disjunct must have valid positions */
+                            bool conj_pass = false;
+                            for (j = 0; j < conj->n && !conj_pass; j++)
+                            {
+                                const TrigramDisjunct *dis = &conj->alts[j];
+                                PgTreUpperRef ref;
+                                const uint32 *positions;
+                                int n_positions, p;
+
+                                if (!pg_tre_upper_lookup(scan->indexRelation,
+                                                        dis->trigram_hash, &ref))
+                                    continue;
+
+                                n_positions = pg_tre_posting_lookup_positions(
+                                                scan->indexRelation,
+                                                ref.root, ref.inline_data,
+                                                ref.inline_bytes,
+                                                tid_idx, &positions);
+                                pg_tre_upper_release(&ref);
+
+                                if (n_positions == 0)
+                                {
+                                    /* No positions stored; conservatively pass */
+                                    conj_pass = true;
+                                    break;
+                                }
+
+                                /* Check if any position falls in valid range */
+                                for (p = 0; p < n_positions; p++)
+                                {
+                                    if (positions[p] >= (uint32) dis->min_offset &&
+                                        positions[p] <= (uint32) dis->max_offset)
+                                    {
+                                        conj_pass = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!conj_pass)
+                                passes = false;
+                        }
+                        else  /* DNF */
+                        {
+                            /* DNF: ALL trigrams in this tile must have valid positions */
+                            bool tile_pass = true;
+                            for (j = 0; j < conj->n && tile_pass; j++)
+                            {
+                                const TrigramDisjunct *dis = &conj->alts[j];
+                                PgTreUpperRef ref;
+                                const uint32 *positions;
+                                int n_positions, p;
+                                bool this_tri_pass = false;
+
+                                if (!pg_tre_upper_lookup(scan->indexRelation,
+                                                        dis->trigram_hash, &ref))
+                                {
+                                    tile_pass = false;
+                                    break;
+                                }
+
+                                n_positions = pg_tre_posting_lookup_positions(
+                                                scan->indexRelation,
+                                                ref.root, ref.inline_data,
+                                                ref.inline_bytes,
+                                                tid_idx, &positions);
+                                pg_tre_upper_release(&ref);
+
+                                if (n_positions == 0)
+                                {
+                                    /* No positions; conservatively pass this trigram */
+                                    this_tri_pass = true;
+                                }
+                                else
+                                {
+                                    /* Check if any position falls in valid range */
+                                    for (p = 0; p < n_positions; p++)
+                                    {
+                                        if (positions[p] >= (uint32) dis->min_offset &&
+                                            positions[p] <= (uint32) dis->max_offset)
+                                        {
+                                            this_tri_pass = true;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!this_tri_pass)
+                                    tile_pass = false;
+                            }
+
+                            if (tile_pass)
+                            {
+                                /* At least one tile passed; TID is good */
+                                passes = true;
+                                break;  /* no need to check other tiles */
+                            }
+                            else
+                            {
+                                passes = false;  /* this tile failed */
+                            }
+                        }
+                    }
+
+                    if (passes)
+                    {
+                        if (sparsemap_add(filtered, tid_idx) == SPARSEMAP_IDX_MAX)
+                        {
+                            /* Overflow; give up on filtering */
+                            free(filtered);
+                            filtered = NULL;
+                            break;
+                        }
+                    }
+                }
+
+                if (tid_idx == UINT64_MAX)
+                    break;
+                tid_idx++;
+            }
+
+            if (filtered != NULL)
+            {
+                free(result);
+                result = filtered;
+            }
+        }
+    }
+
 done:
     /* Emit TIDs to the TIDBitmap. */
     if (result != NULL)
