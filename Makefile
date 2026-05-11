@@ -67,6 +67,8 @@ OBJS = \
     src/query/parser.o \
     src/query/regex_ast.o \
     src/query/extract.o \
+    src/query/tiling.o \
+    src/query/uleven.o \
     src/query/debug.o
 #   src/query/tiling.o  -- Phase 5 READ side, uncomment when integrating
 #   src/query/uleven.o  -- Phase 5 READ side, uncomment when integrating

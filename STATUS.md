@@ -106,12 +106,39 @@ immediate` mid-workload).
 
 ## Phase 5 -- Approximate regex & three-tier funnel
 
+### Phase 5 WRITE (tier 1 + tier 3 payload) -- COMPLETE
+
+- [x] Bloom filter primitive (src/util/bloom.c, include/pg_tre/bloom.h)
+  * Fixed-size bloom with double-hashing: (h1 + i*h2) % m_bits
+  * Shared by tier 1 (range) and tier 3 (tuple) filters
+  * pg_tre_bloom_init, _add_trigram, _contains_trigram, _union APIs
+- [x] Per-tuple bloom filter payload in posting leaves (tier 3)
+  * PgTrePostingBuilder tracks positions + bloom per TID
+  * serialize_payload() packs (n_positions, positions[], bloom_bits[])
+  * Payload region grows downward from page end (before opaque)
+  * pg_tre_posting_lookup_tuple_bloom() reader helper
+  * Controlled by pg_tre.tuple_bloom_enable GUC (default true)
+- [x] BRIN-style range summary tier (tier 1)
+  * pg_tre_range_bulkload() builds single-leaf range tree after upper tree
+  * Groups TIDs by heap block range, unions trigrams into range bloom
+  * WAL-logged via XLOG_PTRE_RANGE_UPDATE (full-page image replay)
+  * pg_tre_range_lookup() and pg_tre_range_scan() for introspection
+  * Range size configurable via pg_tre.range_size_blocks GUC (default 128)
+- [x] Ambuild bloom population
+  * Tracks position of each trigram occurrence (byte offset)
+  * Computes per-tuple bloom by OR-ing all trigrams the tuple contains
+  * Passes positions + bloom_bits to pg_tre_posting_build_add
+  * TidBloomEntry hash table tracks blooms during build
+- [x] WAL correctness: XLOG_PTRE_RANGE_UPDATE handled via pg_tre_redo_fpi
+
+### Phase 5 READ (tier 2 + query expansion) -- Phase 5 READ agent owns
+
 - [ ] Extraction with edit budget, `{~m}` support, Navarro tiling.
-- [ ] Per-tuple bloom filter payload in posting leaves.
-- [ ] BRIN-style range summary tier.
 - [ ] Position-aware tier-2 filtering (sparsemap_offset).
 - [ ] Universal-Levenshtein small-k expansion.
+- [ ] Scan integration: range bloom -> posting bloom -> tuple bloom -> recheck.
 - [ ] Differential tests at k in {0,1,2,3}, pattern lengths 3..40.
+- [ ] Debug SRFs: tre_debug_tuple_bloom(), tre_debug_range_blooms().
 
 ## Phase 6 -- Planner & DoS hardening
 
@@ -154,3 +181,18 @@ immediate` mid-workload).
 - GUCs `pg_tre.range_size_blocks` and `pg_tre.bloom_tuple_bits`
   are currently SIGHUP-level; Phase 6 will move these to
   per-index reloptions where they belong.
+
+## Phase 5 -- Approximate regex & three-tier funnel (IN PROGRESS)
+
+- [x] Extraction with edit budget k>0, Navarro tiling (extract.c, tiling.c).
+- [x] Universal-Levenshtein small-k expansion (uleven.c).
+- [~] Per-tuple bloom filter payload in posting leaves (Phase 5 WRITE).
+- [ ] BRIN-style range summary tier (range.c stub; Phase 5 WRITE implements).
+- [ ] Position-aware tier-2 filtering (stub; Phase 5 WRITE implements).
+- [x] CNF/DNF query mode dispatch in amscan.c.
+- [x] Tier-3 per-tuple bloom filtering in amgetbitmap.
+- [ ] Differential tests at k in {0,1,2} (p5_read.sql ready; awaiting test run).
+
+Phase 5 READ side: Builds cleanly, tier-2 and tier-3 filtering implemented.
+Tier-1 (range) and positional filtering are stubbed awaiting Phase 5 WRITE.
+Tests written but not yet run due to time constraints.

@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "pg_tre/pg_tre.h"
+#include "pg_tre/uleven.h"
 
 /*
  * Helper: deduplicate an array of trigrams in place.  Returns the new count.
