@@ -23,7 +23,7 @@ CREATEDB="$BINDIR/createdb"
 DBNAME="${DBNAME:-contrib_regression}"
 
 TESTS=("$@")
-if [ ${#TESTS[@]} -eq 0 ]; then TESTS=(pg_tre scan_exact incremental p5_read); fi
+if [ ${#TESTS[@]} -eq 0 ]; then TESTS=(pg_tre scan_exact incremental p5_read planner p6_safety); fi
 
 mkdir -p test/results
 rm -f test/results/*.out test/results/*.diff

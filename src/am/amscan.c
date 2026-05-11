@@ -685,13 +685,13 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                 if (sparsemap_contains(result, tid_idx))
                 {
                     bool passes = true;
-                    int i, j;
+                    int ci, j;
 
                     /* For each conjunct/tile, check if required trigrams
                      * appear at valid positions */
-                    for (i = 0; i < st->q.n && passes; i++)
+                    for (ci = 0; ci < st->q.n && passes; ci++)
                     {
-                        const TrigramConjunct *conj = &st->q.conjuncts[i];
+                        const TrigramConjunct *conj = &st->q.conjuncts[ci];
 
                         if (st->q.mode == TRIGRAM_QUERY_CNF)
                         {

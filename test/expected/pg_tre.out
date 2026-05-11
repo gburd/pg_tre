@@ -101,6 +101,7 @@ SET
 CREATE INDEX tre_test_idx ON tre_test USING tre (t);
 psql:test/sql/pg_tre.sql:45: NOTICE:  pg_tre: collected 6 trigram entries from 2 heap tuples
 psql:test/sql/pg_tre.sql:45: NOTICE:  pg_tre: built 6 posting trees
+psql:test/sql/pg_tre.sql:45: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/pg_tre.sql:45: NOTICE:  pg_tre: build complete, indexed 2 heap tuples into 6 trigrams
 CREATE INDEX
 RESET client_min_messages;

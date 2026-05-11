@@ -52,6 +52,17 @@ extern void pg_tre_amcostestimate(struct PlannerInfo *root,
 extern bytea *pg_tre_amoptions(Datum reloptions, bool validate);
 extern bool pg_tre_amvalidate(Oid opclassoid);
 
+/* Initialization. */
+extern void pg_tre_init_reloptions(void);
+
+/* Per-index option getters (read opts or fall back to GUC defaults). */
+extern int  pg_tre_get_pending_list_limit_kb(Relation index);
+extern int  pg_tre_get_q(Relation index);
+extern int  pg_tre_get_bloom_tuple_bits(Relation index);
+extern int  pg_tre_get_range_size_blocks(Relation index);
+extern bool pg_tre_get_fastupdate(Relation index);
+extern bool pg_tre_get_tuple_bloom_enable(Relation index);
+
 #endif /* PG_TRE_AMAPI_H */
 
 /* Accessors for TrePattern, consumed by src/am/amscan.c.  Bodies live

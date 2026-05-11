@@ -147,9 +147,13 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
                     /* Create new range. */
                     if (n_ranges >= ranges_alloced)
                     {
-                        ranges_alloced = (ranges_alloced == 0) ? 64 : ranges_alloced * 2;
-                        ranges = (RangeAccum *) repalloc(ranges,
-                                    ranges_alloced * sizeof(RangeAccum));
+                        int new_cap = (ranges_alloced == 0) ? 64
+                                                            : ranges_alloced * 2;
+                        ranges = (RangeAccum *)
+                            (ranges == NULL
+                             ? palloc(new_cap * sizeof(RangeAccum))
+                             : repalloc(ranges, new_cap * sizeof(RangeAccum)));
+                        ranges_alloced = new_cap;
                     }
                     ra = &ranges[n_ranges++];
                     ra->range_start = range_start;
