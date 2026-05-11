@@ -80,8 +80,9 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_PENDING_INSERT:
         case XLOG_PTRE_PENDING_MERGE_B:
         case XLOG_PTRE_PENDING_MERGE_C:
+        case XLOG_PTRE_RANGE_UPDATE:      /* Phase 5: range tier FPI */
             /*
-             * Phase 2/4 emit these as full-page images.  The generic
+             * Phase 2/4/5 emit these as full-page images.  The generic
              * FPI replay is correct for all of them today; Phase 7/8
              * hardening can introduce delta records that add their own
              * branches here.
@@ -91,7 +92,6 @@ pg_tre_redo(XLogReaderState *record)
 
         case XLOG_PTRE_POSTING_DELETE:
         case XLOG_PTRE_POSTING_SPLIT:
-        case XLOG_PTRE_RANGE_UPDATE:
         case XLOG_PTRE_VACUUM:
             elog(PANIC, "pg_tre: redo for info 0x%02X not yet implemented",
                  info);
