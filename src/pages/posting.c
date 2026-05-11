@@ -765,3 +765,30 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
         return found;
     }
 }
+
+/*
+ * STUB: Look up positions where a trigram appears in a TID.
+ * Phase 5 READ requires; Phase 5 WRITE implements.
+ *
+ * For now, returns 0 (no positions found), so positional filtering
+ * is disabled in Phase 5 initial cut.  Phase 5 WRITE will implement
+ * the real lookup from the payload area.
+ */
+int
+pg_tre_posting_lookup_positions(Relation index,
+                                BlockNumber root,
+                                const uint8 *inline_data,
+                                Size inline_bytes,
+                                uint64 packed_tid,
+                                const uint32 **out_positions)
+{
+    (void) index;
+    (void) root;
+    (void) inline_data;
+    (void) inline_bytes;
+    (void) packed_tid;
+    (void) out_positions;
+    
+    /* STUB: return 0 positions found */
+    return 0;
+}

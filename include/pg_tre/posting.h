@@ -158,29 +158,39 @@ extern bool pg_tre_upper_lookup(Relation index, uint64 trigram_hash,
                                 PgTreUpperRef *out);
 extern void pg_tre_upper_release(PgTreUpperRef *ref);
 
-/* ---- Phase 5 payload APIs (Phase 5 WRITE agent must implement) ---- */
+/* ---- Phase 5 payload APIs ---- */
 
 /*
- * Look up the per-tuple bloom filter for a given TID.  Returns true if
- * the TID is present in the posting tree and has an associated bloom,
- * false otherwise.  The returned bloom is a pointer into the pinned
- * posting-leaf buffer; valid until pg_tre_posting_scan_end.
+ * Look up the per-tuple bloom filter for a given TID in a posting tree.
+ * Returns true if the TID is present in the posting and has an associated
+ * bloom, false otherwise.  Copies the bloom bits into out_bloom (caller
+ * must provide a buffer of at least out_bloom_sz bytes).
  *
- * Phase 5 READ requires; Phase 5 WRITE implements.
+ * Phase 5 WRITE has implemented this function.
  */
 typedef struct PgTreBloom PgTreBloom;  /* forward decl from bloom.h */
 
+extern bool pg_tre_posting_lookup_tuple_bloom(Relation index,
+                                              BlockNumber root,
+                                              const uint8 *inline_data,
+                                              Size inline_bytes,
+                                              uint64 packed_tid,
+                                              uint8 *out_bloom,
+                                              Size out_bloom_sz);
+
 /*
  * Look up the list of positions where a trigram appears in a given TID.
- * Returns the number of positions found (0 if TID not present or trigram
- * not at any position).  The returned positions array is valid until the
- * next call to this function or end of scan.
+ * Returns the number of positions found (0 if TID not present).  The
+ * returned positions array points into internal storage and is valid
+ * until the next call to this function.
  *
- * Phase 5 READ requires; Phase 5 WRITE implements.
+ * Phase 5 READ requires; Phase 5 WRITE implements (STUB for now).
  */
 extern int pg_tre_posting_lookup_positions(Relation index,
-                                           uint64 trigram_hash,
-                                           ItemPointer tid,
+                                           BlockNumber root,
+                                           const uint8 *inline_data,
+                                           Size inline_bytes,
+                                           uint64 packed_tid,
                                            const uint32 **out_positions);
 
 #endif /* PG_TRE_POSTING_H */

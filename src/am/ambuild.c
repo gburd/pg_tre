@@ -42,6 +42,7 @@
 #include "utils/rel.h"
 
 #include "pg_tre/amapi.h"
+#include "pg_tre/bloom.h"
 #include "pg_tre/hash.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
@@ -49,12 +50,20 @@
 #include "pg_tre/posting.h"
 #include "pg_tre/upper.h"
 
-/* In-memory sort entry: (trigram_hash, tid). */
+/* In-memory sort entry: (trigram_hash, tid, position). */
 typedef struct TrigramTidEntry
 {
     uint64      trigram_hash;
     ItemPointerData tid;
+    uint32      position;       /* byte offset in original text */
 } TrigramTidEntry;
+
+/* Per-TID bloom tracking during build. */
+typedef struct TidBloomEntry
+{
+    uint64      packed_tid;
+    PgTreBloom *bloom;          /* palloc'd bloom filter */
+} TidBloomEntry;
 
 /* Callback context for heap scan. */
 typedef struct BuildState
@@ -67,6 +76,11 @@ typedef struct BuildState
     TrigramTidEntry *entries;
     int         n_entries;
     int         entries_alloced;
+
+    /* Per-TID bloom tracking (Phase 5). */
+    TidBloomEntry *tid_blooms;
+    int         n_tid_blooms;
+    int         tid_blooms_alloced;
 
     double      heap_tuples;
     MemoryContext tmpctx;
@@ -90,7 +104,7 @@ typedef struct UpperIterState
 } UpperIterState;
 
 /*
- * qsort comparison function: order by (trigram_hash, tid).
+ * qsort comparison function: order by (trigram_hash, tid, position).
  */
 static int
 compare_trigram_tid(const void *a, const void *b)
@@ -103,16 +117,68 @@ compare_trigram_tid(const void *a, const void *b)
     if (ea->trigram_hash > eb->trigram_hash)
         return 1;
 
-    /* Same hash: order by TID. */
+    /* Same hash: order by TID, then position. */
     {
         ItemPointerData tid_a = ea->tid;
         ItemPointerData tid_b = eb->tid;
-        return ItemPointerCompare(&tid_a, &tid_b);
+        int cmp = ItemPointerCompare(&tid_a, &tid_b);
+        if (cmp != 0)
+            return cmp;
+
+        /* Same TID: order by position. */
+        if (ea->position < eb->position)
+            return -1;
+        if (ea->position > eb->position)
+            return 1;
+        return 0;
+    }
+}
+
+/*
+ * Find or create a bloom filter for a given TID (Phase 5).
+ * Linear search for now; Phase 8 can optimize with a hash table.
+ */
+static PgTreBloom *
+find_or_create_tid_bloom(BuildState *bstate, ItemPointer tid)
+{
+    uint64 packed = pg_tre_pack_tid(tid);
+    int i;
+
+    if (!pg_tre_tuple_bloom_enable)
+        return NULL;
+
+    /* Linear search for existing entry. */
+    for (i = 0; i < bstate->n_tid_blooms; i++)
+    {
+        if (bstate->tid_blooms[i].packed_tid == packed)
+            return bstate->tid_blooms[i].bloom;
+    }
+
+    /* Not found: create new entry. */
+    if (bstate->n_tid_blooms >= bstate->tid_blooms_alloced)
+    {
+        bstate->tid_blooms_alloced *= 2;
+        bstate->tid_blooms = (TidBloomEntry *)
+            repalloc(bstate->tid_blooms,
+                     bstate->tid_blooms_alloced * sizeof(TidBloomEntry));
+    }
+
+    {
+        TidBloomEntry *tbe = &bstate->tid_blooms[bstate->n_tid_blooms++];
+        Size bloom_size = pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits);
+        PgTreBloom *bloom;
+
+        tbe->packed_tid = packed;
+        bloom = (PgTreBloom *) palloc(bloom_size);
+        pg_tre_bloom_init(bloom, pg_tre_bloom_tuple_bits, 5 /* k */);
+        tbe->bloom = bloom;
+        return bloom;
     }
 }
 
 /*
  * Extract trigrams from a text datum and insert them into the build state.
+ * Phase 5: also populate per-tuple bloom filter and record positions.
  */
 static void
 extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
@@ -121,6 +187,7 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     char       *str;
     int         len;
     int         i;
+    PgTreBloom *bloom = NULL;
 
     if (isnull)
         return;
@@ -130,15 +197,21 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     str = VARDATA_ANY(txt);
     len = VARSIZE_ANY_EXHDR(txt);
 
+    /* Phase 5: get or create the per-TID bloom filter. */
+    if (pg_tre_tuple_bloom_enable)
+        bloom = find_or_create_tid_bloom(bstate, tid);
+
     /* Extract byte trigrams: every 3 consecutive bytes. */
     for (i = 0; i <= len - 3; i++)
     {
         uint8   trigram[3];
+        uint64  trigram_hash;
         TrigramTidEntry *entry;
 
         trigram[0] = (uint8) str[i];
         trigram[1] = (uint8) str[i + 1];
         trigram[2] = (uint8) str[i + 2];
+        trigram_hash = pg_tre_hash_trigram(trigram);
 
         /* Grow array if needed. */
         if (bstate->n_entries >= bstate->entries_alloced)
@@ -150,8 +223,13 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
         }
 
         entry = &bstate->entries[bstate->n_entries++];
-        entry->trigram_hash = pg_tre_hash_trigram(trigram);
+        entry->trigram_hash = trigram_hash;
         entry->tid = *tid;
+        entry->position = (uint32) i;  /* byte offset */
+
+        /* Phase 5: add trigram to the per-tuple bloom. */
+        if (bloom != NULL)
+            pg_tre_bloom_add_trigram(bloom, trigram_hash);
     }
 }
 
@@ -225,6 +303,13 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     bstate.entries = (TrigramTidEntry *)
         palloc(bstate.entries_alloced * sizeof(TrigramTidEntry));
     bstate.n_entries = 0;
+
+    /* Phase 5: initialize per-TID bloom tracking. */
+    bstate.tid_blooms_alloced = 4096;
+    bstate.tid_blooms = (TidBloomEntry *)
+        palloc(bstate.tid_blooms_alloced * sizeof(TidBloomEntry));
+    bstate.n_tid_blooms = 0;
+
     bstate.heap_tuples = 0.0;
     bstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
                                           "pg_tre build temp context",
@@ -253,14 +338,173 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     current_hash = 0;
     current_builder = NULL;
 
-    for (i = 0; i < bstate.n_entries; i++)
+    /* Phase 5: accumulate positions per (trigram, TID) pair. */
     {
-        TrigramTidEntry *entry = &bstate.entries[i];
+        uint32 *positions_buf = NULL;
+        int positions_alloced = 0;
+        int n_positions = 0;
+        uint64 current_tid_packed = 0;
 
-        if (current_builder == NULL || entry->trigram_hash != current_hash)
+        for (i = 0; i < bstate.n_entries; i++)
         {
-            /* Finish the previous trigram's posting tree. */
-            if (current_builder != NULL)
+            TrigramTidEntry *entry = &bstate.entries[i];
+            uint64 tid_packed = pg_tre_pack_tid(&entry->tid);
+            bool new_trigram = (current_builder == NULL ||
+                               entry->trigram_hash != current_hash);
+            bool new_tid = (new_trigram || tid_packed != current_tid_packed);
+
+            if (new_trigram)
+            {
+                /* Finish previous trigram's posting tree. */
+                if (current_builder != NULL)
+                {
+                    /* Add the last accumulated TID. */
+                    if (n_positions > 0)
+                    {
+                        ItemPointerData tid;
+                        PgTreBloom *bloom = NULL;
+                        uint8 *bloom_bits = NULL;
+
+                        pg_tre_unpack_tid(current_tid_packed, &tid);
+
+                        /* Look up the TID's bloom. */
+                        if (pg_tre_tuple_bloom_enable)
+                        {
+                            int j;
+                            for (j = 0; j < bstate.n_tid_blooms; j++)
+                            {
+                                if (bstate.tid_blooms[j].packed_tid == current_tid_packed)
+                                {
+                                    bloom = bstate.tid_blooms[j].bloom;
+                                    break;
+                                }
+                            }
+                            if (bloom != NULL)
+                                bloom_bits = pg_tre_bloom_bits(bloom);
+                        }
+
+                        pg_tre_posting_build_add(current_builder, &tid,
+                                                positions_buf, n_positions,
+                                                bloom_bits);
+                    }
+
+                    /* Finish the posting tree. */
+                    {
+                        BlockNumber root;
+                        const uint8 *inline_data;
+                        Size        inline_bytes;
+
+                        root = pg_tre_posting_build_finish(current_builder,
+                                                           &inline_data,
+                                                           &inline_bytes);
+                        pg_tre_posting_build_free(current_builder);
+
+                        /* Record the completed posting. */
+                        if (n_accums >= accums_alloced)
+                        {
+                            accums_alloced *= 2;
+                            accums = (PostingAccum *)
+                                repalloc(accums, accums_alloced * sizeof(PostingAccum));
+                        }
+                        accums[n_accums].trigram_hash = current_hash;
+                        accums[n_accums].root = root;
+                        accums[n_accums].inline_data = inline_data;
+                        accums[n_accums].inline_bytes = inline_bytes;
+                        n_accums++;
+                    }
+                }
+
+                /* Start a new posting tree. */
+                current_hash = entry->trigram_hash;
+                current_builder = pg_tre_posting_build_begin(
+                                      index, current_hash,
+                                      pg_tre_tuple_bloom_enable /* with_payload */);
+                n_positions = 0;
+            }
+
+            if (new_tid && !new_trigram)
+            {
+                /* Flush accumulated positions for the previous TID. */
+                if (n_positions > 0)
+                {
+                    ItemPointerData tid;
+                    PgTreBloom *bloom = NULL;
+                    uint8 *bloom_bits = NULL;
+
+                    pg_tre_unpack_tid(current_tid_packed, &tid);
+
+                    /* Look up the TID's bloom. */
+                    if (pg_tre_tuple_bloom_enable)
+                    {
+                        int j;
+                        for (j = 0; j < bstate.n_tid_blooms; j++)
+                        {
+                            if (bstate.tid_blooms[j].packed_tid == current_tid_packed)
+                            {
+                                bloom = bstate.tid_blooms[j].bloom;
+                                break;
+                            }
+                        }
+                        if (bloom != NULL)
+                            bloom_bits = pg_tre_bloom_bits(bloom);
+                    }
+
+                    pg_tre_posting_build_add(current_builder, &tid,
+                                            positions_buf, n_positions,
+                                            bloom_bits);
+                    n_positions = 0;
+                }
+            }
+
+            /* Accumulate this position. */
+            current_tid_packed = tid_packed;
+            if (pg_tre_tuple_bloom_enable)
+            {
+                if (n_positions >= positions_alloced)
+                {
+                    positions_alloced = (positions_alloced == 0) ? 16 :
+                                        positions_alloced * 2;
+                    positions_buf = (uint32 *) repalloc(positions_buf,
+                                      positions_alloced * sizeof(uint32));
+                }
+                positions_buf[n_positions++] = entry->position;
+            }
+        }
+
+        /* Finish the last posting tree. */
+        if (current_builder != NULL)
+        {
+            /* Add the last accumulated TID. */
+            if (n_positions > 0)
+            {
+                ItemPointerData tid;
+                PgTreBloom *bloom = NULL;
+                uint8 *bloom_bits = NULL;
+
+                pg_tre_unpack_tid(current_tid_packed, &tid);
+
+                /* Look up the TID's bloom. */
+                if (pg_tre_tuple_bloom_enable)
+                {
+                    int j;
+                    for (j = 0; j < bstate.n_tid_blooms; j++)
+                    {
+                        if (bstate.tid_blooms[j].packed_tid == current_tid_packed)
+                        {
+                            bloom = bstate.tid_blooms[j].bloom;
+                            break;
+                        }
+                    }
+                    if (bloom != NULL)
+                        bloom_bits = pg_tre_bloom_bits(bloom);
+                }
+
+                pg_tre_posting_build_add(current_builder, &tid,
+                                        positions_buf, n_positions,
+                                        bloom_bits);
+            }
+
+            /* Finish the posting tree. */
             {
                 BlockNumber root;
                 const uint8 *inline_data;
@@ -271,7 +515,6 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                                                    &inline_bytes);
                 pg_tre_posting_build_free(current_builder);
 
-                /* Record the completed posting. */
                 if (n_accums >= accums_alloced)
                 {
                     accums_alloced *= 2;
@@ -284,41 +527,10 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                 accums[n_accums].inline_bytes = inline_bytes;
                 n_accums++;
             }
-
-            /* Start a new posting tree for this trigram. */
-            current_hash = entry->trigram_hash;
-            current_builder = pg_tre_posting_build_begin(index, current_hash,
-                                                         false /* no payload */);
         }
 
-        /* Add TID to the current posting builder. */
-        pg_tre_posting_build_add(current_builder, &entry->tid,
-                                 NULL, 0, NULL);
-    }
-
-    /* Finish the last posting tree. */
-    if (current_builder != NULL)
-    {
-        BlockNumber root;
-        const uint8 *inline_data;
-        Size        inline_bytes;
-
-        root = pg_tre_posting_build_finish(current_builder,
-                                           &inline_data,
-                                           &inline_bytes);
-        pg_tre_posting_build_free(current_builder);
-
-        if (n_accums >= accums_alloced)
-        {
-            accums_alloced *= 2;
-            accums = (PostingAccum *)
-                repalloc(accums, accums_alloced * sizeof(PostingAccum));
-        }
-        accums[n_accums].trigram_hash = current_hash;
-        accums[n_accums].root = root;
-        accums[n_accums].inline_data = inline_data;
-        accums[n_accums].inline_bytes = inline_bytes;
-        n_accums++;
+        if (positions_buf)
+            pfree(positions_buf);
     }
 
     ereport(NOTICE,
@@ -337,6 +549,18 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     MemoryContextSwitchTo(oldcxt);
     MemoryContextDelete(bstate.tmpctx);
+
+    /* Phase 5: free per-TID bloom tracking. */
+    if (bstate.tid_blooms != NULL)
+    {
+        for (i = 0; i < bstate.n_tid_blooms; i++)
+        {
+            if (bstate.tid_blooms[i].bloom != NULL)
+                pfree(bstate.tid_blooms[i].bloom);
+        }
+        pfree(bstate.tid_blooms);
+    }
+
     pfree(bstate.entries);
 
     /* Return build result. */

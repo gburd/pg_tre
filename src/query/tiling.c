@@ -22,8 +22,10 @@
 
 #include "utils/memutils.h"
 
+#include "pg_tre/hash.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/regex_ast.h"
+#include "pg_tre/tiling.h"
 
 /*
  * A spine entry: one trigram at a specific pattern offset.
@@ -33,59 +35,6 @@ typedef struct SpineEntry
     uint8  trigram[3];
     int32  pattern_offset;
 } SpineEntry;
-
-/*
- * Extract the "trigram spine" from an AST: the sequence of all literal
- * trigrams in left-to-right order with their pattern offsets.  Returns
- * the number of spine entries, or -1 on overflow.
- */
-static int
-extract_spine(const RegexAst *ast, SpineEntry *out, int max_out,
-              int32 *offset, MemoryContext cxt)
-{
-    int n = 0;
-
-    if (ast == NULL)
-        return 0;
-
-    switch (ast->kind)
-    {
-        case REGEX_AST_LITERAL:
-        {
-            /* A single literal doesn't form a trigram; caller accumulates */
-            (*offset)++;
-            break;
-        }
-
-        case REGEX_AST_CONCAT:
-        {
-            /* Process left, then right */
-            int n_left = extract_spine(ast->u.concat.left, out, max_out, offset, cxt);
-            if (n_left < 0)
-                return -1;
-            n += n_left;
-            if (n >= max_out)
-                return -1;
-            
-            int n_right = extract_spine(ast->u.concat.right, &out[n], max_out - n, offset, cxt);
-            if (n_right < 0)
-                return -1;
-            n += n_right;
-            break;
-        }
-
-        case REGEX_AST_ALT:
-        case REGEX_AST_REP:
-        case REGEX_AST_APPROX:
-        case REGEX_AST_ANY:
-        case REGEX_AST_CLASS:
-        case REGEX_AST_ANCHOR:
-            /* These break the literal run; we don't extract from them */
-            break;
-    }
-
-    return n;
-}
 
 /*
  * Linearize an AST into a byte string of literal characters, tracking
@@ -174,7 +123,7 @@ extract_spine_from_ast(const RegexAst *ast, SpineEntry *out, int max_out,
  * Tile a trigram spine into k+1 groups.  Each tile receives roughly
  * spine_n / (k+1) trigrams.  Returns the tiled TrigramQuery in DNF mode.
  */
-bool
+static bool
 pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
                   TrigramQuery *out, MemoryContext cxt)
 {

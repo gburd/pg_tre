@@ -60,6 +60,7 @@ OBJS = \
     src/pages/upper.o \
     src/pages/posting.o \
     src/pages/pending.o \
+    src/pages/range.o \
     src/wal/xlog.o \
     src/query/tre_grammar.o \
     src/query/tokens.o \
@@ -67,6 +68,8 @@ OBJS = \
     src/query/regex_ast.o \
     src/query/extract.o \
     src/query/debug.o
+#   src/query/tiling.o  -- Phase 5 READ side, uncomment when integrating
+#   src/query/uleven.o  -- Phase 5 READ side, uncomment when integrating
 
 # Sparsemap is vendored in-tree; silence upstream missing-prototype
 # warnings without disabling them globally.

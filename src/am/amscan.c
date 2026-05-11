@@ -27,9 +27,12 @@
 #include "utils/rel.h"
 
 #include "pg_tre/amapi.h"
+#include "pg_tre/bloom.h"
+#include "pg_tre/pg_tre.h"
 #include "pg_tre/page.h"
 #include "pg_tre/pending.h"
 #include "pg_tre/posting.h"
+#include "pg_tre/range.h"
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/sparsemap.h"
 
@@ -315,6 +318,166 @@ sm_scan_cb(uint64 vec[], size_t n, void *aux)
 }
 #endif
 
+/*
+ * Tier-3 per-tuple bloom filter: refine a candidate TID sparsemap by
+ * checking each TID's per-tuple bloom against all required trigrams.
+ * Returns a new sparsemap containing only TIDs that pass the bloom filter.
+ *
+ * Phase 5 stub: pg_tre_posting_lookup_tuple_bloom is implemented by
+ * Phase 5 WRITE, but returns false for TIDs without payload (Phase 4
+ * postings).  So this function gracefully degrades to a no-op for indexes
+ * built before Phase 5 payload support.
+ */
+static sparsemap_t *
+apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
+                        sparsemap_t *candidates, MemoryContext cxt)
+{
+    sparsemap_t *refined;
+    uint64 idx, maxidx;
+    uint8 bloom_buf[256];  /* large enough for typical bloom sizes */
+    Size bloom_bytes;
+    int i, j;
+
+    if (candidates == NULL || sparsemap_cardinality(candidates) == 0)
+        return candidates;
+
+    /* Phase 5: per-tuple blooms are (pg_tre_bloom_tuple_bits + 7) / 8 bytes */
+    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+    if (bloom_bytes > sizeof(bloom_buf))
+        bloom_bytes = sizeof(bloom_buf);  /* defensive */
+
+    refined = sparsemap(sparsemap_get_capacity(candidates));
+    if (refined == NULL)
+        return candidates;  /* OOM; fall back to unrefined */
+
+    maxidx = sparsemap_maximum(candidates);
+    idx = sparsemap_minimum(candidates);
+
+    while (idx <= maxidx)
+    {
+        if (sparsemap_contains(candidates, idx))
+        {
+            bool passes = true;
+
+            /* For each conjunct, check if at least one disjunct's trigram
+             * is present in the tuple's bloom.  In CNF mode, ALL conjuncts
+             * must have at least one disjunct present.  In DNF mode, at
+             * least ONE conjunct must have ALL its disjuncts present. */
+
+            if (q->mode == TRIGRAM_QUERY_CNF)
+            {
+                /* CNF: AND across conjuncts */
+                for (i = 0; i < q->n && passes; i++)
+                {
+                    const TrigramConjunct *conj = &q->conjuncts[i];
+                    bool conj_pass = false;
+
+                    for (j = 0; j < conj->n; j++)
+                    {
+                        uint64 h = conj->alts[j].trigram_hash;
+                        PgTreUpperRef ref;
+                        bool has_bloom = false;
+
+                        if (pg_tre_upper_lookup(index, h, &ref))
+                        {
+                            has_bloom = pg_tre_posting_lookup_tuple_bloom(
+                                            index, ref.root, ref.inline_data,
+                                            ref.inline_bytes, idx,
+                                            bloom_buf, bloom_bytes);
+                            pg_tre_upper_release(&ref);
+                        }
+
+                        if (has_bloom)
+                        {
+                            /* Bloom data present; check if trigram is in it.
+                             * Wrap the bytes as a PgTreBloom and test. */
+                            PgTreBloom *b = (PgTreBloom *) bloom_buf;
+                            if (pg_tre_bloom_contains_trigram(b, h))
+                            {
+                                conj_pass = true;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            /* No bloom data (Phase 4 posting or inline);
+                             * conservatively assume the trigram might be
+                             * present (pass through). */
+                            conj_pass = true;
+                            break;
+                        }
+                    }
+
+                    if (!conj_pass)
+                        passes = false;
+                }
+            }
+            else
+            {
+                /* DNF: OR across conjuncts (tiles); at least one tile
+                 * must have ALL its trigrams present. */
+                passes = false;
+                for (i = 0; i < q->n && !passes; i++)
+                {
+                    const TrigramConjunct *tile = &q->conjuncts[i];
+                    bool tile_pass = true;
+
+                    for (j = 0; j < tile->n && tile_pass; j++)
+                    {
+                        uint64 h = tile->alts[j].trigram_hash;
+                        PgTreUpperRef ref;
+                        bool has_bloom = false;
+
+                        if (pg_tre_upper_lookup(index, h, &ref))
+                        {
+                            has_bloom = pg_tre_posting_lookup_tuple_bloom(
+                                            index, ref.root, ref.inline_data,
+                                            ref.inline_bytes, idx,
+                                            bloom_buf, bloom_bytes);
+                            pg_tre_upper_release(&ref);
+                        }
+
+                        if (has_bloom)
+                        {
+                            PgTreBloom *b = (PgTreBloom *) bloom_buf;
+                            if (!pg_tre_bloom_contains_trigram(b, h))
+                            {
+                                tile_pass = false;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            /* No bloom; assume pass */
+                        }
+                    }
+
+                    if (tile_pass)
+                        passes = true;
+                }
+            }
+
+            if (passes)
+            {
+                if (sparsemap_add(refined, idx) == SPARSEMAP_IDX_MAX)
+                {
+                    /* Overflow; fall back to unrefined */
+                    free(refined);
+                    return candidates;
+                }
+            }
+        }
+
+        if (idx == UINT64_MAX)
+            break;
+        idx++;
+    }
+
+    (void) cxt;
+    free(candidates);
+    return refined;
+}
+
 int64
 pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
@@ -361,47 +524,151 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
         overlay_build(&ov, scan->indexRelation, &st->q, st->scan_cxt);
 
         /*
-         * Walk conjuncts (AND): for each, compute the OR of its disjuncts;
-         * intersect into `result`.  Bail early if any conjunct produces
-         * NULL -- that means no rows match the AND-of-ORs query.
+         * Phase 5: dispatch based on query mode (CNF or DNF).
+         *
+         * CNF mode (k=0): AND across conjuncts.  For each conjunct,
+         *   compute OR of its disjuncts; intersect into result.
+         *
+         * DNF mode (k>0 tiled): OR across tiles.  For each tile,
+         *   compute AND of its trigrams; union into result.
          */
-        for (i = 0; i < st->q.n; i++)
+        if (st->q.mode == TRIGRAM_QUERY_CNF)
         {
-            sparsemap_t *sm = resolve_conjunct_with_overlay(
-                                  scan->indexRelation,
-                                  &st->q.conjuncts[i],
-                                  st->scan_cxt, &ov);
-            if (sm == NULL)
+            /* CNF: AND across conjuncts (original Phase 3 logic) */
+            for (i = 0; i < st->q.n; i++)
             {
-                if (result != NULL) free(result);
-                result = NULL;
-                overlay_free(&ov);
-                goto done;
-            }
-
-            if (result == NULL)
-            {
-                result = sm;
-            }
-            else
-            {
-                sparsemap_t *merged = sparsemap_intersection(result, sm);
-                free(result);
-                free(sm);
-                result = merged;
-                if (result == NULL ||
-                    (sparsemap_get_size(result) != 0 &&
-                     sparsemap_cardinality(result) == 0))
+                sparsemap_t *sm = resolve_conjunct_with_overlay(
+                                      scan->indexRelation,
+                                      &st->q.conjuncts[i],
+                                      st->scan_cxt, &ov);
+                if (sm == NULL)
                 {
-                    if (result) free(result);
+                    if (result != NULL) free(result);
                     result = NULL;
                     overlay_free(&ov);
                     goto done;
+                }
+
+                if (result == NULL)
+                {
+                    result = sm;
+                }
+                else
+                {
+                    sparsemap_t *merged = sparsemap_intersection(result, sm);
+                    free(result);
+                    free(sm);
+                    result = merged;
+                    if (result == NULL ||
+                        (sparsemap_get_size(result) != 0 &&
+                         sparsemap_cardinality(result) == 0))
+                    {
+                        if (result) free(result);
+                        result = NULL;
+                        overlay_free(&ov);
+                        goto done;
+                    }
+                }
+            }
+        }
+        else  /* TRIGRAM_QUERY_DNF */
+        {
+            /* DNF: OR across tiles.  For each tile (conjunct in DNF),
+             * compute AND of its disjuncts, then union into result. */
+            for (i = 0; i < st->q.n; i++)
+            {
+                const TrigramConjunct *tile = &st->q.conjuncts[i];
+                sparsemap_t *tile_result = NULL;
+                int j;
+
+                /* Within this tile, AND all trigrams together */
+                for (j = 0; j < tile->n; j++)
+                {
+                    PgTreUpperRef ref;
+                    sparsemap_t *sm = NULL;
+                    sparsemap_t *pend;
+
+                    if (pg_tre_upper_lookup(scan->indexRelation,
+                                           tile->alts[j].trigram_hash, &ref))
+                    {
+                        sm = pg_tre_posting_materialize(scan->indexRelation,
+                                                       ref.root,
+                                                       ref.inline_data,
+                                                       ref.inline_bytes);
+                        pg_tre_upper_release(&ref);
+                    }
+
+                    pend = overlay_lookup(&ov, tile->alts[j].trigram_hash);
+                    if (pend != NULL)
+                    {
+                        if (sm == NULL)
+                        {
+                            sm = sparsemap_copy(pend);
+                        }
+                        else
+                        {
+                            sparsemap_t *u = sparsemap_union(sm, pend);
+                            free(sm);
+                            sm = u;
+                        }
+                    }
+
+                    if (sm == NULL)
+                    {
+                        /* This trigram not present; tile can't match */
+                        if (tile_result != NULL)
+                            free(tile_result);
+                        tile_result = NULL;
+                        break;
+                    }
+
+                    if (tile_result == NULL)
+                    {
+                        tile_result = sm;
+                    }
+                    else
+                    {
+                        sparsemap_t *intersect = sparsemap_intersection(tile_result, sm);
+                        free(tile_result);
+                        free(sm);
+                        tile_result = intersect;
+                        if (tile_result == NULL ||
+                            (sparsemap_get_size(tile_result) != 0 &&
+                             sparsemap_cardinality(tile_result) == 0))
+                        {
+                            if (tile_result) free(tile_result);
+                            tile_result = NULL;
+                            break;
+                        }
+                    }
+                }
+
+                /* Union this tile's result into the overall result (OR) */
+                if (tile_result != NULL)
+                {
+                    if (result == NULL)
+                    {
+                        result = tile_result;
+                    }
+                    else
+                    {
+                        sparsemap_t *merged = sparsemap_union(result, tile_result);
+                        free(result);
+                        free(tile_result);
+                        result = merged;
+                    }
                 }
             }
         }
 
         overlay_free(&ov);
+    }
+
+    /* Phase 5 tier-3: apply per-tuple bloom filtering */
+    if (result != NULL && st->q.global_max_cost >= 0)
+    {
+        result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
+                                         result, st->scan_cxt);
     }
 
 done:
