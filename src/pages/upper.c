@@ -163,6 +163,11 @@ upper_flush_leaf(UpperBulkState *state)
     /* Update pd_lower. */
     ((PageHeader) page)->pd_lower = dest + state->leaf_inline_used - (char *) page;
 
+    /* Record n_entries in the page's opaque flags so readers don't have
+     * to back-compute it from pd_lower (which includes variable-length
+     * inline blobs after the entry array). */
+    PageTreGetOpaque(page)->flags = (uint16) state->leaf_n_entries;
+
     /* WAL-log as full-page image. */
     if (RelationNeedsWAL(state->index))
     {
@@ -400,8 +405,19 @@ pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
         int n_entries;
 
         entries = (PgTreUpperLeafEntry *) PageGetContents(page);
-        n_entries = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData)) /
-                    sizeof(PgTreUpperLeafEntry);
+        n_entries = PageTreGetOpaque(page)->flags;
+        if (n_entries == 0)
+        {
+            /* Back-compat fallback: pages written before the flags
+             * counter was added may have flags=0 even when entries
+             * exist.  Compute conservatively using sizeof(entry);
+             * this over-counts when inline blobs are present but
+             * only affects older indexes -- they can be rebuilt
+             * with REINDEX. */
+            n_entries = (((PageHeader) page)->pd_lower
+                         - sizeof(PageHeaderData))
+                        / sizeof(PgTreUpperLeafEntry);
+        }
 
         /* Binary search for trigram_hash. */
         for (i = 0; i < n_entries; i++)

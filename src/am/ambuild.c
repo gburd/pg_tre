@@ -463,10 +463,13 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
             {
                 if (n_positions >= positions_alloced)
                 {
-                    positions_alloced = (positions_alloced == 0) ? 16 :
-                                        positions_alloced * 2;
-                    positions_buf = (uint32 *) repalloc(positions_buf,
-                                      positions_alloced * sizeof(uint32));
+                    int new_cap = (positions_alloced == 0) ? 16 :
+                                  positions_alloced * 2;
+                    positions_buf = (uint32 *)
+                        (positions_buf == NULL
+                         ? palloc(new_cap * sizeof(uint32))
+                         : repalloc(positions_buf, new_cap * sizeof(uint32)));
+                    positions_alloced = new_cap;
                 }
                 positions_buf[n_positions++] = entry->position;
             }

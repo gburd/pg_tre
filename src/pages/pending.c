@@ -668,10 +668,15 @@ snapshot_existing_upper(Relation index, RebuildState *r,
     }
 
     {
-        int n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData)) /
-                sizeof(PgTreUpperLeafEntry);
+        int n = PageTreGetOpaque(page)->flags;
         PgTreUpperLeafEntry *src =
             (PgTreUpperLeafEntry *) PageGetContents(page);
+        if (n == 0)
+        {
+            /* Fallback: old-format page without the n_entries counter. */
+            n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
+                / sizeof(PgTreUpperLeafEntry);
+        }
 
         r->n_existing      = n;
         r->i_existing      = 0;
