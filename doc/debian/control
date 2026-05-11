@@ -1,0 +1,27 @@
+Source: postgresql-18-pg-tre
+Section: database
+Priority: optional
+Maintainer: Greg Burd <greg@burd.me>
+Build-Depends: debhelper-compat (= 13),
+               postgresql-server-dev-18,
+               autoconf,
+               automake,
+               libtool,
+               gettext,
+               m4
+Standards-Version: 4.6.0
+Homepage: https://codeberg.org/gregburd/pg_tre
+Vcs-Git: https://codeberg.org/gregburd/pg_tre.git
+Vcs-Browser: https://codeberg.org/gregburd/pg_tre
+
+Package: postgresql-18-pg-tre
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, postgresql-18
+Description: Approximate regex index access method for PostgreSQL 18
+ pg_tre provides a native index access method for fast approximate-regex
+ queries over text columns. It uses a three-tier filter funnel (range bloom,
+ trigram postings, per-tuple bloom) backed by the TRE library for recheck.
+ .
+ Supports edit-distance k (insertions, deletions, substitutions) with
+ configurable DoS protections. Requires shared_preload_libraries='pg_tre'
+ for index AM functionality.

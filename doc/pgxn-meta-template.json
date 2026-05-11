@@ -1,0 +1,64 @@
+{
+  "name": "pg_tre",
+  "abstract": "Native PostgreSQL index access method for approximate regex matching",
+  "description": "pg_tre provides a native index AM for fast approximate-regex queries over text columns. It uses a three-tier filter funnel (range bloom, trigram postings, per-tuple bloom) backed by the TRE library for recheck. Supports edit-distance k (insertions, deletions, substitutions) with configurable DoS protections.",
+  "version": "1.0.0",
+  "maintainer": "Greg Burd <greg@burd.me>",
+  "license": "mit",
+  "prereqs": {
+    "runtime": {
+      "requires": {
+        "PostgreSQL": "18.0.0"
+      }
+    },
+    "build": {
+      "requires": {
+        "autoconf": 0,
+        "automake": 0,
+        "libtool": 0,
+        "gettext": 0,
+        "m4": 0
+      }
+    }
+  },
+  "provides": {
+    "pg_tre": {
+      "abstract": "Approximate regex index access method",
+      "file": "sql/pg_tre--1.0.0.sql",
+      "docfile": "doc/pg_tre.md",
+      "version": "1.0.0"
+    }
+  },
+  "resources": {
+    "homepage": "https://codeberg.org/gregburd/pg_tre",
+    "bugtracker": {
+      "web": "https://codeberg.org/gregburd/pg_tre/issues"
+    },
+    "repository": {
+      "url": "https://codeberg.org/gregburd/pg_tre.git",
+      "web": "https://codeberg.org/gregburd/pg_tre",
+      "type": "git"
+    }
+  },
+  "generated_by": "pg_tre developers",
+  "meta-spec": {
+    "version": "1.0.0",
+    "url": "https://pgxn.org/meta/spec.txt"
+  },
+  "tags": [
+    "index",
+    "regex",
+    "approximate matching",
+    "fuzzy search",
+    "edit distance",
+    "tre",
+    "trigram",
+    "bloom filter"
+  ],
+  "no_index": {
+    "directory": [
+      "vendor",
+      "test"
+    ]
+  }
+}
