@@ -54,6 +54,15 @@ extern PgTrePostingBuilder *pg_tre_posting_build_begin(Relation index,
                                                        uint64 trigram_hash,
                                                        bool with_payload);
 
+/* Sized variant: pre-allocate a sparsemap buffer large enough to hold
+ * the expected number of TIDs without triggering the dynamic-resize
+ * path.  Use this from the pending-list merge path where cardinality
+ * is known up-front. */
+extern PgTrePostingBuilder *pg_tre_posting_build_begin_sized(Relation index,
+                                                             uint64 trigram_hash,
+                                                             bool with_payload,
+                                                             size_t expected_bytes);
+
 /* Append one (TID, position, tuple-bloom-bits) triple. */
 extern void pg_tre_posting_build_add(PgTrePostingBuilder *b,
                                      ItemPointer tid,

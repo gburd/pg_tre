@@ -87,7 +87,24 @@ PgTrePostingBuilder *
 pg_tre_posting_build_begin(Relation index, uint64 trigram_hash,
                            bool with_payload)
 {
+    /* Default initial size: 1024 bytes.  Callers that know the TID count
+     * up-front should call pg_tre_posting_build_begin_sized() instead to
+     * avoid the dynamic-resize path through sparsemap_set_data_size(),
+     * which has a latent bug on repeated grows.  The sized variant is
+     * used by the pending-list merge path where cardinality is known. */
+    return pg_tre_posting_build_begin_sized(index, trigram_hash,
+                                             with_payload, 1024);
+}
+
+PgTrePostingBuilder *
+pg_tre_posting_build_begin_sized(Relation index, uint64 trigram_hash,
+                                 bool with_payload, size_t expected_bytes)
+{
     PgTrePostingBuilder *b;
+
+    /* Round up to a generous bound.  Sparsemap_add can return IDX_MAX
+     * even with headroom due to internal chunk layout; give 2x. */
+    size_t alloc = expected_bytes < 1024 ? 1024 : expected_bytes * 2;
 
     b = (PgTrePostingBuilder *) palloc0(sizeof(*b));
     b->index        = index;
@@ -97,8 +114,7 @@ pg_tre_posting_build_begin(Relation index, uint64 trigram_hash,
     b->max_tid      = 0;
     b->n_tids       = 0;
 
-    /* Start with a reasonable-sized buffer; sparsemap will grow on demand. */
-    b->smap = sparsemap(1024);
+    b->smap = sparsemap(alloc);
     if (b->smap == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_OUT_OF_MEMORY),

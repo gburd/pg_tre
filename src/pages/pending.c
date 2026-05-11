@@ -289,7 +289,16 @@ pg_tre_pending_scan(Relation index, PgTrePendingCallback callback, void *ctx)
 typedef struct MergeEntry
 {
     uint64       trigram_hash;
-    sparsemap_t *new_tids;       /* malloc-backed accumulator */
+    /*
+     * Phase 4.1: collect TIDs into a palloc'd dynamic array instead of a
+     * dynamically-grown malloc-backed sparsemap.  The sparsemap dynamic
+     * resize path triggered heap corruption on larger fixtures; palloc/
+     * repalloc is rock-solid.  The array is converted to a sparsemap
+     * once at materialize time when we know the final cardinality.
+     */
+    uint64      *tids;           /* palloc'd in mc->mcxt */
+    int          n_tids;
+    int          tids_alloced;
     bool         seen_in_upper;  /* set during upper walk */
     BlockNumber  merged_root;    /* posting root after merge */
     uint8       *merged_inline;  /* inline blob after merge (palloc) */
@@ -356,7 +365,10 @@ merge_find(MergeCtx *mc, uint64 h, bool create)
     {
         MergeEntry *e = MemoryContextAllocZero(mc->mcxt, sizeof(*e));
         e->trigram_hash        = h;
-        e->new_tids            = sparsemap(1024);
+        e->tids                = MemoryContextAlloc(mc->mcxt,
+                                       16 * sizeof(uint64));
+        e->n_tids              = 0;
+        e->tids_alloced        = 16;
         e->merged_root         = InvalidBlockNumber;
         e->merged_inline       = NULL;
         e->merged_inline_bytes = 0;
@@ -377,27 +389,19 @@ collect_pending_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
     MergeCtx *mc = (MergeCtx *) ctx;
     MergeEntry *e;
     uint64 packed;
-    uint64 rc;
 
     (void) position;     /* Phase 4 ignores positions; Phase 5 uses them */
     e = merge_find(mc, hash, true);
     packed = pg_tre_pack_tid(tid);
 
-    rc = sparsemap_add(e->new_tids, packed);
-    if (rc == SPARSEMAP_IDX_MAX)
+    if (e->n_tids >= e->tids_alloced)
     {
-        size_t cap = sparsemap_get_capacity(e->new_tids);
-        size_t nxt = cap == 0 ? 1024 : cap * 2;
-        sparsemap_t *grown = sparsemap_set_data_size(e->new_tids, NULL, nxt);
-        if (grown == NULL)
-            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
-                errmsg("pg_tre: merge accumulator grow failed")));
-        e->new_tids = grown;
-        rc = sparsemap_add(e->new_tids, packed);
-        if (rc == SPARSEMAP_IDX_MAX)
-            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                errmsg("pg_tre: sparsemap_add post-grow failed")));
+        MemoryContext old = MemoryContextSwitchTo(mc->mcxt);
+        e->tids_alloced *= 2;
+        e->tids = repalloc(e->tids, e->tids_alloced * sizeof(uint64));
+        MemoryContextSwitchTo(old);
     }
+    e->tids[e->n_tids++] = packed;
 }
 
 /*
@@ -448,6 +452,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         PgTreUpperRef ref;
         sparsemap_t *existing;
         sparsemap_t *merged;
+        int k;
         uint64 min_idx, max_idx, idx;
         size_t sz;
         uint8 *out_buf;
@@ -457,6 +462,33 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         if (e == NULL)
             continue;
 
+        /*
+         * Convert our collected uint64 TID array to a malloc-backed
+         * sparsemap sized for the exact cardinality we observed.
+         * Over-allocate generously to avoid any dynamic-resize path:
+         * worst case a sparsemap for N TIDs needs N*8 bytes plus
+         * overhead.  2*N*8 + 1024 is more than enough.
+         */
+        {
+            size_t cap = (size_t) e->n_tids * 16 + 1024;
+            sparsemap_t *fresh_acc = sparsemap(cap);
+            if (fresh_acc == NULL)
+                ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                    errmsg("pg_tre: merge accumulator allocation failed")));
+            for (k = 0; k < e->n_tids; k++)
+            {
+                if (sparsemap_add(fresh_acc, e->tids[k]) == SPARSEMAP_IDX_MAX)
+                    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("pg_tre: merge accumulator unexpectedly full")));
+            }
+            merged = fresh_acc;
+        }
+
+        /*
+         * Union with the existing posting (if any).  pg_tre_posting_materialize
+         * returns a palloc-backed sparsemap_t wrap; sparsemap_union returns a
+         * new malloc-backed sparsemap.
+         */
         existing = NULL;
         if (pg_tre_upper_lookup(index, e->trigram_hash, &ref))
         {
@@ -469,15 +501,11 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         if (existing != NULL)
         {
-            merged = sparsemap_union(existing, e->new_tids);
+            sparsemap_t *u = sparsemap_union(existing, merged);
             free(existing);
+            free(merged);
+            merged = u;
         }
-        else
-        {
-            merged = sparsemap_copy(e->new_tids);
-        }
-        free(e->new_tids);
-        e->new_tids = merged;
 
         /*
          * Re-serialize to a palloc'd buffer (same trick as posting.c's
@@ -515,26 +543,24 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         }
         else
         {
-            /*
-             * For merged postings too big for inline: build a single
-             * posting leaf via the Phase 2 builder.  We can't reuse
-             * write_single_leaf directly (static), but the builder API
-             * works fine.
-             */
-            PgTrePostingBuilder *b = pg_tre_posting_build_begin(
-                                          index, e->trigram_hash, false);
-            uint64 k;
+            PgTrePostingBuilder *b;
+            uint64 j;
+            /* Pre-size: worst case each TID is ~8 bytes in sparsemap,
+             * plus overhead.  Size for 16 bytes per TID is generous. */
+            size_t expected = (size_t) e->n_tids * 16 + 1024;
+            b = pg_tre_posting_build_begin_sized(index, e->trigram_hash,
+                                                  false, expected);
             if (sparsemap_cardinality(merged) > 0)
             {
-                for (k = min_idx; k <= max_idx; k++)
+                for (j = min_idx; j <= max_idx; j++)
                 {
-                    if (sparsemap_contains(merged, k))
+                    if (sparsemap_contains(merged, j))
                     {
                         ItemPointerData tid;
-                        pg_tre_unpack_tid(k, &tid);
+                        pg_tre_unpack_tid(j, &tid);
                         pg_tre_posting_build_add(b, &tid, NULL, 0, NULL);
                     }
-                    if (k == max_idx) break;
+                    if (j == max_idx) break;
                 }
             }
             {
@@ -543,7 +569,6 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
                 e->merged_root = pg_tre_posting_build_finish(b, &id, &ib);
                 if (e->merged_root == InvalidBlockNumber)
                 {
-                    /* Unexpected: builder chose inline after all. */
                     e->merged_inline = (uint8 *) id;
                     e->merged_inline_bytes = ib;
                 }
@@ -553,7 +578,6 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         }
 
         free(merged);
-        e->new_tids = NULL;
     }
 }
 
@@ -794,12 +818,8 @@ pg_tre_pending_merge(Relation index)
                           (uint64) k, meta.n_tuples_indexed);
     truncate_pending_list(index);
 
-    /* Free sparsemap handles (new_tids cleared in materialize). */
-    for (i = 0; i < mc.bucket_cap; i++)
-    {
-        if (mc.bucket_tab[i] && mc.bucket_tab[i]->new_tids)
-            free(mc.bucket_tab[i]->new_tids);
-    }
+    /* No sparsemap handles to free (tids arrays are palloc'd in merge_cxt
+     * and released by MemoryContextDelete below). */
 
     MemoryContextSwitchTo(old);
     MemoryContextDelete(merge_cxt);
