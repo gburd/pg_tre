@@ -666,13 +666,11 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
     /* Phase 5 tier-3: apply per-tuple bloom filtering.
      *
-     * Disabled pending a fix for a crash in sparsemap_rank during
-     * pg_tre_posting_lookup_tuple_bloom.  Tier-3 is an optimization;
-     * correctness does not depend on it -- the executor's recheck
-     * filters any false positives from tier-2.  Re-enable when the
-     * sparsemap_rank bug is resolved.
+     * Re-enabled after fixing rank-based offset bug in
+     * pg_tre_posting_lookup_tuple_bloom.  sparsemap_rank(map, 0, tid, true)
+     * returns count INCLUDING tid, so we skip (rank-1) entries, not rank.
      */
-    if (false && result != NULL && st->q.global_max_cost >= 0)
+    if (result != NULL && st->q.global_max_cost >= 0)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
                                          result, st->scan_cxt);
@@ -680,12 +678,10 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
     /* Phase 5.1: apply positional filtering.
      *
-     * Disabled pending a fix for a crash in sparsemap_rank during
-     * pg_tre_posting_lookup_positions.  Correctness does not depend on
-     * positional filtering -- the executor's recheck handles false
-     * positives.  Re-enable when the sparsemap_rank bug is resolved.
+     * Re-enabled after fixing rank-based offset bug in
+     * pg_tre_posting_lookup_positions (same as lookup_tuple_bloom).
      */
-    if (false && result != NULL && sparsemap_cardinality(result) > 0)
+    if (result != NULL && sparsemap_cardinality(result) > 0)
     {
         sparsemap_t *filtered = sparsemap(sparsemap_get_capacity(result));
         if (filtered != NULL)

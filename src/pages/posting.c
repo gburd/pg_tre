@@ -733,18 +733,21 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
             return false;
         }
 
-        /* Compute rank: number of set bits before packed_tid. */
+        /* Compute rank: sparsemap_rank(x, y, true) returns the count of set
+         * bits from x to y INCLUSIVE.  So if packed_tid is the Nth TID
+         * (0-indexed), rank will be N+1, and we need to skip N entries.
+         * Hence: skip (rank - 1) entries, not rank entries. */
         rank = sparsemap_rank(smap, 0, packed_tid, true);
         free(smap);
 
         /* Phase 5: payload layout:
          * Each entry is: uint16 n_positions + uint32 positions[n_positions]
          * + uint8 bloom[bloom_bytes].
-         * Walk forward 'rank' entries to find the target. */
+         * Walk forward 'rank-1' entries to find the target. */
         payload_base = (const uint8 *) page + hdr->payload_offset;
         entry_ptr = payload_base;
 
-        for (size_t i = 0; i < rank; i++)
+        for (size_t i = 0; i + 1 < rank; i++)
         {
             uint16 n_pos;
             memcpy(&n_pos, entry_ptr, sizeof(uint16));
@@ -846,7 +849,8 @@ pg_tre_posting_lookup_positions(Relation index,
         entry_ptr = payload_base;
         {
             size_t entry_idx;
-            for (entry_idx = 0; entry_idx < rank; entry_idx++)
+            /* Same fix as in lookup_tuple_bloom: skip (rank-1) entries */
+            for (entry_idx = 0; entry_idx + 1 < rank; entry_idx++)
             {
                 uint16 entry_n_positions;
                 memcpy(&entry_n_positions, entry_ptr, sizeof(uint16));
