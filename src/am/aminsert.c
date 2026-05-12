@@ -21,6 +21,7 @@
 #include "pg_tre/hash.h"
 #include "pg_tre/pending.h"
 #include "pg_tre/pg_tre.h"
+#include "pg_tre/utf8.h"
 
 bool
 pg_tre_aminsert(Relation index, Datum *values, bool *isnull,
@@ -30,7 +31,13 @@ pg_tre_aminsert(Relation index, Datum *values, bool *isnull,
 {
     text   *txt;
     char   *str;
-    int     len, i;
+    int     len;
+    PgTreCpStream stream;
+    int32   ring[3];   /* ring buffer of last 3 codepoints */
+    int     ring_pos[3]; /* byte positions where each codepoint starts */
+    int     ring_n = 0;
+    int32   cp;
+    int     cp_start;
     uint64  hashes    [PG_TRE_PENDING_BATCH_MAX];
     ItemPointerData tids[PG_TRE_PENDING_BATCH_MAX];
     uint32  positions [PG_TRE_PENDING_BATCH_MAX];
@@ -44,22 +51,51 @@ pg_tre_aminsert(Relation index, Datum *values, bool *isnull,
     str = VARDATA_ANY(txt);
     len = VARSIZE_ANY_EXHDR(txt);
 
-    /* Tokenize to byte trigrams. */
-    for (i = 0; i + 3 <= len; i++)
-    {
-        uint8 tri[3] = { (uint8) str[i], (uint8) str[i+1], (uint8) str[i+2] };
-        hashes[batch_n]    = pg_tre_hash_trigram(tri);
-        tids[batch_n]      = *ht_ctid;
-        positions[batch_n] = (uint32) i;
-        batch_n++;
+    /* Initialize codepoint stream. */
+    pg_tre_cpstream_init(&stream, str, len);
 
-        if (batch_n == PG_TRE_PENDING_BATCH_MAX)
+    /* Streaming loop: extract codepoint trigrams. */
+    while (true)
+    {
+        cp_start = pg_tre_cpstream_pos(&stream);
+        cp = pg_tre_cpstream_next(&stream);
+        if (cp < 0)
+            break;
+
+        /* Shift the ring buffer. */
+        if (ring_n >= 3)
         {
-            pg_tre_pending_append_batch(index, hashes, tids, positions,
-                                        batch_n);
-            batch_n = 0;
+            ring[0] = ring[1];
+            ring[1] = ring[2];
+            ring[2] = cp;
+            ring_pos[0] = ring_pos[1];
+            ring_pos[1] = ring_pos[2];
+            ring_pos[2] = cp_start;
+        }
+        else
+        {
+            ring[ring_n] = cp;
+            ring_pos[ring_n] = cp_start;
+            ring_n++;
+        }
+
+        /* Emit a trigram once we have 3 codepoints. */
+        if (ring_n == 3)
+        {
+            hashes[batch_n]    = pg_tre_hash_trigram_cp(ring);
+            tids[batch_n]      = *ht_ctid;
+            positions[batch_n] = (uint32) ring_pos[0];
+            batch_n++;
+
+            if (batch_n == PG_TRE_PENDING_BATCH_MAX)
+            {
+                pg_tre_pending_append_batch(index, hashes, tids, positions,
+                                            batch_n);
+                batch_n = 0;
+            }
         }
     }
+
     if (batch_n > 0)
         pg_tre_pending_append_batch(index, hashes, tids, positions, batch_n);
 

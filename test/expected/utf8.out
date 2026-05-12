@@ -1,0 +1,86 @@
+-- UTF-8 codepoint trigram tests (Phase 3.5)
+--
+-- Verify that pg_tre correctly indexes and searches multi-byte UTF-8 text.
+-- For ASCII-only text, codepoint trigrams are equivalent to byte trigrams
+-- (no regression on existing behavior). For multi-byte UTF-8, codepoint
+-- trigrams capture character identity correctly.
+-- Ensure extension is loaded.
+\set ECHO none
+SET
+DROP TABLE
+CREATE TABLE
+INSERT 0 5
+CREATE INDEX
+SET
+SET
+ id |     txt     
+----+-------------
+  1 | hello world
+  3 | hello again
+(2 rows)
+
+ id |      txt      
+----+---------------
+  1 | hello world
+  2 | goodbye world
+(2 rows)
+
+ id |         txt         
+----+---------------------
+  5 | the quick brown fox
+(1 row)
+
+SET
+SET
+SET
+ id |     txt     
+----+-------------
+  1 | hello world
+  3 | hello again
+(2 rows)
+
+ id |      txt      
+----+---------------
+  1 | hello world
+  2 | goodbye world
+(2 rows)
+
+ id |         txt         
+----+---------------------
+  5 | the quick brown fox
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 10
+CREATE INDEX
+SET
+SET
+ id |         txt          
+----+----------------------
+  1 | 東京は日本の首都です
+  7 | 東京タワーは高いです
+(2 rows)
+
+ id |      txt       
+----+----------------
+  4 | こんにちは世界
+  5 | 你好世界
+(2 rows)
+
+ id |       txt        
+----+------------------
+  2 | 北京是中国的首都
+  8 | 北京烤鸭很好吃
+(2 rows)
+
+ id |           txt            
+----+--------------------------
+  3 | 서울은 한국의 수도입니다
+  9 | 서울 타워는 아름답습니다
+(2 rows)
+
+SET
+SET
+SET
+psql:test/sql/utf8.sql:77: ERROR:  pg_tre: regex extraction produced no selective trigrams (always_true); index scan cannot answer this query

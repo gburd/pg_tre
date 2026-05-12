@@ -14,6 +14,7 @@
 #include "postgres.h"
 
 #include "pg_tre/regex_ast.h"
+#include "pg_tre/utf8.h"
 
 #include <ctype.h>
 
@@ -77,20 +78,32 @@ init_tokenizer(TokenizerState *ts, const char *input, int len)
 static int
 peek_char(TokenizerState *ts)
 {
+	PgTreCpStream s;
 	if (ts->pos >= ts->len)
 		return -1;
-	return (unsigned char) ts->input[ts->pos];
+	pg_tre_cpstream_init(&s, ts->input + ts->pos, ts->len - ts->pos);
+	return pg_tre_cpstream_next(&s);   /* decode, don't advance ts->pos */
 }
 
 /*
- * Consume and return the next character.
+ * Consume and return the next codepoint (UTF-8 aware).
+ *
+ * Phase 3.5: decode codepoints, not raw bytes, so a multi-byte UTF-8
+ * character produces a single LITERAL token whose `cp` matches the
+ * codepoints emitted by ambuild's cpstream tokenizer.
  */
 static int
 next_char(TokenizerState *ts)
 {
+	PgTreCpStream s;
+	int cp;
 	if (ts->pos >= ts->len)
 		return -1;
-	return (unsigned char) ts->input[ts->pos++];
+	pg_tre_cpstream_init(&s, ts->input + ts->pos, ts->len - ts->pos);
+	cp = pg_tre_cpstream_next(&s);
+	if (cp >= 0)
+		ts->pos += s.src_pos;
+	return cp;
 }
 
 /*

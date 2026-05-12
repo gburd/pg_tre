@@ -11,8 +11,11 @@
 #include "postgres.h"
 #include "fmgr.h"
 
-/* On-disk format version advertised by meta page. */
-#define PG_TRE_FORMAT_VERSION 1
+/* On-disk format version advertised by meta page.
+ * Version 2: codepoint-based trigrams (Phase 3.5).
+ * BREAKING CHANGE: indexes built with v1 (byte trigrams) must be REINDEXed.
+ */
+#define PG_TRE_FORMAT_VERSION 2
 
 /* String version returned by tre_version(). */
 #define PG_TRE_VERSION_STRING "pg_tre 1.0.0-dev"

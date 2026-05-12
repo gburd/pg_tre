@@ -55,16 +55,19 @@
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/tiling.h"
 #include "pg_tre/uleven.h"
+#include "pg_tre/utf8.h"
 
 /*
  * Accumulator for building the required-trigram set.  We collect unique
- * trigrams (by their hash + byte representation) into a dynamic array.
+ * trigrams (by their hash + codepoint representation) into a dynamic array.
  * For simple patterns, the set is small (<= dozens), so linear dedup is
  * fine.
+ *
+ * Phase 3.5: codepoint-based trigrams (3 x int32) instead of byte trigrams.
  */
 typedef struct TrigramAccum
 {
-    uint8   (*tris)[3];     /* array of 3-byte trigrams */
+    int32   (*tris)[3];     /* array of 3-codepoint trigrams */
     int       n;
     int       alloced;
     bool      overflowed;   /* true if we gave up (fanout cap) */
@@ -82,7 +85,7 @@ accum_init(TrigramAccum *a, MemoryContext cxt)
 }
 
 static void
-accum_add(TrigramAccum *a, const uint8 t[3], MemoryContext cxt)
+accum_add(TrigramAccum *a, const int32 t[3], MemoryContext cxt)
 {
     int i;
 
@@ -137,12 +140,14 @@ accum_add(TrigramAccum *a, const uint8 t[3], MemoryContext cxt)
 
 /*
  * Linearize and extract trigrams in a single pass: walk the AST,
- * track a "literal run" buffer, flush to the accumulator on every
+ * track a "literal run" buffer of codepoints, flush to the accumulator on every
  * break point.
+ *
+ * Phase 3.5: run buffer contains int32 codepoints, not bytes.
  */
 typedef struct LinCtx
 {
-    uint8      *run;
+    int32      *run;    /* array of codepoints */
     int         run_n;
     int         run_cap;
     TrigramAccum *acc;
@@ -156,17 +161,17 @@ run_grow(LinCtx *lc)
 {
     MemoryContext old = MemoryContextSwitchTo(lc->cxt);
     lc->run_cap = lc->run_cap == 0 ? 64 : lc->run_cap * 2;
-    lc->run = lc->run ? repalloc(lc->run, lc->run_cap)
-                      : palloc(lc->run_cap);
+    lc->run = lc->run ? repalloc(lc->run, lc->run_cap * sizeof(int32))
+                      : palloc(lc->run_cap * sizeof(int32));
     MemoryContextSwitchTo(old);
 }
 
 static void
-run_append_byte(LinCtx *lc, uint8 c)
+run_append_cp(LinCtx *lc, int32 cp)
 {
     if (lc->run_n >= lc->run_cap)
         run_grow(lc);
-    lc->run[lc->run_n++] = c;
+    lc->run[lc->run_n++] = cp;
 }
 
 /*
@@ -194,17 +199,11 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
     switch (ast->kind)
     {
         case REGEX_AST_LITERAL:
-            /* Bytes 0..127 appendable directly (Phase 3 ASCII only). */
-            if (ast->u.literal.codepoint >= 0 &&
-                ast->u.literal.codepoint <= 0xFF)
-            {
-                run_append_byte(lc, (uint8) ast->u.literal.codepoint);
-            }
-            else
-            {
-                /* Non-ASCII literal in Phase 3: treat as opaque. */
-                run_flush(lc);
-            }
+            /*
+             * Phase 3.5: append the codepoint directly to the run.
+             * We support all Unicode codepoints (0x0000..0x10FFFF), not just ASCII.
+             */
+            run_append_cp(lc, ast->u.literal.codepoint);
             break;
 
         case REGEX_AST_ANY:
@@ -315,6 +314,8 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
  * Convert an extracted TrigramAccum into a TrigramQuery.  Each
  * trigram becomes one conjunct (AND across all), with a single
  * disjunct containing that trigram's hash (OR of size 1).
+ *
+ * Phase 3.5: use pg_tre_hash_trigram_cp for codepoint trigrams.
  */
 static void
 accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
@@ -345,7 +346,7 @@ accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
         TrigramConjunct *c = &out->conjuncts[i];
         c->n = 1;
         c->alts = palloc(sizeof(TrigramDisjunct));
-        c->alts[0].trigram_hash = pg_tre_hash_trigram(a->tris[i]);
+        c->alts[0].trigram_hash = pg_tre_hash_trigram_cp(a->tris[i]);
         c->alts[0].min_offset = 0;
         c->alts[0].max_offset = INT32_MAX;
     }

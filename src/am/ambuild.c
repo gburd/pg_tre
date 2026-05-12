@@ -50,6 +50,7 @@
 #include "pg_tre/posting.h"
 #include "pg_tre/range.h"
 #include "pg_tre/upper.h"
+#include "pg_tre/utf8.h"
 
 /* In-memory sort entry: (trigram_hash, tid, position). */
 typedef struct TrigramTidEntry
@@ -179,6 +180,8 @@ find_or_create_tid_bloom(BuildState *bstate, ItemPointer tid)
 
 /*
  * Extract trigrams from a text datum and insert them into the build state.
+ * Phase 3.5: extract codepoint trigrams using UTF-8 streaming.
+ * For ASCII text, this is equivalent to byte trigrams (no regression).
  * Phase 5: also populate per-tuple bloom filter and record positions.
  */
 static void
@@ -187,7 +190,12 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     text       *txt;
     char       *str;
     int         len;
-    int         i;
+    PgTreCpStream stream;
+    int32       ring[3];   /* ring buffer of last 3 codepoints */
+    int         ring_pos[3]; /* byte positions where each codepoint starts */
+    int         ring_n = 0;/* how many codepoints we've seen so far */
+    int32       cp;
+    int         cp_start;  /* byte offset where current codepoint starts */
     PgTreBloom *bloom = NULL;
 
     if (isnull)
@@ -202,35 +210,68 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     if (pg_tre_tuple_bloom_enable)
         bloom = find_or_create_tid_bloom(bstate, tid);
 
-    /* Extract byte trigrams: every 3 consecutive bytes. */
-    for (i = 0; i <= len - 3; i++)
+    /* Initialize codepoint stream. */
+    pg_tre_cpstream_init(&stream, str, len);
+
+    /*
+     * Streaming loop: fill a 3-element ring buffer, emit trigrams from
+     * each consecutive triple of codepoints.
+     *
+     * Positions are byte offsets (for TRE's byte-based recheck), not
+     * codepoint indices. We track the byte position of the start of each
+     * codepoint in the ring buffer so trigram positions are accurate.
+     */
+    while (true)
     {
-        uint8   trigram[3];
-        uint64  trigram_hash;
-        TrigramTidEntry *entry;
+        cp_start = pg_tre_cpstream_pos(&stream);
+        cp = pg_tre_cpstream_next(&stream);
+        if (cp < 0)
+            break;
 
-        trigram[0] = (uint8) str[i];
-        trigram[1] = (uint8) str[i + 1];
-        trigram[2] = (uint8) str[i + 2];
-        trigram_hash = pg_tre_hash_trigram(trigram);
-
-        /* Grow array if needed. */
-        if (bstate->n_entries >= bstate->entries_alloced)
+        /* Shift the ring buffer. */
+        if (ring_n >= 3)
         {
-            bstate->entries_alloced *= 2;
-            bstate->entries = (TrigramTidEntry *)
-                repalloc(bstate->entries,
-                         bstate->entries_alloced * sizeof(TrigramTidEntry));
+            ring[0] = ring[1];
+            ring[1] = ring[2];
+            ring[2] = cp;
+            ring_pos[0] = ring_pos[1];
+            ring_pos[1] = ring_pos[2];
+            ring_pos[2] = cp_start;
+        }
+        else
+        {
+            ring[ring_n] = cp;
+            ring_pos[ring_n] = cp_start;
+            ring_n++;
         }
 
-        entry = &bstate->entries[bstate->n_entries++];
-        entry->trigram_hash = trigram_hash;
-        entry->tid = *tid;
-        entry->position = (uint32) i;  /* byte offset */
+        /* Emit a trigram once we have 3 codepoints. */
+        if (ring_n == 3)
+        {
+            uint64  trigram_hash;
+            TrigramTidEntry *entry;
 
-        /* Phase 5: add trigram to the per-tuple bloom. */
-        if (bloom != NULL)
-            pg_tre_bloom_add_trigram(bloom, trigram_hash);
+            trigram_hash = pg_tre_hash_trigram_cp(ring);
+
+            /* Grow array if needed. */
+            if (bstate->n_entries >= bstate->entries_alloced)
+            {
+                bstate->entries_alloced *= 2;
+                bstate->entries = (TrigramTidEntry *)
+                    repalloc(bstate->entries,
+                             bstate->entries_alloced * sizeof(TrigramTidEntry));
+            }
+
+            entry = &bstate->entries[bstate->n_entries++];
+            entry->trigram_hash = trigram_hash;
+            entry->tid = *tid;
+            /* Position is the byte offset where the first codepoint starts. */
+            entry->position = (uint32) ring_pos[0];
+
+            /* Phase 5: add trigram to the per-tuple bloom. */
+            if (bloom != NULL)
+                pg_tre_bloom_add_trigram(bloom, trigram_hash);
+        }
     }
 }
 
