@@ -1,0 +1,9 @@
+pg_tre (1.0.0-rc1-1) unstable; urgency=medium
+
+  * Initial release candidate.
+  * Native PostgreSQL 18+ index access method for approximate regex.
+  * Three-tier filter funnel: range bloom, sparsemap trigram postings,
+    per-tuple bloom.
+  * Ships legacy tre_amatch() UDFs for compatibility.
+
+ -- Greg Burd <greg@burd.me>  Tue, 12 May 2026 10:00:00 +0000

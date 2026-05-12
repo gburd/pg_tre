@@ -18,7 +18,7 @@ EXTENSION    = pg_tre
 MODULE_big   = pg_tre
 DATA         = sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -47,6 +47,7 @@ OBJS = \
     src/util/sparsemap.o \
     src/util/bloom.o \
     src/util/hash.o \
+    src/util/utf8.o \
     src/util/type_pattern.o \
     src/am/amapi.o \
     src/am/ambuild.o \
@@ -152,7 +153,28 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # ------------------------------------------------------------------
 # Convenience targets
 # ------------------------------------------------------------------
-.PHONY: localcheck tapcheck vendor-clean distclean-full
+.PHONY: localcheck tapcheck vendor-clean distclean-full dist
+
+# ------------------------------------------------------------------
+# Release tarball
+# ------------------------------------------------------------------
+PG_TRE_VERSION = 1.0.0-rc1
+DIST_NAME      = pg_tre-$(PG_TRE_VERSION)
+
+dist:
+	@echo "==> Creating $(DIST_NAME).tar.gz"
+	git archive --format=tar --prefix=$(DIST_NAME)/ HEAD -o $(DIST_NAME).tar
+	@echo "    Archiving submodules"
+	@ ( cd vendor/tre && git archive --format=tar --prefix=$(DIST_NAME)/vendor/tre/ HEAD ) \
+	  > $(DIST_NAME)-tre.tar
+	@ ( cd vendor/lime && git archive --format=tar --prefix=$(DIST_NAME)/vendor/lime/ HEAD ) \
+	  > $(DIST_NAME)-lime.tar
+	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-tre.tar $(DIST_NAME)-lime.tar
+	rm -f $(DIST_NAME)-tre.tar $(DIST_NAME)-lime.tar
+	gzip -f $(DIST_NAME).tar
+	@echo "    $(DIST_NAME).tar.gz ready"
+	@ls -la $(DIST_NAME).tar.gz
+	@echo "    SHA256: $$(sha256sum $(DIST_NAME).tar.gz | awk '{print $$1}')"
 
 # Local regression runner that sidesteps our nix-build pg_regress
 # exec-path quirk.  Invokes scripts/run-regress.sh against an already-

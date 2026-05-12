@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+#
+# Debian packaging rules for pg_tre.
+# Uses pgxs-compatible build driven through PG_CONFIG.
+
+include /usr/share/postgresql-common/pgxs_debian_control.mk
+
+override_dh_auto_configure:
+	# TRE submodule needs autoconf regeneration
+	cd vendor/tre && ./utils/autogen.sh
+	cd vendor/tre && ./configure --enable-static --disable-shared \
+	    --disable-nls --without-alloca CFLAGS="-fPIC -O2 -g"
+	$(MAKE) -C vendor/tre
+
+override_dh_auto_build:
+	+pg_buildext build .
+
+override_dh_auto_install:
+	+pg_buildext install . postgresql-18-pg-tre
+
+override_dh_auto_test:
+	# Skip tests during package build — they require a running cluster
+	# with shared_preload_libraries = 'pg_tre'.
+	true
+
+%:
+	dh $@ --with pgxs_loop

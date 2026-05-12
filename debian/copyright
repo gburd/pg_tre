@@ -1,0 +1,48 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: pg_tre
+Upstream-Contact: Greg Burd <greg@burd.me>
+Source: https://codeberg.org/gregburd/pg_tre
+
+Files: *
+Copyright: 2024-2026 Greg Burd
+License: MIT
+
+Files: vendor/tre/*
+Copyright: 2001-2016 Ville Laurikari <vl@iki.fi>
+License: BSD-2-clause
+Comment: Vendored as a submodule. See vendor/tre/LICENSE.
+
+Files: vendor/lime/*
+Copyright: Public Domain (Lemon/SQLite lineage)
+License: public-domain
+Comment: Build-time code generator; not linked into pg_tre.so.
+
+Files: sparsemap.c sparsemap.h include/pg_tre/sparsemap.h
+Copyright: 2024 Greg Burd
+License: MIT
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+License: BSD-2-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+ .
+ 1. Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+ 2. Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+License: public-domain
+ This file is in the public domain.

@@ -1,0 +1,4 @@
+usr/lib/postgresql/18/lib/pg_tre.so
+usr/share/postgresql/18/extension/pg_tre.control
+usr/share/postgresql/18/extension/pg_tre--1.0.0.sql
+usr/share/postgresql/18/extension/pg_tre--0.1.0--1.0.0.sql
