@@ -1,0 +1,76 @@
+-- Test tier-3 per-tuple bloom filter functionality
+-- Phase 5: Verify that tier-3 filtering correctly refines candidate TIDs
+-- Setup: create a table with known patterns
+CREATE TABLE tier3_test (id serial PRIMARY KEY, body text);
+CREATE TABLE
+-- Insert rows: some with 'fox', some without
+INSERT INTO tier3_test(body) VALUES
+  ('the quick brown fox'),
+  ('lazy dog jumps over'),
+  ('foxes are quick animals'),
+  ('another fox appears'),
+  ('no match here xyz'),
+  ('fox fox fox'),
+  ('quick and dirty fox'),
+  ('the red fox runs fast'),
+  ('completely different text'),
+  ('more random content');
+INSERT 0 10
+-- Create index with tier-3 enabled (default)
+CREATE INDEX tier3_test_idx ON tier3_test USING tre (body);
+psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: collected 172 trigram entries from 10 heap tuples
+psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: built 132 posting trees
+psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: build complete, indexed 10 heap tuples into 132 trigrams
+CREATE INDEX
+-- Verify tier-3 is working: exact match for 'fox'
+SET enable_seqscan = off;
+SET
+SELECT id, body FROM tier3_test 
+WHERE body %~~ tre_pattern('fox', 0) 
+ORDER BY id;
+ id |          body           
+----+-------------------------
+  1 | the quick brown fox
+  3 | foxes are quick animals
+  4 | another fox appears
+  6 | fox fox fox
+  7 | quick and dirty fox
+  8 | the red fox runs fast
+(6 rows)
+
+-- Expected: 6 rows (ids 1, 3, 4, 6, 7, 8)
+-- Verify with seq scan for correctness check
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT id, body FROM tier3_test 
+WHERE body %~~ tre_pattern('fox', 0) 
+ORDER BY id;
+ id |          body           
+----+-------------------------
+  1 | the quick brown fox
+  3 | foxes are quick animals
+  4 | another fox appears
+  6 | fox fox fox
+  7 | quick and dirty fox
+  8 | the red fox runs fast
+(6 rows)
+
+-- Should match index scan results
+-- Test approximate match (tier-3 should work with k>0 too)
+SET enable_seqscan = off;
+SET
+SET enable_bitmapscan = on;
+SET
+SELECT id, body FROM tier3_test 
+WHERE body %~~ tre_pattern('fox', 1) 
+ORDER BY id;
+psql:test/sql/tier3.sql:49: ERROR:  pg_tre: regex extraction produced no selective trigrams (always_true); index scan cannot answer this query
+HINT:  Use seq-scan (SET enable_seqscan=on) or a pattern with at least one literal trigram.
+-- Expected: same 6 rows plus possibly 'foxes' variants
+-- Cleanup
+DROP TABLE tier3_test CASCADE;
+DROP TABLE
