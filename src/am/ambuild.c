@@ -344,7 +344,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         uint32 *positions_buf = NULL;
         int positions_alloced = 0;
         int n_positions = 0;
-        uint64 current_tid_packed = 0;
+        uint64 current_tid_packed = UINT64_MAX;   /* sentinel: no TID yet */
 
         for (i = 0; i < bstate.n_entries; i++)
         {
@@ -360,7 +360,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                 if (current_builder != NULL)
                 {
                     /* Add the last accumulated TID. */
-                    if (n_positions > 0)
+                    if (current_tid_packed != UINT64_MAX)
                     {
                         ItemPointerData tid;
                         PgTreBloom *bloom = NULL;
@@ -421,12 +421,13 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                                       index, current_hash,
                                       pg_tre_tuple_bloom_enable /* with_payload */);
                 n_positions = 0;
+                current_tid_packed = UINT64_MAX;  /* reset for new trigram */
             }
 
             if (new_tid && !new_trigram)
             {
                 /* Flush accumulated positions for the previous TID. */
-                if (n_positions > 0)
+                if (current_tid_packed != UINT64_MAX)
                 {
                     ItemPointerData tid;
                     PgTreBloom *bloom = NULL;
@@ -479,7 +480,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         if (current_builder != NULL)
         {
             /* Add the last accumulated TID. */
-            if (n_positions > 0)
+            if (current_tid_packed != UINT64_MAX)
             {
                 ItemPointerData tid;
                 PgTreBloom *bloom = NULL;

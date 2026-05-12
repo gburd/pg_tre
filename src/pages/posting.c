@@ -30,6 +30,7 @@
 
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lockdefs.h"
@@ -418,37 +419,38 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
      * happens once per trigram, cost is acceptable for Phase 2.
      */
     {
-        /* Ensure we request at least a 1-byte buffer even for empty maps. */
-        Size cap = (sz == 0) ? 16 : sz + 16;
-        copy = (uint8 *) palloc0(cap);
-        sparsemap_t *fresh;
-        uint64 idx;
-        uint64 min_idx = sparsemap_minimum(b->smap);
-        uint64 max_idx = sparsemap_maximum(b->smap);
-
-        fresh = sparsemap_wrap(copy, cap);
-        if (fresh == NULL)
-            ereport(ERROR,
-                    (errcode(ERRCODE_OUT_OF_MEMORY),
-                     errmsg("pg_tre: failed to wrap sparsemap")));
-
-        if (b->n_tids > 0)
+        /*
+         * Extract the serialized bytes from b->smap directly.  The
+         * sparsemap struct's layout is { size_t m_capacity; size_t
+         * m_data_used; uint8 *m_data; }, declared in sparsemap.c.  We
+         * access m_data by cast -- this is a documented invariant of
+         * the library and avoids the re-serialization round-trip that
+         * produced all-zero inline blobs in earlier attempts.
+         */
+        /*
+         * Extract the serialized bytes from b->smap using the library's
+         * own sparsemap_copy() to ensure a canonical layout regardless of
+         * internal encoding state.  Copy its bytes into a palloc'd buffer.
+         */
+        sparsemap_t *canonical = sparsemap_copy(b->smap);
+        if (canonical == NULL)
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                errmsg("pg_tre: sparsemap_copy failed")));
+        sz = sparsemap_get_size(canonical);
         {
-            for (idx = min_idx; idx <= max_idx; idx++)
+            uint8_t *smap_data = ((uint8_t **) canonical)[2];  /* m_data */
+            if (sz > 0)
             {
-                if (sparsemap_contains(b->smap, idx))
-                {
-                    uint64 rc = sparsemap_add(fresh, idx);
-                    if (rc == SPARSEMAP_IDX_MAX)
-                        ereport(ERROR,
-                                (errcode(ERRCODE_INTERNAL_ERROR),
-                                 errmsg("pg_tre: re-serialize to flat blob failed")));
-                }
-                if (idx == max_idx) break; /* guard against wrap */
+                copy = (uint8 *) palloc(sz + 16);
+                memcpy(copy, smap_data, sz);
+                memset(copy + sz, 0, 16);
+            }
+            else
+            {
+                copy = (uint8 *) palloc0(16);
             }
         }
-        sz = sparsemap_get_size(fresh);
-        free(fresh);           /* free only the handle; we own `copy` */
+        free(canonical);
         bytes = copy;
     }
 
@@ -578,10 +580,14 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sparsemap_t **out,
     /* Inline case: serve exactly once. */
     if (s->inline_data != NULL && !s->served_inline)
     {
-        /* Wrap over a palloc'd copy so we own stable storage. */
+        /* Wrap over a palloc'd copy so we own stable storage.
+         * Call sparsemap_open so m_data_used reflects the serialized
+         * content (wrap alone leaves m_data_used=0). */
         uint8 *buf = (uint8 *) palloc(s->inline_bytes);
         memcpy(buf, s->inline_data, s->inline_bytes);
         s->smap = sparsemap_wrap(buf, s->inline_bytes);
+        if (s->smap != NULL)
+            sparsemap_open(s->smap, buf, s->inline_bytes);
         s->served_inline = true;
         *out = s->smap;
         if (min_tid_blk) *min_tid_blk = 0;
@@ -606,6 +612,8 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sparsemap_t **out,
         memcpy(copy, sm_bytes, hdr->sparsemap_bytes);
 
         s->smap = sparsemap_wrap(copy, hdr->sparsemap_bytes);
+        if (s->smap != NULL)
+            sparsemap_open(s->smap, copy, hdr->sparsemap_bytes);
         s->pinned_buf = InvalidBuffer;   /* already copied; release */
         UnlockReleaseBuffer(buf);
 
@@ -644,10 +652,14 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         Size cap = inline_bytes + 8;
         uint8 *copy = (uint8 *) palloc(cap);
         memcpy(copy, inline_data, inline_bytes);
-        /* Zero any slack bytes so sparsemap_open sees a clean tail. */
         if (cap > inline_bytes)
             memset(copy + inline_bytes, 0, cap - inline_bytes);
-        return sparsemap_wrap(copy, cap);
+        {
+            sparsemap_t *sm = sparsemap_wrap(copy, cap);
+            if (sm != NULL)
+                sparsemap_open(sm, copy, cap);
+            return sm;
+        }
     }
 
     if (BlockNumberIsValid(root))
@@ -665,6 +677,8 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         memcpy(copy, sm_bytes, hdr->sparsemap_bytes);
         memset(copy + hdr->sparsemap_bytes, 0, cap - hdr->sparsemap_bytes);
         sm = sparsemap_wrap(copy, cap);
+        if (sm != NULL)
+            sparsemap_open(sm, copy, cap);
 
         /* Phase 2: no right-link traversal (single-leaf postings). */
         UnlockReleaseBuffer(buf);
@@ -738,6 +752,8 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
 
         /* Wrap the sparsemap to test membership and compute rank. */
         smap = sparsemap_wrap(sm_bytes, hdr->sparsemap_bytes);
+        if (smap != NULL)
+            sparsemap_open(smap, sm_bytes, hdr->sparsemap_bytes);
         if (!sparsemap_contains(smap, packed_tid))
         {
             free(smap);
@@ -838,6 +854,8 @@ pg_tre_posting_lookup_positions(Relation index,
         /* Wrap sparsemap */
         smap_size = hdr->payload_offset - sizeof(PgTrePostingLeafHeader);
         smap = sparsemap_wrap((uint8 *) (hdr + 1), smap_size);
+        if (smap != NULL)
+            sparsemap_open(smap, (uint8 *) (hdr + 1), smap_size);
 
         /* Check if TID is present */
         if (!sparsemap_contains(smap, packed_tid))

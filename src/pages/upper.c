@@ -22,6 +22,7 @@
 
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lockdefs.h"
@@ -127,7 +128,6 @@ upper_flush_leaf(UpperBulkState *state)
     Buffer  buf;
     Page    page;
     char   *dest;
-    int     i;
     Size    entries_size;
 
     if (state->leaf_n_entries == 0)
@@ -212,10 +212,25 @@ upper_add_leaf_entry(UpperBulkState *state, uint64 hash, BlockNumber root,
                      const uint8 *inline_data, Size inline_bytes)
 {
     PgTreUpperLeafEntry *ent;
+    Size total_used;
+    Size page_budget;
+
+    /*
+     * Page budget: full page minus header and opaque trailer, leaving a
+     * small safety margin.  Writing past this boundary clobbers the
+     * opaque trailer (format_version/page_kind) of the page.
+     */
+    page_budget = BLCKSZ
+                - MAXALIGN(SizeOfPageHeaderData)
+                - MAXALIGN(sizeof(PageTreOpaqueData))
+                - 64;   /* safety margin */
+
+    total_used = (state->leaf_n_entries + 1) * sizeof(PgTreUpperLeafEntry)
+               + state->leaf_inline_used + inline_bytes;
 
     /* Check if we need to flush the current leaf. */
     if (state->leaf_n_entries >= UPPER_LEAF_MAX_ENTRIES ||
-        state->leaf_inline_used + inline_bytes > state->leaf_inline_alloced / 2)
+        total_used > page_budget)
     {
         upper_flush_leaf(state);
     }
@@ -333,6 +348,7 @@ pg_tre_upper_bulkload(Relation index, upper_bulkload_iter_func iter,
     /* Phase 1: build all leaf pages. */
     while (iter(iter_ctx, &hash, &root, &inline_data, &inline_bytes))
     {
+        
         upper_add_leaf_entry(state, hash, root, inline_data, inline_bytes);
     }
     upper_flush_leaf(state);
@@ -419,29 +435,33 @@ pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
                         / sizeof(PgTreUpperLeafEntry);
         }
 
-        /* Binary search for trigram_hash. */
-        for (i = 0; i < n_entries; i++)
+        /* Linear search for trigram_hash.  Since inline blobs are
+         * concatenated after the entry array without per-entry offsets,
+         * we compute the matched entry's blob offset by summing
+         * inline_bytes of all preceding entries.  Entries must be
+         * sorted by hash during bulkload (they are). */
         {
-            if (entries[i].trigram_hash == trigram_hash)
+            Size inline_offset = 0;
+            for (i = 0; i < n_entries; i++)
             {
-                out->upper_buf = buf;
-                out->root = entries[i].posting_root;
-                if (entries[i].inline_bytes > 0)
+                if (entries[i].trigram_hash == trigram_hash)
                 {
-                    /*
-                     * Inline data follows the entry array.  For Phase 2
-                     * simplicity, just point past the entries.  This is
-                     * brittle; Phase 3 will clean up the layout.
-                     */
-                    out->inline_data = (const uint8 *) &entries[n_entries];
-                    out->inline_bytes = entries[i].inline_bytes;
+                    out->upper_buf = buf;
+                    out->root = entries[i].posting_root;
+                    if (entries[i].inline_bytes > 0)
+                    {
+                        out->inline_data = ((const uint8 *) &entries[n_entries])
+                                         + inline_offset;
+                        out->inline_bytes = entries[i].inline_bytes;
+                    }
+                    else
+                    {
+                        out->inline_data = NULL;
+                        out->inline_bytes = 0;
+                    }
+                    return true;
                 }
-                else
-                {
-                    out->inline_data = NULL;
-                    out->inline_bytes = 0;
-                }
-                return true;
+                inline_offset += entries[i].inline_bytes;
             }
         }
 
