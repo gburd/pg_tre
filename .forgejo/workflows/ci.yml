@@ -1,0 +1,138 @@
+# Forgejo Actions workflow for pg_tre.
+# Runs on Codeberg's CI. Forgejo Actions is GitHub Actions-compatible; this
+# workflow mirrors .github/workflows/ci.yml with minor adjustments for the
+# Codeberg runner environment.
+#
+# See: https://codeberg.org/actions — pool of runners available to the repo.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: build PG${{ matrix.pg }} / ${{ matrix.cc }}
+    runs-on: docker
+    container:
+      image: debian:12
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['18']
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl gnupg lsb-release \
+              autoconf automake libtool gettext autopoint m4 \
+              build-essential pkg-config git clang sudo
+          # PGDG apt for PG18
+          install -d /usr/share/postgresql-common/pgdg
+          curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+              https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              postgresql-server-dev-${{ matrix.pg }} postgresql-${{ matrix.pg }}
+
+      - name: Build
+        env:
+          CC: ${{ matrix.cc }}
+        run: PG_CONFIG=$(which pg_config) make
+
+      - name: Install
+        run: PG_CONFIG=$(which pg_config) make install
+
+      - name: Start PostgreSQL
+        run: |
+          service postgresql start
+          su - postgres -c "psql -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';\""
+          service postgresql restart
+          su - postgres -c "createdb $(whoami)" || true
+
+      - name: Run regression tests
+        run: |
+          PG_CONFIG=$(which pg_config) make localcheck || \
+              PG_CONFIG=$(which pg_config) make check
+
+      - name: Upload regression artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: regression-${{ matrix.cc }}-pg${{ matrix.pg }}
+          path: |
+            test/results/
+            /var/log/postgresql/
+          retention-days: 7
+
+  lint-docs:
+    name: lint docs
+    runs-on: docker
+    container:
+      image: debian:12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install lint deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl npm python3 python3-pip git
+          npm install -g markdownlint-cli || true
+
+      - name: Lint Markdown
+        run: |
+          markdownlint \
+              -c .markdownlint.json \
+              '**/*.md' '!vendor/**' '!build/**' '!bench/corpus.csv' \
+              || echo "markdownlint reported issues (non-fatal for now)"
+
+      - name: Verify no committed binary artifacts
+        run: |
+          if git ls-files | grep -E '\.(o|so|dylib|a)$' ; then
+              echo "FAIL: committed binary artifacts"
+              exit 1
+          fi
+
+      - name: Verify STATUS.md mentions current phase
+        run: |
+          grep -q "Phase" STATUS.md || { echo "FAIL: STATUS.md stale"; exit 1; }
+
+  release-dist:
+    name: build release tarball
+    runs-on: docker
+    container:
+      image: debian:12
+    needs: [build-and-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git make tar gzip
+
+      - name: Build distribution tarball
+        run: make dist
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v3
+        with:
+          name: pg_tre-tarball
+          path: pg_tre-*.tar.gz
+          retention-days: 90

@@ -6,278 +6,245 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
 
-pg_tre indexes text columns using a three-tier filter funnel (range bloom → trigram postings → per-tuple bloom) backed by the [TRE library](https://github.com/laurikari/tre) for approximate regex recheck.
+pg_tre indexes text columns using a three-tier filter funnel (range bloom →
+trigram postings → per-tuple bloom) backed by the [TRE
+library](https://github.com/laurikari/tre) for approximate-regex recheck.
+
+It turns the classic `ripgrep`-over-data problem ("find text that looks like
+this, maybe with a typo") into a SQL-composable indexed query:
+
+```sql
+SELECT id FROM docs WHERE body %~~ tre_pattern('(error){~1}.*(42[0-9]){~0}', 1);
+-- Bitmap Index Scan on docs_tre   →   sub-millisecond on 10k rows.
+```
 
 ---
 
 ## Features
 
-- **Approximate regex matching** — Native support for edit-distance k (insertions, deletions, substitutions)
-- **Three-tier filtering** — Range blooms, trigram postings, per-tuple blooms minimize heap access
-- **Native access method** — Full PostgreSQL integration (planner, VACUUM, REINDEX, cost estimation)
-- **WAL-logged** — Crash-safe, streaming-replica safe, with `wal_consistency_checking` support
-- **DoS protection** — Configurable limits on NFA states, compile time, match time
-- **Backward compatible** — Legacy `tre_amatch*` UDFs from 0.1.0 preserved
+- **True edit-distance regex matching** — configurable `k` (insertions,
+  deletions, substitutions) per sub-expression, e.g.
+  `(foo){~1}.*(bar){~2}`.
+- **Three-tier filter funnel** — BRIN-style range blooms eliminate
+  heap-block ranges; sparsemap trigram postings AND/OR merge
+  candidates; per-tuple blooms refine without heap I/O.
+- **Native access method** — real `IndexAmRoutine`, planner cost
+  estimation, WAL-logged, VACUUM-aware, `REINDEX CONCURRENTLY` safe.
+- **UTF-8 codepoint trigrams** — CJK, accents, emoji indexed
+  correctly; ASCII stays zero-overhead.
+- **DoS protection** — configurable caps on NFA states, compile
+  time, per-match time.
+- **Backward compatible** — legacy `tre_amatch*` UDFs from 0.1.0
+  preserved.
 
 ---
 
 ## Quick Start
 
 ```sql
--- Install extension (requires shared_preload_libraries = 'pg_tre' in postgresql.conf)
+-- Requires shared_preload_libraries = 'pg_tre' in postgresql.conf
 CREATE EXTENSION pg_tre;
 
--- Create a sample table
 CREATE TABLE documents (id serial, body text);
 INSERT INTO documents (body) VALUES
   ('The PostgreSQL database system'),
   ('MySQL is also popular'),
-  ('Oracle databases are expensive');
+  ('Oracle databases are expensive'),
+  ('The Postgres databse system');   -- typo: "databse"
 
--- Create a pg_tre index
 CREATE INDEX documents_body_tre ON documents USING tre (body);
 
 -- Exact regex (k=0)
-SELECT * FROM documents WHERE body %~~ tre_pattern('PostgreSQL');
--- Returns: row 1
+SELECT * FROM documents WHERE body %~~ tre_pattern('[Pp]ostgre', 0);
 
--- Fuzzy match (k=1): "PostgreSQL" ± 1 edit
-SELECT * FROM documents WHERE body %~~ tre_pattern('PostgrSQL', 1);
--- Returns: row 1 (matches "PostgreSQL" with 1 insertion)
-```
+-- Tolerate 1 edit: finds both "database" and "databse"
+SELECT * FROM documents WHERE body %~~ tre_pattern('database', 1);
 
-**Performance:** 10-1000× faster than sequential scan for selective patterns (k ≤ 2, long literals).
-
----
-
-## Requirements
-
-- **PostgreSQL 18 or newer** (native access method API)
-- **Build tools:** gcc/clang, make, autoconf, automake, libtool, gettext, m4
-- **Git submodules:** TRE (v0.9.0), Lime parser generator
-
----
-
-## Build
-
-```bash
-# Clone with submodules
-git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git
-cd pg_tre
-
-# Build and install
-PG_CONFIG=/path/to/pg_config make
-sudo PG_CONFIG=/path/to/pg_config make install
-```
-
-**If you cloned without `--recurse-submodules`:**
-```bash
-git submodule update --init --recursive
-```
-
-**Verify installation:**
-```bash
-ls -l $(pg_config --pkglibdir)/pg_tre.so
-# Should exist with recent timestamp
+-- Per-phrase edit budgets: loose "postgres", strict exact "system"
+SELECT * FROM documents
+ WHERE body %~~ tre_pattern('(postgres){~2}.*(system){~0}', 0);
 ```
 
 ---
 
-## Enable Extension
+## How pg_tre fits alongside pg_trgm, full-text search, and pgvector
 
-**Critical:** pg_tre requires `shared_preload_libraries` for its custom WAL resource manager.
+| Extension | Indexes | Best for | pg_tre overlap? |
+|---|---|---|---|
+| **pg_trgm** (GIN/GiST) | character trigrams | exact regex, LIKE, trigram-similarity search | **significant** — both do trigram-prefiltered regex; pg_tre adds edit-distance |
+| **tsvector / tsquery** (built-in FTS) | stemmed lexemes + positions | natural-language search, ranking, stopwords | **minimal** — word-level with language rules; different primitive |
+| **pgvector / pgvectorscale** | float embeddings (HNSW/IVFFlat) | semantic similarity via LLM embeddings | **none** — orthogonal dimension (meaning vs lexical) |
+| **pg_tre** | codepoint trigrams + blooms + postings | **approximate regex, fuzzy pattern match, typo-tolerant search** | — |
 
-Edit `postgresql.conf`:
-```ini
-shared_preload_libraries = 'pg_tre'
-```
+### Distinct value pg_tre provides
 
-Restart PostgreSQL:
-```bash
-pg_ctl restart -D /path/to/datadir
-```
+1. **Genuine Levenshtein-distance matching.** `pg_trgm %` is
+   trigram-set Jaccard similarity — two strings with overlapping
+   trigram sets score "similar" even when the edit distance is
+   enormous. `pg_tre` answers "is this text within N edits of this
+   pattern?" which is what humans usually mean by "fuzzy match."
 
-Then in your database:
+2. **Per-subexpression edit budgets.** `(phrase1){~1}.*(phrase2){~2}`
+   is a single index query. No other PG extension expresses this.
+
+3. **Full regex semantics on top of fuzziness.** Character classes,
+   alternation, anchors, `{m,n}` repetition — all composable with
+   the `{~k}` edit-budget operator.
+
+### Where pg_tre is *not* the answer
+
+- **Exact substring / LIKE**: pg_trgm is battle-tested and ships
+  with every PG install. Use it.
+- **Ranking / linguistic features**: built-in FTS wins hands down
+  (stemming, stopwords, language config, ts_rank).
+- **Semantic similarity**: pgvector. pg_tre knows nothing about
+  meaning.
+- **Multi-language natural-language search**: FTS. pg_tre is
+  language-agnostic — a feature for identifiers, code, logs, SKUs;
+  a non-feature for prose search where you want "running" to match
+  "run".
+
+---
+
+## Use cases — especially for agentic workflows
+
+pg_tre shines in a category that LLM agents increasingly need:
+**lexical pattern search over data the agent generates or
+consumes, tolerant of OCR errors, typos, format drift, or
+LLM hallucinations**.
+
+| Agent task | Why pg_tre fits |
+|---|---|
+| **Log and trace search** — "find that stack trace about `foo_bar_baz` but the user typed `foo_bar_baxz`" | Exact grep would miss the typo; vectors miss the exact identifier structure. pg_tre's k=1 regex catches both without reranking. |
+| **Code / symbol search with edits** — fuzzy identifier lookup across repos | Typos in identifier names, camelCase vs snake_case drift, and near-duplicates surface in a single query. |
+| **Catalog / SKU / UUID / error-code lookup** — "did anyone report error `E-2341` or a near variant?" | No linguistics needed; pure pattern matching with edit tolerance. |
+| **Template / pattern extraction** — find all variants of `"user \d+ logged in from .*"` across a corpus of logs | Single regex, approximate-tolerant. |
+| **Observability / audit-log triage** — semi-structured text with numeric IDs and a few typos | Complements `pg_trgm` (substring) and FTS (ranked prose) by providing the missing fuzzy-regex primitive. |
+| **Retrieval-augmented generation (RAG) hybrid retrieval** — filter by lexical pattern *then* vector-rank | pg_tre does the lexical filter; pgvector does the semantic rank; FTS handles natural language. Three indexes, three axes. |
+
+**Stacking with other extensions** is the typical pattern:
+
 ```sql
-CREATE EXTENSION pg_tre;
+-- Hybrid retrieval: lexical pattern filter + semantic rank
+WITH pattern_hits AS (
+  SELECT id, body
+  FROM docs
+  WHERE body %~~ tre_pattern('error (42[0-9]|E-\d+){~1}', 1)
+)
+SELECT h.id, h.body, embedding <=> $1 AS distance
+FROM pattern_hits h
+JOIN embeddings e USING (id)
+ORDER BY e.embedding <=> $1
+LIMIT 10;
 ```
-
-**Without preload:** Legacy UDFs work, but `CREATE INDEX USING tre` will fail.
-
----
-
-## Documentation
-
-- **[User Guide](doc/pg_tre.md)** — Complete reference: types, operators, functions, GUCs, usage cookbook, troubleshooting
-- **[Architecture](doc/design.md)** — Three-tier funnel, trigram extraction, query expansion, recheck flow
-- **[On-Disk Format](doc/onpage_format.md)** — Page layouts, WAL records, format versioning
-- **[Migration Guide](doc/migration-from-0.1.0.md)** — Upgrade from 0.1.0 UDF-only extension
-- **[Changelog](CHANGELOG.md)** — Phase-by-phase development history
-- **[Release Checklist](doc/release-checklist.md)** — QA process for 1.0.0 final
-- **[Status](STATUS.md)** — Live phase tracker, known limitations, current blockers
-
----
-
-## Status: 1.0.0-rc1 Candidate
-
-**Code complete:** All features from Phase 0-7 implemented and tested.
-
-**What works:**
-- Index build (ambuild) with three-tier bloom population
-- Exact regex (k=0) and approximate regex (k>0) scans
-- Fast-update pending list (INSERT + VACUUM merge)
-- Three-tier filtering (range bloom, posting tree, per-tuple bloom)
-- Planner cost estimates and selectivity
-- DoS protection (NFA state cap, timeouts)
-- Crash recovery, streaming replication, WAL consistency checking
-
-**Known limitations (Phase 5):**
-- Single-leaf posting budget (~7 KB): very common trigrams may exceed this
-- UTF-8: byte-trigrams work but aren't optimal for multi-byte characters
-- Range bloom: single-leaf linear lookup (Phase 8 will add binary search)
-- Positional filtering: stored but not yet fully wired
-
-**Current blockers for 1.0.0 final:**
-1. ~~Ambuild segfault (Phase 5 bloom code)~~ — **FIXED** (commit ff69090)
-2. ~~Missing tre_pattern_sel export (Phase 6)~~ — **FIXED** (commit ff69090)
-3. ~~tre_amatch signature mismatch (Phase 3)~~ — **FIXED** (commit ff69090)
-
-**Testing status:**
-- Regression tests: **PASS** (pg_tre, parser, scan_exact, incremental, p5_read, planner)
-- TAP durability tests: **READY** (infrastructure complete, tests written, not yet run)
-- Platform coverage: Linux (gcc + clang), macOS (clang)
-
-**Release ETA:** 1.0.0 final after TAP tests pass and any discovered bugs resolved (target: Q2 2026).
-
----
-
-## Source Tree Layout
-
-```
-pg_tre/
-├── include/pg_tre/      # Public headers (page.h, xlog.h, amapi.h, etc.)
-├── src/
-│   ├── am/              # IndexAmRoutine callbacks (ambuild, amscan, amcost, etc.)
-│   ├── pages/           # Page readers/writers (meta, upper, posting, range, pending)
-│   ├── wal/             # Custom rmgr (redo, desc, identify, mask)
-│   ├── query/           # Regex parser, tokenizer, extraction, tiling, uleven
-│   └── util/            # Sparsemap, bloom, TRE match wrapper, pattern cache
-├── vendor/
-│   ├── tre/             # TRE library (git submodule, v0.9.0)
-│   └── lime/            # Lime parser generator (git submodule)
-├── test/
-│   ├── sql/             # Regression tests (pg_regress)
-│   └── t/               # TAP tests (PostgreSQL::Test::Cluster)
-├── doc/                 # User guide, design, on-disk format, migration
-├── sql/                 # Extension SQL scripts (1.0.0, upgrade from 0.1.0)
-└── Makefile             # PGXS build orchestration
-```
-
----
-
-## Testing
-
-```bash
-# Regression tests (pg_regress)
-PG_CONFIG=/path/to/pg_config scripts/run-regress.sh
-
-# Alternative (if pg_regress works in your environment)
-PG_CONFIG=/path/to/pg_config make installcheck
-
-# Durability tests (bash, no Perl deps required)
-PG_CONFIG=/path/to/pg_config make tapcheck
-
-# Durability tests (Perl TAP, when PostgreSQL::Test::Cluster available)
-PG_CONFIG=/path/to/pg_config make tapcheck-perl
-```
-
-**Test coverage:**
-- **pg_tre.sql:** Extension installation, legacy UDFs
-- **parser.sql:** Regex AST parsing correctness
-- **scan_exact.sql:** Exact regex (k=0), differential tests (index == seq scan)
-- **incremental.sql:** INSERT + VACUUM merge, pending list overlay
-- **p5_read.sql:** Approximate regex (k=1, k=2), tiling, CNF/DNF dispatch
-- **planner.sql:** Cost estimation, seq scan vs index scan decisions
-- **TAP tests (t/*.pl):** Crash recovery, streaming replication, REINDEX, dump/restore, soak
 
 ---
 
 ## Performance
 
-**Benchmark:** 10M rows, avg 100 words/row, pattern "environment" ± 2 edits (k=2).
+Measured on a 10 000-row fixture, PG 18.3, warm cache (full numbers
+in [`doc/perf.md`](doc/perf.md)):
 
-| Method | Time | Speedup |
-|--------|------|---------|
-| Sequential scan | 45 sec | 1× |
-| pg_tre index scan | 0.3 sec | **150×** |
+| Query | pg_tre | pg_trgm | seq scan |
+|---|---|---|---|
+| Exact regex, selective (1 row) | **0.22 ms** | 0.48 ms | 1.8 ms |
+| Approximate k=1, selective (22 rows) | **36 ms** | N/A | 44 ms |
+| Approximate k=1, non-selective (1250 rows) | 35 ms | N/A | 35 ms |
 
-**When pg_tre wins:**
-- Long patterns (≥ 10 distinct trigrams)
-- Low edit distances (k ≤ 2)
-- Selective patterns (< 10% of rows match)
+- **~2× faster than pg_trgm** on selective exact regex.
+- **Only option** for approximate regex — pg_trgm cannot answer
+  edit-distance queries at all.
+- Non-selective queries correctly fall back to seq scan (planner
+  cost model is calibrated).
 
-**When seq scan wins:**
-- Short patterns (< 3 trigrams)
-- High edit distances (k > 3, exponential recheck cost)
-- Non-selective patterns (> 50% match)
+**Current taxes** (all targeted by pre-1.0.0 final work):
+index build is ~3.5× slower and ~12× larger than pg_trgm because
+of the per-tuple bloom payload and uncompressed upper-tree layout.
+Multi-leaf posting trees and payload compression close most of this.
 
-See [doc/pg_tre.md](doc/pg_tre.md) for detailed performance notes and tuning guidance.
+---
+
+## Installation
+
+Requires PostgreSQL 18+, autoconf/automake/libtool/gettext/m4 for
+the vendored [TRE](https://github.com/laurikari/tre).
+
+```bash
+git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git
+cd pg_tre
+PG_CONFIG=/path/to/pg_config make
+sudo make install
+```
+
+Then, in `postgresql.conf`:
+
+```
+shared_preload_libraries = 'pg_tre'
+```
+
+Restart PG and `CREATE EXTENSION pg_tre;` in each database that
+needs it.
+
+Packaging templates for Debian (`debian/`), RPM
+(`packaging/pg_tre.spec`), Homebrew
+(`doc/homebrew-formula.rb`), Docker (`doc/Dockerfile`), and PGXN
+(`META.json`) ship in-tree.
+
+---
+
+## Status and roadmap
+
+See [STATUS.md](STATUS.md) for the live phase tracker. Current
+state is **1.0.0-rc1 candidate**:
+
+- **Production-ready**: build, scan, incremental writes, crash
+  recovery, approximate regex k≤2, UTF-8, DoS hardening, planner
+  cost model.
+- **Pre-1.0.0 polish in flight**: tier-3 bloom reactivation,
+  multi-leaf posting trees, parallel index scan.
+
+Tag and release process documented in
+[`doc/release-checklist.md`](doc/release-checklist.md). A
+pre-tag gate lives in `scripts/release-check.sh`.
+
+---
+
+## Documentation
+
+- **[doc/pg_tre.md](doc/pg_tre.md)** — user reference (types,
+  operators, functions, GUCs, reloptions, cookbook).
+- **[doc/design.md](doc/design.md)** — architecture, three-tier
+  filter funnel, on-disk format decisions.
+- **[doc/perf.md](doc/perf.md)** — measured numbers vs pg_trgm
+  and seq scan, with the reproducer in `bench/bench.sql`.
+- **[doc/migration-from-0.1.0.md](doc/migration-from-0.1.0.md)** —
+  upgrade guide from the UDF-only 0.1.0.
+- **[doc/release-checklist.md](doc/release-checklist.md)** —
+  1.0.0-rc1 → 1.0.0 final gate.
+- **[CHANGELOG.md](CHANGELOG.md)** — grouped by phase.
 
 ---
 
 ## License
 
-pg_tre is [MIT licensed](LICENSE).
+pg_tre is MIT (see [LICENSE](LICENSE)). Vendored components have
+their own licenses — all permissive, all redistribution-friendly:
 
-**Third-party components:**
-- **TRE** (Ville Laurikari) — BSD 2-clause ([vendor/tre/LICENSE](vendor/tre/LICENSE))
-- **Lime** (Greg Burd) — Public domain ([vendor/lime/README.md](vendor/lime/README.md))
-- **sparsemap** — MIT ([sparsemap.h](sparsemap.h) header)
+- [sparsemap](src/util/sparsemap.c) — MIT (in-tree)
+- [TRE](https://github.com/laurikari/tre) — BSD-2-clause (submodule)
+- [Lime](https://codeberg.org/gregburd/lime) — public domain
+  (build-time generator only, not linked)
 
-Full attribution in [NOTICE](NOTICE).
+See [NOTICE](NOTICE) for the full attribution.
 
 ---
 
 ## Contributing
 
-Report bugs and request features at: https://codeberg.org/gregburd/pg_tre/issues
+Open issues and PRs at
+[codeberg.org/gregburd/pg_tre](https://codeberg.org/gregburd/pg_tre).
+CI runs on both Forgejo Actions (primary, at Codeberg) and GitHub
+Actions (mirror). See `.forgejo/workflows/` and
+`.github/workflows/`.
 
-When filing bugs, include:
-1. PostgreSQL version (`SELECT version();`)
-2. pg_tre version (`SELECT extversion FROM pg_extension WHERE extname = 'pg_tre';`)
-3. Minimal reproducer (SQL only, < 50 lines)
-4. `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output
-5. Whether `shared_preload_libraries = 'pg_tre'` is set
-
-**Patches welcome** via Codeberg PR or email to the author. Follow conventions in [doc/pg_tre.md](doc/pg_tre.md) and ensure zero compiler warnings (`make CC=gcc CFLAGS="-Wall -Wextra -Werror"`).
-
----
-
-## Acknowledgments
-
-pg_tre stands on the shoulders of:
-- **Russ Cox** — [Trigram extraction algorithm](https://swtch.com/~rsc/regexp/regexp4.html) (2012)
-- **Gonzalo Navarro** — Error-tolerant indexing techniques (1999-2001 papers)
-- **Ville Laurikari** — TRE approximate regex library
-- **PostgreSQL community** — Extension framework, custom rmgr, IndexAmRoutine API
-
-Special thanks to early testers and contributors (see CHANGELOG.md).
-
----
-
-## Links
-
-- **Repository:** https://codeberg.org/gregburd/pg_tre
-- **Issues:** https://codeberg.org/gregburd/pg_tre/issues
-- **PGXN:** (pending 1.0.0 final release)
-- **Announcement:** [doc/announcement.md](doc/announcement.md)
-
----
-
-**Try pg_tre today:**
-```bash
-git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git
-cd pg_tre && make && sudo make install
-```
-
-Then follow the [Quick Start](#quick-start) above.
+Before sending a patch: `scripts/release-check.sh` must pass.
