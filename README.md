@@ -217,6 +217,159 @@ LIMIT 10;
 
 ---
 
+## What pg_tre lets you do that wasn't possible before
+
+Every example below describes a **capability** that no combination
+of `pg_trgm`, full-text search, `pgvector`, `LIKE`, or stock
+`~`/`~*` regex answers correctly. The edit-distance semantics
+simply aren't expressible in those tools at all.
+
+pg_tre has two entry points with identical match semantics:
+
+- `tre_amatch(body, pattern, k)` — always correct, sequential
+  scan, any pattern.
+- `body %~~ tre_pattern(pattern, k)` — indexed path, used when
+  the pattern has at least one literal run of 3+ characters to
+  anchor trigram filtering. See the `p5_read` regression test
+  for the supported pattern shapes.
+
+The examples below are written with `tre_amatch` so they run
+unconditionally; swap in `%~~` with the same arguments to get
+the indexed plan when the pattern qualifies.
+
+### Example 1: Error-message triage across noisy loggers
+
+Different services emit the same semantic error differently:
+
+```text
+"INFO  Connection refused from 10.0.0.5"
+"WARN  ConnectionRefused during TLS handshake"
+"ERROR conn refused after timeout"
+"ERROR Err: connection rfused"          -- typo: missing 'e'
+"INFO  error: Connection refsued"       -- typo: transposed 'se'
+"INFO  refused loan application"        -- unrelated, must NOT match
+```
+
+`pg_trgm` similarity matches near-duplicates but also matches
+the unrelated "refused loan application" row with a comparable
+score. FTS misses typos entirely. `LIKE` misses the
+transpositions.
+
+```sql
+SELECT id, log FROM service_logs
+ WHERE tre_amatch(log, '(connection){~2}.*(refused){~1}', 0);
+```
+
+Returns the rows where both phrases match within their
+budgets; skips `refused loan application` (no `connection`
+nearby) and any variant whose edit distance exceeds the per‑
+phrase budget. Tune `{~k}` up or down to trade recall for
+precision — a knob `pg_trgm` / FTS / `pgvector` simply don't
+offer.
+
+### Example 2: Part-number / SKU lookup tolerating OCR and typos
+
+Catalog SKUs follow `A-47-2391-B`. Customer service receives
+`A-47-23Q1-B` (OCR misread `9` as `Q`), `A 47 2391 B` (spaces
+for dashes), or `A-47-2931-B` (digit transposition). None match
+by `=`, `LIKE`, or `pg_trgm` cleanly at the canonical form.
+
+```sql
+SELECT sku, description FROM parts
+ WHERE tre_amatch(sku, 'A-[0-9]{2}-[0-9]{4}-[A-Z]', 2);
+```
+
+Up to 2 edits from the canonical format, including character
+classes. Catches `A-47-23Q1-B` (OCR) and `A-47-2931-B`
+(transposition) cleanly. `LIKE` can't express "a regex with
+edits"; `pg_trgm` can't bound tolerance at an explicit edit
+count. Choose `k` carefully: at `k=2` a totally different
+prefix like `Z-99-0000-Q` also matches (1 edit `Z→A`, 1 edit
+free), so tighten to `k=1` for stricter matching or anchor with
+`^A-` if the column always starts with the prefix.
+
+### Example 3: Identifier drift across conventions
+
+Agent reads a stack trace mentioning `user_session_handler` and
+needs the matching file in a repo using `user-session-handler`
+or `userSessionHandler`. `LIKE` catches none; `pg_trgm`
+similarity also matches unrelated `user_widget_handler` with
+comparable scores because trigram overlap dominates short
+identifiers.
+
+```sql
+SELECT path, symbol FROM code_index
+ WHERE tre_amatch(symbol, 'user.session.handler', 3);
+```
+
+Three edits accommodate `_` ↔ `-` ↔ case-fold drift at the
+three word boundaries. A pure-regex solution would need an
+explicit union of 2ⁿ conventions; pg_tre folds them into one
+budget.
+
+### Example 4: Per-phrase strictness in a single regex
+
+Security audit: find log lines mentioning `sudo` (tolerate 1
+typo) followed by any of several dangerous commands, each with
+its own tolerance. Nothing else in PostgreSQL expresses this as
+a single predicate.
+
+```sql
+SELECT ts, host, line FROM audit_log
+ WHERE tre_amatch(line,
+      '(sudo){~1}.*((chmod 777){~1}|(dd if=)|(mkfs))',
+      0);
+```
+
+Each parenthesized phrase carries its own `{~k}`; the overall
+regex still requires them in order. `pg_trgm` has no phrases;
+FTS has phrases but no typo tolerance; `pgvector` understands
+meaning, not structure.
+
+### Example 5: Short-sequence approximate match (bioinformatics, fingerprints)
+
+Find a 30-base DNA motif in short reads, allowing up to 3
+substitutions or indels:
+
+```sql
+SELECT read_id, seq FROM short_reads
+ WHERE tre_amatch(seq, 'ACGTACGTGCCATGCGATCGTAACGTAGCA', 3);
+```
+
+The classic approximate-string-matching problem (Navarro, Myers)
+expressed as a SQL predicate. No other PostgreSQL extension
+answers bounded-edit-distance lookup of arbitrary short strings
+at all.
+
+### Example 6: Hybrid retrieval with lexical guardrails (agent / RAG)
+
+An LLM agent asks about error `E-2341`. Embedding + `pgvector`
+returns semantically similar documents, but ranking is fuzzy
+and can hallucinate topical links. To keep the agent grounded,
+pre-filter on **lexical presence of the error code with a
+bounded typo budget**, then let vector search rank within the
+subset:
+
+```sql
+WITH lex_hits AS (
+  SELECT id, body FROM kb_articles
+   WHERE tre_amatch(body, 'E-?[0-9]{3,4}', 1)
+)
+SELECT h.id, h.body,
+       emb.vector <=> $query_embedding AS distance
+  FROM lex_hits h
+  JOIN kb_embeddings emb USING (id)
+ ORDER BY distance
+ LIMIT 10;
+```
+
+Before pg_tre the lexical prefilter either missed typos
+(`LIKE`, exact match) or bled into semantic noise (`pg_trgm`).
+"Edit-bounded lexical match over a regex" is the primitive that
+was missing from the stack.
+
+---
+
 ## Performance
 
 Measured on a 10 000-row fixture, PG 18.3, warm cache (full numbers
