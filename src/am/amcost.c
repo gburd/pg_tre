@@ -4,6 +4,8 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/amapi.h"
 #include "catalog/pg_operator.h"
 #include "nodes/pathnodes.h"
@@ -192,16 +194,71 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 	if (numIndexTuples < 1.0)
 		numIndexTuples = 1.0;
 
+	/*
+	 * Realistic cost model:
+	 *   - Upper tree: 1-2 pages for small indexes (log base ~100 fanout)
+	 *   - Per-trigram posting: 1 page (most postings inline or single leaf)
+	 *   - AND/OR merge: CPU cost proportional to TID count
+	 *   - Regex recheck: expensive (20x cpu_operator_cost per tuple)
+	 */
 	if (have_query && q.n > 0)
 	{
 		int total_trigrams = 0;
 		int i;
+		double num_upper_pages;
+		double num_posting_pages;
+		double avg_pages_per_posting;
 
 		for (i = 0; i < q.n; i++)
 			total_trigrams += q.conjuncts[i].n;
 
-		numIndexPages = total_trigrams * 10.0;
+		/* Upper tree height: log base 100 of total distinct trigrams.
+		 * For small indexes (<100 trigrams), tree is 1 page.
+		 * For 100-10k trigrams, tree is 2 pages.
+		 * Use max(1.0, ...) to avoid log domain errors. */
+		if (meta.n_trigrams > 100)
+		{
+			double log_factor = log((double) meta.n_trigrams) / log(100.0);
+			num_upper_pages = 1.0 + ceil(log_factor);
+		}
+		else
+		{
+			num_upper_pages = 1.0;
+		}
 
+		/* Posting pages: estimate via meta stats or fallback heuristic.
+		 * Most postings for selective patterns fit inline or in 1 page.
+		 * Use mean_posting_cardinality if available, else assume
+		 * avg posting size ~ n_tuples / n_trigrams (uniform distribution). */
+		if (meta.mean_posting_cardinality > 0)
+		{
+			/* Use recorded stats: bytes per posting / page size. */
+			avg_pages_per_posting = (double) meta.mean_posting_cardinality / 
+			                        (BLCKSZ / 8);  /* rough: 1 bit per TID */
+		}
+		else if (meta.n_trigrams > 0)
+		{
+			/* Fallback: assume uniform distribution of trigrams. */
+			double avg_tids_per_trigram = (double) meta.n_tuples_indexed / 
+			                              (double) meta.n_trigrams;
+			/* Inline threshold is ~256 bytes = ~2000 TIDs in sparsemap.
+			 * If avg < 500 TIDs, postings are mostly inline (0 extra pages).
+			 * Otherwise, 1 page per posting is typical. */
+			if (avg_tids_per_trigram < 500.0)
+				avg_pages_per_posting = 0.5;  /* half inline, half 1-page */
+			else
+				avg_pages_per_posting = 1.0;
+		}
+		else
+		{
+			/* No stats at all: assume mostly inline. */
+			avg_pages_per_posting = 0.5;
+		}
+
+		num_posting_pages = total_trigrams * avg_pages_per_posting;
+
+		/* Cap at half the index size (prevent absurd estimates). */
+		numIndexPages = num_upper_pages + num_posting_pages;
 		if (index != NULL && numIndexPages > path->indexinfo->pages * 0.5)
 			numIndexPages = path->indexinfo->pages * 0.5;
 	}
@@ -213,14 +270,34 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 	if (numIndexPages < 1.0)
 		numIndexPages = 1.0;
 
-	*indexStartupCost = 0.0;
+	/* Startup cost: upper tree lookup per trigram.
+	 * Use reduced random_page_cost (often cached after first lookup). */
+	if (have_query && q.n > 0)
+	{
+		int total_trigrams = 0;
+		int i;
+		for (i = 0; i < q.n; i++)
+			total_trigrams += q.conjuncts[i].n;
 
+		*indexStartupCost = total_trigrams * random_page_cost * 0.5;
+	}
+	else
+	{
+		*indexStartupCost = 0.0;
+	}
+
+	/* IO cost: read posting pages. */
 	indexCost = numIndexPages * random_page_cost;
-	indexCost += numIndexTuples * cpu_index_tuple_cost;
 
+	/* CPU cost: AND/OR merge of sparsemaps. */
+	indexCost += numIndexTuples * cpu_operator_cost;
+
+	/* Recheck cost: TRE regex matching is expensive.
+	 * k=0 (exact match): 10x cpu_operator_cost
+	 * k>0 (approximate): 20x cpu_operator_cost (universal-Levenshtein) */
 	if (have_query && q.global_max_cost > 0)
 	{
-		indexCost += numIndexTuples * cpu_operator_cost * 100.0;
+		indexCost += numIndexTuples * cpu_operator_cost * 20.0;
 	}
 	else
 	{

@@ -672,7 +672,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      * filters any false positives from tier-2.  Re-enable when the
      * sparsemap_rank bug is resolved.
      */
-    if (false && result != NULL && st->q.global_max_cost >= 0)
+    if (result != NULL && st->q.global_max_cost >= 0)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
                                          result, st->scan_cxt);

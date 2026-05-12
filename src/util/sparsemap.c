@@ -1727,6 +1727,11 @@ done:;
 uint64_t
 sparsemap_maximum(const sparsemap_t *map)
 {
+  /* BUG FIX: Detect corrupt sparsemap (m_data_used = 0 but garbage chunk count). */
+  if (map->m_data_used == 0) {
+    return 0;
+  }
+
   const size_t count = __sm_get_chunk_count(map);
 
   /* the ending offset of a map containing zero chunks is zero */
@@ -2477,6 +2482,13 @@ sparsemap_intersection(const sparsemap_t *a, const sparsemap_t *b)
     return NULL;
   }
 
+  /* BUG FIX: Detect corrupt sparsemaps (m_data_used = 0 but garbage chunk count).
+   * A valid empty sparsemap has m_data_used = SM_SIZEOF_OVERHEAD with chunk_count = 0.
+   * If m_data_used = 0, the map was improperly initialized; treat as empty. */
+  if (a->m_data_used == 0 || b->m_data_used == 0) {
+    return NULL;
+  }
+
   const size_t a_count = __sm_get_chunk_count(a);
   const size_t b_count = __sm_get_chunk_count(b);
 
@@ -2972,8 +2984,9 @@ sparsemap_union(const sparsemap_t *a, const sparsemap_t *b)
     return NULL;
   }
 
-  const size_t a_count = a ? __sm_get_chunk_count(a) : 0;
-  const size_t b_count = b ? __sm_get_chunk_count(b) : 0;
+  /* BUG FIX: Detect corrupt sparsemaps (m_data_used = 0 but garbage chunk count). */
+  const size_t a_count = (a && a->m_data_used > 0) ? __sm_get_chunk_count(a) : 0;
+  const size_t b_count = (b && b->m_data_used > 0) ? __sm_get_chunk_count(b) : 0;
 
   if (a_count == 0 && b_count == 0) {
     return NULL;
@@ -3500,6 +3513,12 @@ __sm_rank_vec(sparsemap_t *map, uint64_t begin, uint64_t end, bool value, __sm_b
 {
   (void)vec; /* unused parameter */
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
+  
+  /* BUG FIX: Detect corrupt sparsemap (m_data_used = 0 but garbage chunk count). */
+  if (map->m_data_used == 0) {
+    return value ? 0 : (end >= begin ? end - begin + 1 : 0);
+  }
+
   size_t gap, pos = 0, result = 0, prev = 0, len = end - begin + 1;
 
   if (begin > end) {
