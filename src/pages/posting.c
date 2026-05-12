@@ -73,10 +73,20 @@ struct PgTrePostingBuilder
     Relation        index;
     uint64          trigram_hash;
     bool            with_payload;
-    sparsemap_t    *smap;           /* malloc-backed */
+
+    /*
+     * Phase 4.1: accumulate TIDs into a palloc'd dynamic array instead of
+     * a dynamically-grown malloc-backed sparsemap.  The sparsemap dynamic
+     * resize path (sparsemap_set_data_size with data=NULL) triggers glibc
+     * heap corruption for certain size transitions; palloc/repalloc is
+     * solid.  The array is converted to a sparsemap once at finish time
+     * when we know the final cardinality.
+     */
+    uint64         *tids;           /* palloc'd uint64 array */
+    int             n_tids;
+    int             tids_alloced;
     uint64          min_tid;
     uint64          max_tid;
-    uint64          n_tids;
 
     /* Payload tracking (Phase 5). */
     PayloadEntry   *payload;        /* palloc'd array */
@@ -102,10 +112,12 @@ pg_tre_posting_build_begin_sized(Relation index, uint64 trigram_hash,
                                  bool with_payload, size_t expected_bytes)
 {
     PgTrePostingBuilder *b;
+    int initial_cap;
 
-    /* Round up to a generous bound.  Sparsemap_add can return IDX_MAX
-     * even with headroom due to internal chunk layout; give 2x. */
-    size_t alloc = expected_bytes < 1024 ? 1024 : expected_bytes * 2;
+    /* Use expected_bytes as a hint for the uint64 array capacity:
+     * each TID is 8 bytes in the array.  Minimum 64 slots. */
+    initial_cap = expected_bytes / 8;
+    if (initial_cap < 64) initial_cap = 64;
 
     b = (PgTrePostingBuilder *) palloc0(sizeof(*b));
     b->index        = index;
@@ -115,11 +127,8 @@ pg_tre_posting_build_begin_sized(Relation index, uint64 trigram_hash,
     b->max_tid      = 0;
     b->n_tids       = 0;
 
-    b->smap = sparsemap(alloc);
-    if (b->smap == NULL)
-        ereport(ERROR,
-                (errcode(ERRCODE_OUT_OF_MEMORY),
-                 errmsg("pg_tre: failed to allocate sparsemap for posting builder")));
+    b->tids         = (uint64 *) palloc(initial_cap * sizeof(uint64));
+    b->tids_alloced = initial_cap;
 
     /* Initialize payload array if enabled (Phase 5). */
     if (with_payload)
@@ -144,36 +153,15 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
                          const uint8 *tuple_bloom_bits)
 {
     uint64 packed = pg_tre_pack_tid(tid);
-    uint64 rc;
 
-    rc = sparsemap_add(b->smap, packed);
-
-    /*
-     * sparsemap_add returns the index on success, or SPARSEMAP_IDX_MAX
-     * to signal out-of-space.  When out-of-space, grow the buffer and
-     * retry.
-     */
-    if (rc == SPARSEMAP_IDX_MAX)
+    /* Grow the uint64 array if needed (palloc-based, proven reliable). */
+    if (b->n_tids >= b->tids_alloced)
     {
-        /*
-         * Double the buffer via sparsemap_set_data_size(map, NULL, new_size).
-         * The sparsemap owns its buffer (allocated by sparsemap()), so a
-         * NULL data argument triggers an internal realloc.
-         */
-        size_t cur = sparsemap_get_capacity(b->smap);
-        size_t nxt = cur == 0 ? 1024 : cur * 2;
-        sparsemap_t *grown = sparsemap_set_data_size(b->smap, NULL, nxt);
-        if (grown == NULL)
-            ereport(ERROR,
-                    (errcode(ERRCODE_OUT_OF_MEMORY),
-                     errmsg("pg_tre: failed to grow posting sparsemap")));
-        b->smap = grown;
-        rc = sparsemap_add(b->smap, packed);
-        if (rc == SPARSEMAP_IDX_MAX)
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("pg_tre: sparsemap_add failed after grow")));
+        b->tids_alloced *= 2;
+        b->tids = (uint64 *) repalloc(b->tids,
+                      b->tids_alloced * sizeof(uint64));
     }
+    b->tids[b->n_tids] = packed;
 
     /* Phase 5: capture per-TID payload (positions + bloom). */
     if (b->with_payload)
@@ -386,59 +374,43 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                             const uint8 **inline_data_out,
                             Size *inline_bytes_out)
 {
-    Size    sz = sparsemap_get_size(b->smap);
-    /*
-     * sparsemap_get_size reports only the actively-used bytes; we need a
-     * pointer to the underlying buffer.  The sparsemap API doesn't
-     * directly expose it, so use sparsemap_copy to obtain a contiguous
-     * serialized image in a known buffer, then extract the bytes via a
-     * second wrap.  For simplicity we recompute via scan & rebuild: the
-     * easier path is to treat the current map as already-serialized and
-     * read through sparsemap_open to inspect its byte layout.
-     *
-     * In practice, sparsemap's internal buffer IS the serialization --
-     * the struct carries a data pointer.  But since the struct is opaque
-     * in the header, we reach the bytes by re-initializing a stack map
-     * over the same storage -- except we don't have access to the
-     * pointer.  Work around by serializing to a fresh buffer we control.
-     */
     const uint8 *bytes;
     uint8      *copy;
     uint8      *payload_bytes = NULL;
     Size        payload_sz = 0;
+    Size        sz = 0;
 
     /*
-     * Round-trip through sparsemap_wrap to get a stable byte image that
-     * we own: copy the map, capture its size, then extract bytes through
-     * a wrapping handle over a palloc'd buffer.
+     * Phase 4.1: convert the collected uint64 array of TIDs to a canonical
+     * sparsemap serialization.  We allocate a fresh sparsemap of generous
+     * capacity (16 bytes per TID + overhead; sparsemap RLE will compress
+     * further), add each TID, then copy the resulting m_data bytes out
+     * into a palloc'd buffer.
      *
-     * Simplest correct approach: allocate `sz` bytes in CurrentMemoryContext,
-     * initialize a fresh wrapped sparsemap over it, iterate b->smap via
-     * sparsemap_scan and re-add into the new map.  This is O(n_tids) but
-     * n_tids is bounded by leaf capacity.  Since ambuild's finish path
-     * happens once per trigram, cost is acceptable for Phase 2.
+     * This path avoids sparsemap's dynamic-resize bug entirely by sizing
+     * the destination correctly from the start.  We still need the raw
+     * serialization (via an m_data struct-offset cast) because sparsemap
+     * exposes no direct byte-pointer accessor; the documented struct
+     * layout { size_t capacity; size_t used; uint8 *data; } makes index
+     * [2] on a uint8** cast reach m_data reliably.
      */
     {
-        /*
-         * Extract the serialized bytes from b->smap directly.  The
-         * sparsemap struct's layout is { size_t m_capacity; size_t
-         * m_data_used; uint8 *m_data; }, declared in sparsemap.c.  We
-         * access m_data by cast -- this is a documented invariant of
-         * the library and avoids the re-serialization round-trip that
-         * produced all-zero inline blobs in earlier attempts.
-         */
-        /*
-         * Extract the serialized bytes from b->smap using the library's
-         * own sparsemap_copy() to ensure a canonical layout regardless of
-         * internal encoding state.  Copy its bytes into a palloc'd buffer.
-         */
-        sparsemap_t *canonical = sparsemap_copy(b->smap);
-        if (canonical == NULL)
+        size_t cap = (size_t) b->n_tids * 16 + 1024;
+        sparsemap_t *fresh = sparsemap(cap);
+        int k;
+        if (fresh == NULL)
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
-                errmsg("pg_tre: sparsemap_copy failed")));
-        sz = sparsemap_get_size(canonical);
+                errmsg("pg_tre: failed to allocate sparsemap for serialization")));
+        for (k = 0; k < b->n_tids; k++)
         {
-            uint8_t *smap_data = ((uint8_t **) canonical)[2];  /* m_data */
+            if (sparsemap_add(fresh, b->tids[k]) == SPARSEMAP_IDX_MAX)
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                    errmsg("pg_tre: sparsemap_add overflow for n_tids=%d cap=%zu",
+                           b->n_tids, cap)));
+        }
+        sz = sparsemap_get_size(fresh);
+        {
+            uint8_t *smap_data = ((uint8_t **) fresh)[2];  /* m_data */
             if (sz > 0)
             {
                 copy = (uint8 *) palloc(sz + 16);
@@ -450,7 +422,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                 copy = (uint8 *) palloc0(16);
             }
         }
-        free(canonical);
+        free(fresh);
         bytes = copy;
     }
 
@@ -506,8 +478,8 @@ pg_tre_posting_build_free(PgTrePostingBuilder *b)
 {
     if (b == NULL)
         return;
-    if (b->smap != NULL)
-        free(b->smap);
+    if (b->tids != NULL)
+        pfree(b->tids);
 
     /* Free payload entries (Phase 5). */
     if (b->payload != NULL)

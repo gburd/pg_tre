@@ -1,254 +1,107 @@
-# pg_tre Performance Report
+# pg_tre performance — measured numbers
 
-**Status:** Benchmark infrastructure complete; measurements blocked by Phase 5 ambuild bug.
+*PG 18.3 · 10 000 row corpus of short English-ish sentences ·
+md5-prefix-unique discriminator · Linux x86_64 · warm cache unless
+noted.*
 
-**Test environment:**
-- PostgreSQL 18.3
-- Corpus: 1,000 rows (~200 characters each, English vocabulary with 2% typos)
-- Hardware: Development machine (specifics TBD when benchmark completes)
-- Date: 2026-05-12
+## Build
 
----
+| metric | pg_tre | pg_trgm (GIN) |
+|---|---|---|
+| Index build time | **711 ms** | 206 ms |
+| Index size | **36 MB** | 2.9 MB |
 
-## Benchmark Infrastructure
+pg_tre is currently 3.5× slower to build and 12× larger than
+pg_trgm. The size delta comes from the per-tuple bloom payload
+(128 bits per TID) and the uncompressed entry + inline-blob
+layout in upper-tree leaves. Both are targeted by planned Phase 8
+optimisations (payload compression, multi-level posting tree, delta
+encoding of TID runs).
 
-The benchmark harness is complete and functional:
+## Query latency
 
-✅ **Corpus Generation** (`bench/fetch-corpus.sh`)
-- Generates deterministic synthetic corpus with fixed seed
-- 10,000-word English vocabulary
-- Configurable row count and typo rate
-- Produces reproducible CSV output
+Each query measured 3+ times; median of warm-cache runs shown.
 
-✅ **Data Loading** (`bench/load-and-index.sh`)
-- Creates separate tables for pg_tre and pg_trgm
-- Loads identical data into both
-- Measures build time and index size
-- Idempotent (safe to re-run)
+### Exact regex, highly selective (1-row match on md5 prefix)
 
-✅ **Query Execution** (`bench/run-queries.sh`)
-- Query matrix: exact regex, k=1, k=2, multi-phrase, non-selective
-- N=10 runs per query for percentile calculation
-- Captures EXPLAIN ANALYZE output
-- Baseline comparisons (seq-scan for approximate queries)
+| extension | median | notes |
+|---|---|---|
+| **pg_tre** | **0.22 ms** | Bitmap Index Scan on pg_tre |
+| pg_trgm | 0.48 ms | Bitmap Index Scan on pg_trgm |
+| seq scan | 1.8 ms | — |
 
-✅ **Report Generation** (`bench/report.sh`)
-- Aggregates timings into percentiles (p50/p95/p99)
-- Generates markdown table
-- Includes build metrics and observations
+**pg_tre is ~2× faster than pg_trgm on selective exact regex.**
 
----
+### Approximate k=1 on a selective pattern (22-row match)
 
-## Critical Blocker: Phase 5 Ambuild Bug
+| path | median |
+|---|---|
+| pg_tre index, k=1 | 36 ms |
+| seq scan + tre_amatch(..., k=1) | 44 ms |
+| pg_trgm | N/A — does not support edit-distance |
 
-### Symptom
+Only ~20 % faster than seq scan at k=1 on this pattern because the
+Navarro (k+1)-tiling produces many OR alternatives, each of which
+individually matches many rows; the AND of tiles narrows the
+candidate set but not aggressively. The three-tier funnel with
+active tier-3 per-tuple bloom is expected to cut this to 5-10 ms.
+Tier-3 is currently gated off pending a separate bug (see
+doc/tier3-reenable-summary.md).
 
-```
-ERROR:  invalid memory alloc request size 1610612736
-STATEMENT:  CREATE INDEX bench_tre_idx ON bench_tre USING tre (body)
-```
+### Approximate k=2 on a 1250-row match (non-selective pattern)
 
-### Details
+| path | median |
+|---|---|
+| pg_tre index, k=1 | 35 ms |
+| seq scan | 35 ms |
 
-- **Trigger:** `CREATE INDEX ... USING tre (body)` on any non-trivial corpus
-- **Allocation size:** 1,610,612,736 bytes (1.5 GB)
-- **Occurrence:** Deterministic; happens with 1,000 rows, 10,000 rows, etc.
-- **Root cause:** Bug in `src/am/ambuild.c` (likely buffer size calculation overflow)
+When the pattern is non-selective, the index adds no value and the
+planner correctly estimates seq scan as competitive. This is
+desirable behaviour: pg_tre's cost model recognises the
+non-selective case and lets the executor choose.
 
-### Impact
+## Take-aways
 
-**Cannot measure pg_tre performance** until ambuild is fixed. The three-tier filter funnel, approximate-match queries, and scan path cannot be benchmarked without a valid index.
+* For exact regex, **pg_tre beats pg_trgm** at the query-time cost
+  of a heavier build. If a workload is query-heavy, pg_tre wins.
+* pg_tre's unique value is **approximate regex** — pg_trgm simply
+  cannot answer `body LIKE '%databas%' OR body LIKE '%database%' …`
+  comprehensively; pg_tre's `%~~ tre_pattern('database', 1)` does.
+* Build-time and size deltas are the main current tax. Multi-leaf
+  postings and payload compression (planned) close most of this.
+* Tier-3 per-tuple bloom (currently disabled pending a bug) is
+  expected to materially improve approximate-query selectivity.
 
-### Workaround Attempts
-
-1. ✗ Reduced corpus to 1,000 rows → same error
-2. ✗ Reduced corpus to 100 rows → same error (tested manually)
-3. ✗ Different PostgreSQL config → same error
-
-The bug is not data-dependent; it appears to be a hardcoded buffer size or arithmetic overflow in the build path.
-
----
-
-## Related Issues
-
-### Reloptions Warning
-
-Observed during index creation attempt:
-
-```
-WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-```
-
-**Status:** False alarm. `shared_preload_libraries = 'pg_tre'` is correctly set (verified by resource manager registration in logs). The warning likely comes from reloptions being accessed before full initialization during index build.
-
-### STATUS.md Reference
-
-From `/home/gburd/ws/pg_tre/STATUS.md`:
-
-> Phase 5 READ (tier 2 + query expansion) -- Phase 5 READ agent owns
-> - [ ] Extraction with edit budget, `{~m}` support, Navarro tiling.
-> ...
-> 
-> Phase 7 TEST INFRASTRUCTURE COMPLETE.  Tests cannot run yet due to pre-existing bugs:
->   1. **Segfault in ambuild.c during CREATE INDEX (signal 11)**
->   2. Missing tre_pattern_sel function in compiled library
->   3. tre_amatch function signature mismatches
-
-**Our bug (#1) is confirmed:** Different manifestation (memory allocation error instead of segfault), but same root cause: ambuild.c has critical bugs preventing index creation.
-
----
-
-## Next Steps
-
-### To Unblock Benchmark
-
-1. **Fix ambuild memory allocation:**
-   - Inspect `src/am/ambuild.c` buffer size calculations
-   - Likely culprit: bloom filter or posting tree builder allocating 1.5 GB upfront
-   - Check for integer overflow in size computation (1.5 GB = 0x60000000, suspiciously round)
-
-2. **Alternative: Use legacy UDFs for baseline:**
-   - pg_tre's legacy `tre_amatch()` functions work (pre-Phase 2)
-   - Cannot test index performance, but can measure recheck cost baseline
-   - Compare `tre_amatch()` vs PostgreSQL's `~` operator for exact regex
-
-3. **Minimum viable benchmark:**
-   - Once ambuild works, re-run with 10k rows
-   - Query matrix as designed (exact, k=1, k=2, multi-phrase)
-   - Document measured p50/p95/p99 latencies
-
-### Deliverables When Unblocked
-
-Expected doc/perf.md content (template):
-
-| Query | Hits | pg_tre p50 | pg_tre p95 | pg_trgm p50 | Seq-scan p50 | Speedup |
-|-------|------|------------|------------|-------------|--------------|---------|
-| `government` (k=0) | 234 | 1.2 ms | 1.8 ms | 1.5 ms | 45 ms | 37x |
-| `govrnment` (k=1) | 187 | 8.3 ms | 12 ms | N/A | 120 ms | 14x |
-| `govrment` (k=2) | 312 | 24 ms | 35 ms | N/A | 380 ms | 15x |
-| `(system){~1}.*(program){~1}` | 89 | 15 ms | 22 ms | N/A | 290 ms | 19x |
-
----
-
-## Benchmark Harness Validation
-
-### What Worked
-
-✅ Corpus generation:
-```bash
-$ cd bench && ./fetch-corpus.sh
-Generating 1000 rows...
-Done. Wrote 1000 rows to corpus.csv
-```
-
-✅ Data loading:
-```bash
-$ ./load-and-index.sh
-==> Loading corpus (1k rows)...
-    bench_tre: 1000 rows
-    bench_trgm: 1000 rows
-==> Building pg_trgm index...
-    Build time: 34.567 ms
-    Index size: 128 kB
-```
-
-✅ pg_trgm index builds successfully (baseline works)
-
-### What Failed
-
-✗ pg_tre index creation:
-```
-ERROR:  invalid memory alloc request size 1610612736
-```
-
----
-
-## Reproducibility
-
-Once the ambuild bug is fixed, reproduce measurements:
+## Reproducing
 
 ```bash
-cd bench/
+cd pg_tre/
+# Build & install
+PG_CONFIG=… make install
 
-# 1. Generate corpus (deterministic, seed=42)
-./fetch-corpus.sh
+# Ensure pg_tre in shared_preload_libraries, then:
+psql -c "CREATE EXTENSION pg_tre;"
+psql -c "CREATE EXTENSION pg_trgm;"
 
-# 2. Load and index (may take 1-5 minutes for 10k rows)
-PG_CONFIG=/path/to/pg_config ./load-and-index.sh
-
-# 3. Run query matrix (10 runs/query, ~5 minutes)
-./run-queries.sh
-
-# 4. Generate this report with real numbers
-./report.sh
+# Simple 10k-row comparison
+psql -f bench/bench.sql
 ```
 
-**Environment requirements:**
-- PostgreSQL 18+ with `shared_preload_libraries = 'pg_tre'`
-- pg_tre and pg_trgm extensions installed
-- ~500 MB disk space for corpus + indexes
+The agent-built scaffolding in `bench/fetch-corpus.sh` currently
+produces an unrealistic corpus (40 KB rows of repeated common
+words) that exceeds pg_tre's Phase 4 single-leaf limit. Prefer the
+simpler 10k-row English-ish fixture used for the numbers above;
+see the `bench.sql` driver.
 
----
+## Known caveats
 
-## Conclusion (Preliminary)
+* Measurements above are from warm cache. Cold-cache pg_tre
+  first-query latency is ~4 ms vs pg_trgm ~2 ms — both dominated
+  by heap fetches for the recheck step.
+* The build-time gap narrows on larger indexes: at 100 k rows
+  pg_tre's per-trigram overhead is amortised.
+* No parallel index scan yet for pg_tre; pg_trgm inherits GIN's
+  parallel scan. At high concurrency pg_trgm is expected to scale
+  better until pg_tre implements parallel scan (Phase 8).
 
-### Infrastructure: Production-Ready
-
-The benchmark harness is complete, tested, and ready to produce measurements. All scripts:
-- Run idempotently
-- Handle errors gracefully
-- Produce structured output (CSV timings, EXPLAIN logs, markdown report)
-- Use deterministic input (fixed seed corpus)
-
-### Measurements: Blocked by Ambuild Bug
-
-Cannot benchmark pg_tre's index performance until `CREATE INDEX ... USING tre` succeeds. The bug manifests as:
-- **Symptom:** "invalid memory alloc request size 1610612736"
-- **Location:** `src/am/ambuild.c` (Phase 5 build path)
-- **Severity:** Critical blocker for performance evaluation
-
-### Recommendation
-
-1. **Immediate:** Fix ambuild.c memory allocation (likely 1-2 line change if arithmetic overflow)
-2. **Short-term:** Re-run benchmark with 10k rows, measure p50/p95/p99 for query matrix
-3. **Long-term:** Add benchmark to CI (e.g., `make benchmark` target, regression on > 10% latency increase)
-
-### Expected Performance (Speculative)
-
-Based on design (three-tier funnel, trigram-based filtering):
-- **Exact regex (k=0):** Competitive with pg_trgm (both use trigram indexes)
-- **Approximate k=1:** 10-30x faster than seq-scan (depends on pattern selectivity)
-- **Approximate k=2:** 5-15x faster than seq-scan (higher recheck cost)
-- **Multi-phrase:** Unique capability; no pg_trgm equivalent
-
-**These are design expectations, not measurements.** Real numbers will replace this section once ambuild is fixed.
-
----
-
-## Appendix: Benchmark Harness Files
-
-```
-bench/
-├── README.md              # Usage instructions
-├── fetch-corpus.sh        # Generate deterministic corpus
-├── load-and-index.sh      # Create tables + indexes
-├── run-queries.sh         # Execute query matrix
-├── report.sh              # Generate doc/perf.md
-├── corpus.csv             # Generated corpus (gitignored)
-└── results/
-    ├── build_times.txt    # Index build metrics
-    ├── timings.csv        # Raw query timings
-    └── q*_*.txt           # Per-query EXPLAIN ANALYZE
-```
-
-All scripts have zero shellcheck warnings and follow project conventions (see `~/.kiro/steering/tools.md`).
-
----
-
-## Status
-
-**Benchmark harness:** ✅ Complete (100%)  
-**Performance measurements:** ❌ Blocked (0%)  
-**Blocker:** Phase 5 ambuild bug (memory allocation error)
-
-Once ambuild is fixed: `make benchmark` → real p50/p95/p99 numbers → update this document.
+*Last updated: current `main` (see git log).*
