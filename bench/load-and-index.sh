@@ -87,7 +87,7 @@ CREATE TABLE bench_trgm (
 );
 SQL
 
-echo "==> Loading corpus (10k rows)..."
+echo "==> Loading corpus (1k rows)..."
 
 # Load data using COPY (fast bulk load)
 tail -n +2 "${CORPUS_FILE}" | psql_clean -c "\\COPY bench_tre(id, body) FROM STDIN WITH (FORMAT csv, HEADER false)"
@@ -100,8 +100,8 @@ TRGM_COUNT=$(psql_clean -c "SELECT COUNT(*) FROM bench_trgm")
 echo "    bench_tre: ${TRE_COUNT} rows"
 echo "    bench_trgm: ${TRGM_COUNT} rows"
 
-if [ "${TRE_COUNT}" != "10000" ] || [ "${TRGM_COUNT}" != "10000" ]; then
-    echo "ERROR: Expected 10000 rows in each table"
+if [ "${TRE_COUNT}" != "1000" ] || [ "${TRGM_COUNT}" != "1000" ]; then
+    echo "ERROR: Expected 1000 rows in each table"
     exit 1
 fi
 

@@ -10,6 +10,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 Pre-release development version. Complete feature set for approximate regex indexing with three-tier filter funnel.
 
+### Benchmark Harness (2026-05-12)
+
+**Goal:** Build reproducible benchmark infrastructure for pg_tre vs pg_trgm performance comparison.
+
+**Shipped:**
+- `bench/fetch-corpus.sh` — Generates deterministic synthetic corpus (configurable size, fixed seed=42)
+- `bench/load-and-index.sh` — Loads data into bench_tre/bench_trgm tables, builds indexes, measures build time/size
+- `bench/run-queries.sh` — Executes query matrix (exact regex, k=1, k=2, multi-phrase, non-selective), captures p50/p95/p99 latencies
+- `bench/report.sh` — Aggregates results into `doc/perf.md` with markdown tables
+- `bench/README.md` — Usage instructions and corpus description
+- `doc/perf.md` — Performance report documenting benchmark infrastructure and Phase 5 ambuild blocker
+
+**Query Matrix:**
+- Exact regex: `government`, `electrification`, `natural` (vs pg_trgm)
+- Approximate k=1: `govrnment`, `natrual` (pg_tre only, seq-scan baseline)
+- Approximate k=2: `govrment` (pg_tre vs seq-scan)
+- Multi-phrase: `(system){~1}.*(program){~1}` (pg_tre unique capability)
+- Non-selective: `the` (tests planner cost estimation)
+- Rare/no-match: `xyzabc` (tests index rejection speed)
+
+**Status:**
+- ✅ Infrastructure complete: corpus generation, data loading, query runner, report generator
+- ✅ pg_trgm baseline works: index builds successfully, queries execute
+- ❌ Measurements blocked: pg_tre index creation fails with "invalid memory alloc request size 1610612736"
+- ❌ Root cause: Phase 5 ambuild bug (same as STATUS.md item #1: ambuild.c segfault/memory error)
+
+**Testing:**
+- Corpus generation: ✅ Generates 1k/10k/100k rows with deterministic vocabulary and typos
+- Data loading: ✅ COPY loads 1k rows in ~2.7s per table
+- pg_trgm index build: ✅ Completes in ~35ms for 1k rows
+- pg_tre index build: ❌ Fails regardless of corpus size (1k, 10k, 100k all trigger same error)
+
+**Next Steps:**
+1. Fix ambuild.c memory allocation bug (likely arithmetic overflow in buffer size calculation)
+2. Re-run benchmark with 10k rows
+3. Update `doc/perf.md` with measured p50/p95/p99 numbers
+4. Compare pg_tre speedup vs seq-scan for k=1/k=2 queries
+
+**Documentation:**
+- `doc/pg_tre.md` Performance Notes section now references `doc/perf.md`
+- `doc/perf.md` honestly documents blocker and includes complete reproduction steps
+- All scripts follow project conventions: zero shellcheck warnings, idempotent, structured output
+
 ### Phase 0 — Foundation (Complete)
 
 **Goal:** Establish build system, submodules, and basic AM registration.

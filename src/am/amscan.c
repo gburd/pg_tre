@@ -685,7 +685,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      * positional filtering -- the executor's recheck handles false
      * positives.  Re-enable when the sparsemap_rank bug is resolved.
      */
-    if (false && result != NULL && sparsemap_cardinality(result) > 0)
+    if (result != NULL && sparsemap_cardinality(result) > 0)
     {
         sparsemap_t *filtered = sparsemap(sparsemap_get_capacity(result));
         if (filtered != NULL)

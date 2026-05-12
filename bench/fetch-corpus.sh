@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORPUS_FILE="${SCRIPT_DIR}/corpus.csv"
-NUM_ROWS=10000
+NUM_ROWS=1000
 AVG_WORDS_PER_ROW=30
 TYPO_RATE=0.02
 

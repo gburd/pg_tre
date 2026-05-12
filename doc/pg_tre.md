@@ -377,6 +377,10 @@ WHERE body %~~ tre_pattern('enviro.{~2}ment.*database');
 
 ## Performance Notes
 
+**For measured benchmark numbers, see [perf.md](perf.md).**
+
+This section describes the theoretical performance characteristics of pg_tre's three-tier filter architecture. Real measurements are in `doc/perf.md` once the Phase 5 ambuild bug is resolved.
+
 ### Three-Tier Filter Funnel
 
 pg_tre uses three progressively refined filters before heap recheck:
