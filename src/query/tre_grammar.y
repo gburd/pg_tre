@@ -43,7 +43,7 @@ quantified(A)    ::= atom(B) QUESTION.                           { A = regex_ast
 quantified(A)    ::= atom(B) LBRACE INT(M) RBRACE.               { A = regex_ast_rep(ctx, B, M.i, M.i); }
 quantified(A)    ::= atom(B) LBRACE INT(M) COMMA RBRACE.         { A = regex_ast_rep(ctx, B, M.i, -1); }
 quantified(A)    ::= atom(B) LBRACE INT(M) COMMA INT(N) RBRACE.  { A = regex_ast_rep(ctx, B, M.i, N.i); }
-quantified(A)    ::= atom(B) APPROX(K).                          { A = regex_ast_approx(ctx, B, K.i); }
+quantified(A)    ::= atom(B) LBRACE APPROX(K) RBRACE.            { A = regex_ast_approx(ctx, B, K.i); }
 
 atom(A)          ::= LPAREN alternation(B) RPAREN.               { A = B; }
 atom(A)          ::= LITERAL(C).                                 { A = regex_ast_literal(ctx, C.cp); }
