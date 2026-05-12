@@ -1,0 +1,60 @@
+# Dependabot configuration for pg_tre.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+#
+# Scope:
+#   - GitHub Actions versions in .github/workflows/
+#   - Docker base images in doc/Dockerfile and packaging/
+#   - Git submodules: vendor/tre (laurikari/tre) and vendor/lime (gregburd/lime)
+#
+# Security updates run automatically; these schedules are for version
+# updates (non-security).
+
+version: 2
+updates:
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # Docker base images referenced by doc/Dockerfile and any packaging files.
+  - package-ecosystem: "docker"
+    directory: "/doc"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "docker"
+
+  # Git submodules.  vendor/tre pins a specific TRE tag; vendor/lime tracks
+  # upstream Lime.  Dependabot will PR bumps; we review carefully because
+  # submodule bumps affect on-disk format compatibility.
+  - package-ecosystem: "gitsubmodule"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "submodule"
+      - "review-carefully"
+    commit-message:
+      prefix: "submodule"
+      include: "scope"

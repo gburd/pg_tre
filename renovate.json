@@ -1,0 +1,60 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate config for pg_tre. Runs on both GitHub (via Renovate app) and Codeberg (via the shared Renovate instance at https://codeberg.org/Renovate/renovate).",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "timezone": "America/New_York",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "GitHub Actions / Forgejo Actions bumps",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "actions (non-major)",
+      "addLabels": ["ci"]
+    },
+    {
+      "description": "Separate PR for major GitHub Actions bumps",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["ci", "review-carefully"]
+    },
+    {
+      "description": "Docker base images (Debian, postgres:*, etc.)",
+      "matchDatasources": ["docker"],
+      "addLabels": ["docker"]
+    },
+    {
+      "description": "Git submodules: carefully reviewed — affects on-disk format",
+      "matchManagers": ["git-submodules"],
+      "addLabels": ["submodule", "review-carefully"],
+      "prPriority": -1,
+      "schedule": ["before 6am on the first day of the month"]
+    }
+  ],
+  "git-submodules": {
+    "enabled": true
+  },
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "platformAutomerge": false,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "ignorePaths": [
+    "vendor/**",
+    "bench/corpus.csv",
+    "build/**"
+  ]
+}

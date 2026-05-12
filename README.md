@@ -18,6 +18,30 @@ SELECT id FROM docs WHERE body %~~ tre_pattern('(error){~1}.*(42[0-9]){~0}', 1);
 -- Bitmap Index Scan on docs_tre   →   sub-millisecond on 10k rows.
 ```
 
+### How the index works
+
+Three filter tiers narrow the candidate set before the heap recheck. Each
+tier is cheaper than the next; the executor never reads the heap for rows
+the earlier tiers eliminated.
+
+```mermaid
+flowchart TD
+    Q["SQL query<br/><code>body %~~ tre_pattern(pat, k)</code>"]
+    P["Regex parser (Lime LALR(1))"]
+    E["AST &rarr; trigram formula<br/>Navarro tiling + Mihov-Schulz expansion"]
+    T1["Tier 1: range bloom<br/>BRIN-style per-block-range filter"]
+    T2["Tier 2: sparsemap posting trees<br/>per-trigram AND/OR merge"]
+    T3["Tier 3: per-tuple bloom<br/>skip heap fetch when all required<br/>trigrams provably absent"]
+    RC["Heap recheck (TRE regaexec)<br/>exact edit-distance match"]
+    R[["Result rows"]]
+
+    Q --> P --> E --> T1
+    T1 -->|"surviving block ranges"| T2
+    T2 -->|"candidate TIDs"| T3
+    T3 -->|"refined TIDs"| RC
+    RC --> R
+```
+
 ---
 
 ## Features
@@ -69,6 +93,37 @@ SELECT * FROM documents
 
 ## How pg_tre fits alongside pg_trgm, full-text search, and pgvector
 
+Four PostgreSQL text-search primitives, four different axes. They
+compose; they rarely compete.
+
+```mermaid
+flowchart LR
+    Q(["Agent / application query"])
+
+    subgraph Lex["Lexical &middot; pattern match"]
+        direction TB
+        TRGM["<b>pg_trgm</b><br/>exact regex, LIKE,<br/>trigram similarity"]
+        TRE["<b>pg_tre</b><br/><i>fuzzy regex</i>,<br/>edit-distance k,<br/>{~m} per-phrase"]
+    end
+    subgraph Ling["Linguistic &middot; natural language"]
+        FTS["<b>tsvector / tsquery</b><br/>stemming, ranking,<br/>stopwords, phrases"]
+    end
+    subgraph Sem["Semantic &middot; meaning"]
+        VEC["<b>pgvector</b> /<br/><b>pgvectorscale</b><br/>cosine / L2 / IP,<br/>HNSW, IVFFlat"]
+    end
+
+    Q -- "literal substring / typo" --> TRGM
+    Q -- "<b>fuzzy regex with edits</b>" --> TRE
+    Q -- "natural-language phrase" --> FTS
+    Q -- "conceptual similarity" --> VEC
+
+    TRE -. hybrid filter .-> VEC
+    FTS -. hybrid rank  .-> VEC
+    TRGM -. prefix/LIKE .-> FTS
+
+    style TRE stroke:#d63,stroke-width:3px
+```
+
 | Extension | Indexes | Best for | pg_tre overlap? |
 |---|---|---|---|
 | **pg_trgm** (GIN/GiST) | character trigrams | exact regex, LIKE, trigram-similarity search | **significant** — both do trigram-prefiltered regex; pg_tre adds edit-distance |
@@ -112,6 +167,28 @@ pg_tre shines in a category that LLM agents increasingly need:
 **lexical pattern search over data the agent generates or
 consumes, tolerant of OCR errors, typos, format drift, or
 LLM hallucinations**.
+
+```mermaid
+flowchart LR
+    A(["LLM agent /<br/>orchestrator"])
+    subgraph RAG["Retrieval &middot; three axes"]
+        direction TB
+        P["<b>pg_tre</b><br/>fuzzy regex filter<br/>(error codes, SKUs,<br/>identifiers with typos)"]
+        F["tsvector / FTS<br/>linguistic search"]
+        V["pgvector<br/>semantic rank"]
+    end
+    CTX(["Ranked context"])
+    LLM(["LLM response"])
+
+    A -->|tool call: query| RAG
+    P --> CTX
+    F --> CTX
+    V --> CTX
+    CTX --> A
+    A --> LLM
+
+    style P stroke:#d63,stroke-width:3px
+```
 
 | Agent task | Why pg_tre fits |
 |---|---|
@@ -246,5 +323,18 @@ Open issues and PRs at
 CI runs on both Forgejo Actions (primary, at Codeberg) and GitHub
 Actions (mirror). See `.forgejo/workflows/` and
 `.github/workflows/`.
+
+Docs are auto-published on each push to `main`:
+- Codeberg Pages: `https://gregburd.codeberg.page/pg_tre/`
+  (served from the `pages` branch)
+- GitHub Pages: repo Settings → Pages → Source: GitHub Actions
+
+Dependency updates are automated on both platforms:
+- GitHub: [`.github/dependabot.yml`](.github/dependabot.yml) drives
+  weekly bumps of GitHub Actions, Docker base images, and git
+  submodules.
+- Codeberg: [`renovate.json`](renovate.json) is picked up by
+  Codeberg's shared Renovate runner; the same ecosystems are
+  covered with the same schedule.
 
 Before sending a patch: `scripts/release-check.sh` must pass.

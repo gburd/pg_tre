@@ -136,3 +136,58 @@ jobs:
           name: pg_tre-tarball
           path: pg_tre-*.tar.gz
           retention-days: 90
+
+  publish-pages:
+    # Pushes the rendered docs to a `pages` branch of this repository.
+    # Codeberg Pages serves `<user>.codeberg.page/<repo>/` from that branch
+    # automatically when the branch exists (no settings toggle needed).
+    # See https://docs.codeberg.org/codeberg-pages/
+    name: publish docs to Codeberg Pages
+    runs-on: docker
+    container:
+      image: debian:12
+    needs: [lint-docs]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              git ca-certificates nodejs npm
+          npm install -g @mermaid-js/mermaid-cli || true
+
+      - name: Assemble _site
+        run: |
+          mkdir -p _site/doc
+          cp README.md _site/index.md
+          cp -r doc/* _site/doc/ 2>/dev/null || true
+          cp CHANGELOG.md STATUS.md LICENSE NOTICE _site/ 2>/dev/null || true
+          # Minimal index.html so Pages serves something when bots hit /
+          cat > _site/index.html <<'HTML'
+          <!DOCTYPE html>
+          <meta charset="utf-8">
+          <title>pg_tre</title>
+          <meta http-equiv="refresh" content="0; url=index.md">
+          <p>See <a href="index.md">index.md</a>.</p>
+          HTML
+
+      - name: Push to pages branch
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          if [ -z "${FORGEJO_TOKEN:-}" ]; then
+              echo "FORGEJO_TOKEN secret not set; skipping pages push"
+              exit 0
+          fi
+          git config --global user.email "ci@pg-tre"
+          git config --global user.name "pg_tre CI"
+          cd _site
+          git init -b pages
+          git add .
+          git commit -m "Docs: $(cd .. && git rev-parse --short HEAD)"
+          url_no_scheme="${GITHUB_SERVER_URL#https://}"
+          git push --force "https://ci:${FORGEJO_TOKEN}@${url_no_scheme}/${GITHUB_REPOSITORY}.git" pages:pages
