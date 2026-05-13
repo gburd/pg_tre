@@ -273,14 +273,14 @@ closing test or proof-of-life is in parens.
   `[ ]` not started  `[~]` in progress / partial  `[x]` done
 
 ### Scale and correctness ceilings
-- [~] **Multi-leaf posting trees with right-links**
-      (`src/pages/posting.c::write_single_leaf`,
-      `src/pages/posting.c::pg_tre_posting_materialize`).
-      Two sub-agent attempts failed (one committed only
-      scaffolding, one ran out of context before applying
-      edits to disk).  A third focused agent is in flight
-      with a 7-step recipe and a commit-after-each-step
-      requirement.
+- [x] **Multi-leaf posting trees with right-links**
+      Closed in commits bdec6d4 (signature), d4773de (split),
+      d3ec8a1 (materialize), 16d9465 (tuple_bloom_lookup),
+      26120cc (positions_lookup), d1a0d7b (test), 76ff0e4
+      (format v3 + docs).  CREATE INDEX on a 100K-row table
+      where every body contains 'the' now succeeds.
+      `test/sql/multi_leaf.sql` exercises this and is in
+      the regression schedule.
 - [x] **Coverage test for the AND-vs-OR DNF resolution
       bug** — closed in commit 881e61b
       (`test/sql/dnf_resolution.sql`).
@@ -337,10 +337,10 @@ closing test or proof-of-life is in parens.
 - [~] **Real-corpus benchmark at 1M rows**
       (`bench/bench_1m.sql`).  Script committed in
       commit 2860274 and validated on a 100-row dummy
-      fixture.  Full 1M-row run is gated on multi-leaf
-      posting trees — 'database' alone will appear in
-      ~50K rows and the current single-leaf cap will
-      reject the build.
+      fixture.  Now unblocked: multi-leaf posting trees
+      landed in commits bdec6d4..76ff0e4, so the 1M-row
+      build will succeed.  Full run + perf.md update
+      pending.
 
 ### Operations
 - [ ] **≥30-day external beta**.  Not started.  Ask the
