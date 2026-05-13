@@ -457,21 +457,138 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
         return InvalidBlockNumber;
     }
 
-    /* On-disk case: write both sparsemap and payload to a leaf page. */
+    /* On-disk case: write sparsemap and payload to leaf page(s). */
     {
-        BlockNumber blk = write_single_leaf(b->index, b->trigram_hash,
-                                            bytes, sz,
-                                            payload_bytes, payload_sz,
-                                            b->min_tid, b->max_tid,
-                                            b->n_tids,
-                                            InvalidBlockNumber);
-        /* When stored on-disk, we don't need the palloc'd copies. */
-        pfree(copy);
-        if (payload_bytes)
-            pfree(payload_bytes);
-        *inline_data_out  = NULL;
-        *inline_bytes_out = 0;
-        return blk;
+        Size total = sz + payload_sz;
+        Size budget = posting_leaf_budget();
+
+        /* Single-leaf case: everything fits in one page */
+        if (total <= budget)
+        {
+            BlockNumber blk = write_single_leaf(b->index, b->trigram_hash,
+                                                bytes, sz,
+                                                payload_bytes, payload_sz,
+                                                b->min_tid, b->max_tid,
+                                                b->n_tids,
+                                                InvalidBlockNumber);
+            pfree(copy);
+            if (payload_bytes)
+                pfree(payload_bytes);
+            *inline_data_out  = NULL;
+            *inline_bytes_out = 0;
+            return blk;
+        }
+
+        /* Multi-leaf case: partition TIDs and write right-to-left chain.
+         * Use ~70% of budget per leaf to allow some compression overhead. */
+        {
+            Size target_leaf_size = (budget * 7) / 10;
+            int n_tids = b->n_tids;
+            int tid_idx = 0;
+            BlockNumber right_link = InvalidBlockNumber;
+            BlockNumber leftmost_blk = InvalidBlockNumber;
+            Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+
+            /* Estimate bytes per TID: ~8 for sparsemap RLE (conservative),
+             * plus payload overhead if present. */
+            Size bytes_per_tid = 8;  /* sparsemap average */
+            if (b->with_payload && b->payload_count > 0)
+            {
+                /* payload: 2 bytes (n_positions) + 4*n_positions + bloom_bytes */
+                Size avg_positions = 2;  /* conservative estimate */
+                bytes_per_tid += 2 + avg_positions * 4 + bloom_bytes;
+            }
+
+            /* Process TIDs right-to-left, building leaves from the end. */
+            while (tid_idx < n_tids)
+            {
+                /* Estimate how many TIDs fit in this leaf */
+                int tids_in_leaf = (int)(target_leaf_size / bytes_per_tid);
+                if (tids_in_leaf < 1)
+                    tids_in_leaf = 1;
+                if (tid_idx + tids_in_leaf > n_tids)
+                    tids_in_leaf = n_tids - tid_idx;
+
+                /* Build sparsemap for this slice */
+                size_t cap = (size_t)tids_in_leaf * 16 + 1024;
+                sparsemap_t *slice_smap = sparsemap(cap);
+                uint8 *slice_bytes;
+                Size slice_sz;
+                int k;
+
+                if (slice_smap == NULL)
+                    ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                        errmsg("pg_tre: failed to allocate slice sparsemap")));
+
+                for (k = 0; k < tids_in_leaf; k++)
+                {
+                    if (sparsemap_add(slice_smap, b->tids[tid_idx + k]) == SPARSEMAP_IDX_MAX)
+                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("pg_tre: sparsemap_add overflow in multi-leaf")));
+                }
+
+                slice_sz = sparsemap_get_size(slice_smap);
+                slice_bytes = (uint8 *) palloc(slice_sz + 16);
+                memcpy(slice_bytes, ((uint8_t **) slice_smap)[2], slice_sz);
+                memset(slice_bytes + slice_sz, 0, 16);
+                free(slice_smap);
+
+                /* Build payload slice for this range */
+                uint8 *slice_payload = NULL;
+                Size slice_payload_sz = 0;
+                if (b->with_payload && b->payload_count > 0)
+                {
+                    /* Serialize just the payload entries for this TID range */
+                    slice_payload = serialize_payload(b->payload + tid_idx,
+                                                     tids_in_leaf,
+                                                     &slice_payload_sz);
+                }
+
+                /* Verify this leaf fits within budget */
+                if (slice_sz + slice_payload_sz > budget)
+                {
+                    /* Too big; try with half the TIDs */
+                    if (tids_in_leaf <= 1)
+                        ereport(ERROR,
+                                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                                 errmsg("pg_tre: single TID exceeds leaf budget")));
+                    pfree(slice_bytes);
+                    if (slice_payload)
+                        pfree(slice_payload);
+                    /* Retry with half */
+                    tids_in_leaf /= 2;
+                    continue;
+                }
+
+                /* Write this leaf */
+                uint64 leaf_min_tid = b->tids[tid_idx];
+                uint64 leaf_max_tid = b->tids[tid_idx + tids_in_leaf - 1];
+                BlockNumber leaf_blk = write_single_leaf(
+                    b->index, b->trigram_hash,
+                    slice_bytes, slice_sz,
+                    slice_payload, slice_payload_sz,
+                    leaf_min_tid, leaf_max_tid,
+                    tids_in_leaf,
+                    right_link);
+
+                pfree(slice_bytes);
+                if (slice_payload)
+                    pfree(slice_payload);
+
+                /* This leaf becomes the new leftmost */
+                leftmost_blk = leaf_blk;
+                right_link = leaf_blk;
+                tid_idx += tids_in_leaf;
+            }
+
+            /* Cleanup original buffers */
+            pfree(copy);
+            if (payload_bytes)
+                pfree(payload_bytes);
+            *inline_data_out  = NULL;
+            *inline_bytes_out = 0;
+            return leftmost_blk;
+        }
     }
 }
 
