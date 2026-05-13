@@ -453,10 +453,9 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         sparsemap_t *existing;
         sparsemap_t *merged;
         int k;
-        uint64 min_idx, max_idx, idx;
+        uint64 min_idx, max_idx;
         size_t sz;
         uint8 *out_buf;
-        Size out_cap;
         sparsemap_t *fresh;
 
         if (e == NULL)
@@ -519,6 +518,10 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
                 errmsg("pg_tre: out of memory copying sparsemap")));
 
         sz = sparsemap_get_size(fresh);
+
+        /* Capture range now; we use it on the on-disk path below. */
+        min_idx = sparsemap_minimum(merged);
+        max_idx = sparsemap_maximum(merged);
 
         /* Copy the serialized data to a palloc'd buffer. */
         out_buf = MemoryContextAlloc(mc->mcxt, sz);

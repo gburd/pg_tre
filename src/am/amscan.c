@@ -271,7 +271,7 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
          * tap/concurrency.pl). */
         qsort(e->tids_arr, e->tids_n, sizeof(uint64), overlay_uint64_cmp);
 
-        sm = sparsemap(2048);
+        sm = sparsemap(16384);  /* Start with larger capacity to reduce grows */
         if (sm == NULL)
             return NULL;
 
@@ -286,31 +286,41 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
             rc = sparsemap_add(sm, packed);
             if (rc == SPARSEMAP_IDX_MAX)
             {
-                size_t cap = sparsemap_get_capacity(sm);
+                size_t old_cap = sparsemap_get_capacity(sm);
+                size_t new_cap = (old_cap == 0) ? 4096 : old_cap * 2;
+                size_t used = sparsemap_get_size(sm);
+                void *old_data;
                 sparsemap_t *g;
 
-                /* Use the static-buffer path: allocate fresh, copy.
-                 * Avoids realloc inside the active sparsemap. */
-                g = sparsemap(cap == 0 ? 4096 : cap * 2);
+                /* Grow: allocate a larger map, copy the serialized data,
+                 * then re-initialize to compute m_data_used from the data.
+                 * This avoids the manual loop + sparsemap_add pattern that
+                 * could overflow and corrupt the heap. */
+                g = sparsemap(new_cap);
                 if (g == NULL)
                 {
                     free(sm);
                     return NULL;
                 }
-                {
-                    uint64 idx = sparsemap_minimum(sm);
-                    uint64 maxidx = sparsemap_maximum(sm);
-                    while (sparsemap_cardinality(sm) > 0 && idx <= maxidx)
-                    {
-                        if (sparsemap_contains(sm, idx))
-                            sparsemap_add(g, idx);
-                        if (idx == UINT64_MAX) break;
-                        idx++;
-                    }
-                }
+
+                /* Copy the serialized data from the old map */
+                old_data = (void *) sparsemap_get_data(sm);
+                memcpy((void *) sparsemap_get_data(g), old_data, used);
+
+                /* Re-initialize to set m_data_used from the copied data */
+                sparsemap_open(g, (uint8_t *) sparsemap_get_data(g), new_cap);
+
                 free(sm);
                 sm = g;
-                sparsemap_add(sm, packed);
+
+                /* Retry the add on the larger map. */
+                rc = sparsemap_add(sm, packed);
+                if (rc == SPARSEMAP_IDX_MAX)
+                {
+                    /* Still failed after grow; should not happen but handle gracefully. */
+                    free(sm);
+                    return NULL;
+                }
             }
         }
         e->tids = sm;
