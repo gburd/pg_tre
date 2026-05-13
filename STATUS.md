@@ -315,20 +315,25 @@ closing test or proof-of-life is in parens.
       dropped from ~100% to ~33% on tap/concurrency.pl.
       A residual heisenbug remains in the same
       overlay_lookup -> sparsemap stack; a second sub-agent
-      is in flight with an ASAN-instrumented rebuild plan
-      and a 10/10-clean-runs success bar.
+      (commit 4b17bed) made incremental grow-path
+      improvements but could not eliminate it.
+      Detailed bug writeup for the upstream sparsemap
+      maintainer is in `~/ws/sparsemap/HEISENBUG_REPORT.md`
+      (out-of-tree).  Library-level fix needed; pg_tre-side
+      workarounds have been exhausted.
 
 ### Verification
 - [~] **Regex parser fuzzing harness**
-      (`fuzz/`).  Three attempts so far.  Infrastructure
-      (corpus + docs) committed in 7722a67.  Second agent
-      built a working harness in its worktree and ran
-      libFuzzer for ~54K iterations at 1.7K exec/s,
-      surfaced regex_ast_class_char leaks, but never
-      committed source files — worktree was cleaned up.
-      Third agent in flight with a focused write-files-
-      then-run-15-min recipe.  Parser leak the second
-      agent found is already fixed in commit 7933de1.
+      (`fuzz/`).  Harness sources committed in commit
+      92f4387: `fuzz/parse_regex_fuzz.c` (152 lines),
+      `fuzz/memutils_stub.c` (403 lines), `fuzz/Makefile.fuzz`,
+      `fuzz/.gitignore`.  Build instructions in
+      `fuzz/README.md`.  An in-flight 30-min campaign run
+      surfaced more leaks in regex_ast_class_char and
+      similar; partial corpus discoveries committed in
+      4b17bed.  The campaign has not been declared
+      complete; the agent in flight may still be
+      iterating.
 - [~] **Real-corpus benchmark at 1M rows**
       (`bench/bench_1m.sql`).  Script committed in
       commit 2860274 and validated on a 100-row dummy
