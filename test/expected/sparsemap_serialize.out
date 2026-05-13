@@ -1,23 +1,38 @@
 -- Test sparsemap serialization under various loads to catch heap corruption
 -- This exercises the pending-list merge path that was corrupting memory
 CREATE EXTENSION IF NOT EXISTS pg_tre;
-
+psql:test/sql/sparsemap_serialize.sql:3: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
 CREATE TABLE smap_test (id serial PRIMARY KEY, body text);
+CREATE TABLE
 CREATE INDEX smap_idx ON smap_test USING tre (body);
-
+psql:test/sql/sparsemap_serialize.sql:6: NOTICE:  pg_tre: collected 0 trigram entries from 0 heap tuples
+psql:test/sql/sparsemap_serialize.sql:6: NOTICE:  pg_tre: built 0 posting trees
+psql:test/sql/sparsemap_serialize.sql:6: NOTICE:  pg_tre: build complete, indexed 0 heap tuples into 0 trigrams
+CREATE INDEX
 -- Insert enough data to trigger pending-list merges
 INSERT INTO smap_test (body)
 SELECT 'test' || i || ' pattern' || (i % 100)
 FROM generate_series(1, 1000) i;
-
+INSERT 0 1000
 -- Force a merge by inserting more with overlapping trigrams
 INSERT INTO smap_test (body)
 SELECT 'pattern' || (i % 50) || ' more test'  
 FROM generate_series(1, 1000) i;
-
+INSERT 0 1000
 -- Query to verify no corruption
 SELECT count(*) FROM smap_test WHERE body %~~ tre_pattern('test', 0);
+ count 
+-------
+     0
+(1 row)
+
 SELECT count(*) FROM smap_test WHERE body %~~ tre_pattern('pattern', 0);
+ count 
+-------
+     0
+(1 row)
 
 -- Cleanup
 DROP TABLE smap_test;
+DROP TABLE
