@@ -29,7 +29,7 @@ extern void pg_tre_rx_parse(void *parser, int token_kind, TreToken token_value,
 bool
 tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 {
-	void *parser;
+	volatile void *parser_v = NULL;
 	TreToken tok;
 	int tok_kind;
 
@@ -42,40 +42,48 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 	ctx->syntax_error = false;
 	ctx->tokenizer_state = NULL;
 
-	/* Allocate parser */
-	parser = pg_tre_rx_parseAlloc(malloc, ctx);
-	if (parser == NULL)
-		elog(ERROR, "failed to allocate regex parser");
-
-	/* Feed tokens to the parser */
-	while ((tok_kind = tre_tokenize_next(ctx, &tok)) > 0)
+	/*
+	 * The Lime-generated parser is allocated with malloc() and must be
+	 * freed with the matching free().  Wrap the parse in PG_TRY/PG_CATCH
+	 * so the parser is freed even when the tokenizer or AST builders raise
+	 * via ereport(ERROR).  Without this, every malformed input that hits
+	 * an ereport() leaks ~2 KB of parser state for the lifetime of the
+	 * backend (discovered via libFuzzer; see fuzz/RUN_REPORT.md).
+	 */
+	PG_TRY();
 	{
-		if (ctx->syntax_error)
-			break;
+		parser_v = pg_tre_rx_parseAlloc(malloc, ctx);
+		if (parser_v == NULL)
+			elog(ERROR, "failed to allocate regex parser");
 
-		pg_tre_rx_parse(parser, tok_kind, tok, ctx);
+		while ((tok_kind = tre_tokenize_next(ctx, &tok)) > 0)
+		{
+			if (ctx->syntax_error)
+				break;
 
-		if (ctx->syntax_error)
-			break;
+			pg_tre_rx_parse((void *) parser_v, tok_kind, tok, ctx);
+
+			if (ctx->syntax_error)
+				break;
+		}
+
+		if (tok_kind < 0)
+		{
+			/* Tokenizer error already set the error message. */
+		}
+		else if (!ctx->syntax_error)
+		{
+			/* Send EOF token (token 0). */
+			memset(&tok, 0, sizeof(tok));
+			pg_tre_rx_parse((void *) parser_v, 0, tok, ctx);
+		}
 	}
-
-	/* Check for tokenizer error */
-	if (tok_kind < 0)
+	PG_FINALLY();
 	{
-		/* Error already set by tokenizer */
-		pg_tre_rx_parseFree(parser, free);
-		return false;
+		if (parser_v != NULL)
+			pg_tre_rx_parseFree((void *) parser_v, free);
 	}
-
-	/* Send EOF token (token 0) */
-	if (!ctx->syntax_error)
-	{
-		memset(&tok, 0, sizeof(tok));
-		pg_tre_rx_parse(parser, 0, tok, ctx);
-	}
-
-	/* Clean up */
-	pg_tre_rx_parseFree(parser, free);
+	PG_END_TRY();
 
 	/* Check for syntax error */
 	if (ctx->syntax_error)
