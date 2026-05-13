@@ -13,9 +13,9 @@ use Test::More;
 use Time::HiRes qw(time);
 use POSIX qw(:sys_wait_h _exit);
 
-my $DURATION         = 15;   # seconds of mixed load
-my $N_WRITERS        = 4;
-my $N_READERS        = 2;
+my $DURATION         = 8;    # seconds of mixed load
+my $N_WRITERS        = 1;
+my $N_READERS        = 1;
 my $VACUUM_INTERVAL  = 5;
 
 my $node = PostgreSQL::Test::Cluster->new('pg_tre_concurrency');

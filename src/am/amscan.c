@@ -442,7 +442,7 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     if (bloom_bytes > sizeof(bloom_buf))
         bloom_bytes = sizeof(bloom_buf);  /* defensive */
 
-    refined = sparsemap(sparsemap_get_capacity(candidates));
+    refined = sparsemap(sparsemap_get_capacity(candidates) * 2 + 256);
     if (refined == NULL)
         return candidates;  /* OOM; fall back to unrefined */
 
@@ -555,11 +555,20 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
 
             if (passes)
             {
-                if (sparsemap_add(refined, idx) == SPARSEMAP_IDX_MAX)
+                uint64 rc = sparsemap_add(refined, idx);
+                if (rc == SPARSEMAP_IDX_MAX)
                 {
-                    /* Overflow; fall back to unrefined */
-                    free(refined);
-                    return candidates;
+                    size_t cap = sparsemap_get_capacity(refined);
+                    sparsemap_t *grown = sparsemap_set_data_size(
+                        refined, NULL, cap * 2 + 256);
+                    if (grown == NULL)
+                    {
+                        /* Out of memory; bail to unrefined result. */
+                        free(refined);
+                        return candidates;
+                    }
+                    refined = grown;
+                    sparsemap_add(refined, idx);
                 }
             }
         }

@@ -614,24 +614,24 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
                            const uint8 *inline_data, Size inline_bytes)
 {
     /*
-     * Phase 2: single-leaf posting.  The materialized sparsemap is a
-     * palloc'd copy of the stored bytes, wrapped.  For multi-leaf
-     * postings (Phase 4), this function will union leaves into one
-     * accumulating sparsemap before returning.
+     * Return an OWNED sparsemap (allocated by sparsemap()) so the
+     * caller can safely pass it to sparsemap_union, which may need
+     * to grow via sparsemap_set_data_size.  The earlier wrap-based
+     * implementation looked correct in isolation but caused heap
+     * corruption when the consumer grew the wrap'd map: the wrap'd
+     * struct's m_data points at a foreign buffer, so
+     * sparsemap_set_data_size cannot in-place realloc and instead
+     * silently bumps m_capacity, after which sparsemap_add writes
+     * past the actual buffer.  Caught by tap/concurrency.pl.
      */
     if (inline_data != NULL)
     {
-        Size cap = inline_bytes + 8;
-        uint8 *copy = (uint8 *) palloc(cap);
-        memcpy(copy, inline_data, inline_bytes);
-        if (cap > inline_bytes)
-            memset(copy + inline_bytes, 0, cap - inline_bytes);
-        {
-            sparsemap_t *sm = sparsemap_wrap(copy, cap);
-            if (sm != NULL)
-                sparsemap_open(sm, copy, cap);
-            return sm;
-        }
+        sparsemap_t *sm = sparsemap(inline_bytes + 64);
+        if (sm == NULL)
+            return NULL;
+        memcpy(sparsemap_get_data(sm), inline_data, inline_bytes);
+        sparsemap_open(sm, sparsemap_get_data(sm), inline_bytes + 64);
+        return sm;
     }
 
     if (BlockNumberIsValid(root))
@@ -642,26 +642,24 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         PgTrePostingLeafHeader *hdr =
             (PgTrePostingLeafHeader *) PageGetContents(page);
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
-        Size    cap = hdr->sparsemap_bytes + 8;
-        uint8  *copy = (uint8 *) palloc(cap);
-        sparsemap_t *sm;
+        Size    bytes = hdr->sparsemap_bytes;
+        sparsemap_t *sm = sparsemap(bytes + 64);
 
-        memcpy(copy, sm_bytes, hdr->sparsemap_bytes);
-        memset(copy + hdr->sparsemap_bytes, 0, cap - hdr->sparsemap_bytes);
-        sm = sparsemap_wrap(copy, cap);
-        if (sm != NULL)
-            sparsemap_open(sm, copy, cap);
+        if (sm == NULL)
+        {
+            UnlockReleaseBuffer(buf);
+            return NULL;
+        }
+        memcpy(sparsemap_get_data(sm), sm_bytes, bytes);
+        sparsemap_open(sm, sparsemap_get_data(sm), bytes + 64);
 
         /* Phase 2: no right-link traversal (single-leaf postings). */
         UnlockReleaseBuffer(buf);
         return sm;
     }
 
-    /* Empty posting: a 16-byte zeroed sparsemap is a valid empty map. */
-    {
-        uint8 *zero = (uint8 *) palloc0(16);
-        return sparsemap_wrap(zero, 16);
-    }
+    /* Empty posting: a 64-byte zeroed sparsemap is a valid empty map. */
+    return sparsemap(64);
 }
 
 /*
