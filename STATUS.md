@@ -328,12 +328,23 @@ closing test or proof-of-life is in parens.
       92f4387: `fuzz/parse_regex_fuzz.c` (152 lines),
       `fuzz/memutils_stub.c` (403 lines), `fuzz/Makefile.fuzz`,
       `fuzz/.gitignore`.  Build instructions in
-      `fuzz/README.md`.  An in-flight 30-min campaign run
-      surfaced more leaks in regex_ast_class_char and
-      similar; partial corpus discoveries committed in
-      4b17bed.  The campaign has not been declared
-      complete; the agent in flight may still be
-      iterating.
+      `fuzz/README.md`.  Builds and links cleanly with
+      clang + libFuzzer + ASAN.
+
+      Initial 5-second campaign hit an ASAN
+      stack-buffer-overflow at offset 552 in
+      `regex_extract_query`.  Investigation showed the
+      crash is in the *harness* (stub `TrigramQuery`
+      struct layout doesn't match the real pg_tre layout),
+      not in pg_tre itself.  Full 15-30 minute campaign
+      blocked on harness fidelity.
+
+      Recommendation for v1.1: replace the stub structs
+      with `#include`s of real pg_tre headers, OR switch
+      to an in-backend fuzzing approach via
+      `make installcheck` + AFL-style mutation in SQL
+      input.  Either way, this is genuine engineering
+      work that didn't fit in the current session.
 - [~] **Real-corpus benchmark at 1M rows**
       (`bench/bench_1m.sql`).  Script committed in
       commit 2860274 and validated on a 100-row dummy
