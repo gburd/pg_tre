@@ -1,0 +1,7 @@
+*.o
+pg_tre_fuzz
+*.log
+crash-*
+leak-*
+oom-*
+slow-*

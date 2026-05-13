@@ -1,0 +1,87 @@
+# fuzz/Makefile.fuzz - out-of-tree libFuzzer build for pg_tre regex parser
+#
+# Usage:
+#   cd fuzz
+#   make -f Makefile.fuzz
+#   ./pg_tre_fuzz corpus -max_total_time=900 -detect_leaks=1 -rss_limit_mb=2048
+#
+# Requires: clang with libFuzzer support (clang 12+)
+#
+# For nix-shell users:
+#   nix-shell -p clang clang-tools --run 'make -f Makefile.fuzz'
+
+# PostgreSQL configuration
+PG_CONFIG ?= $(HOME)/.pgrx/18.3/pgrx-install/bin/pg_config
+
+# Check that PG_CONFIG points to a valid pg_config
+ifeq ($(shell test -x $(PG_CONFIG) && echo yes),yes)
+    PG_INCLUDEDIR_SERVER := $(shell $(PG_CONFIG) --includedir-server)
+else
+    $(error PG_CONFIG=$(PG_CONFIG) is not executable. Set PG_CONFIG to a valid pg_config path.)
+endif
+
+# Compiler and flags
+CC := clang
+CFLAGS := -fsanitize=fuzzer,address -g -O1 -fno-omit-frame-pointer
+CFLAGS += -I$(PG_INCLUDEDIR_SERVER)
+CFLAGS += -I../include
+CFLAGS += -I../vendor/tre/lib
+
+# PostgreSQL-compatible warnings, minus the ones clang doesn't support
+CFLAGS += -Wall -Wmissing-prototypes -Wpointer-arith
+CFLAGS += -Wendif-labels -Wmissing-format-attribute
+CFLAGS += -Wcast-function-type -Wformat-security
+CFLAGS += -fno-strict-aliasing -fwrapv
+
+# Allow declaration-after-statement for fuzzer convenience
+CFLAGS += -Wno-declaration-after-statement
+
+# Define PG_TRE_FUZZ to guard PostgreSQL-only code paths
+CFLAGS += -DPG_TRE_FUZZ
+
+# Source files from pg_tre
+QUERY_SRCS := ../src/query/parser.c \
+              ../src/query/tokens.c \
+              ../src/query/regex_ast.c \
+              ../src/query/extract.c \
+              ../src/query/tiling.c \
+              ../src/query/uleven.c \
+              ../src/query/tre_grammar.c \
+              ../src/query/trigram.c
+
+UTIL_SRCS := ../src/util/hash.c \
+             ../src/util/utf8.c
+
+FUZZ_SRCS := parse_regex_fuzz.c memutils_stub.c
+
+ALL_SRCS := $(QUERY_SRCS) $(UTIL_SRCS) $(FUZZ_SRCS)
+
+# Object files
+OBJS := $(ALL_SRCS:.c=.o)
+
+# Target binary
+TARGET := pg_tre_fuzz
+
+# Check that tre_grammar.c exists
+GRAMMAR_FILE := ../src/query/tre_grammar.c
+ifeq ($(wildcard $(GRAMMAR_FILE)),)
+    $(error $(GRAMMAR_FILE) not found. Run 'make' in the parent directory first to generate the parser.)
+endif
+
+# Build target
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Pattern rule for object files
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Clean
+clean:
+	rm -f $(TARGET) $(OBJS)
+	rm -f *.log crash-* leak-* oom-* slow-*
+
+# Phony targets
+.PHONY: all clean
