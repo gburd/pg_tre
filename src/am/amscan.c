@@ -271,7 +271,7 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
          * tap/concurrency.pl). */
         qsort(e->tids_arr, e->tids_n, sizeof(uint64), overlay_uint64_cmp);
 
-        sm = sparsemap(16384);  /* Start with larger capacity to reduce grows */
+        sm = sparsemap_create(16384);  /* Start with larger capacity to reduce grows */
         if (sm == NULL)
             return NULL;
 
@@ -296,7 +296,7 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
                  * then re-initialize to compute m_data_used from the data.
                  * This avoids the manual loop + sparsemap_add pattern that
                  * could overflow and corrupt the heap. */
-                g = sparsemap(new_cap);
+                g = sparsemap_create(new_cap);
                 if (g == NULL)
                 {
                     free(sm);
@@ -452,7 +452,7 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     if (bloom_bytes > sizeof(bloom_buf))
         bloom_bytes = sizeof(bloom_buf);  /* defensive */
 
-    refined = sparsemap(sparsemap_get_capacity(candidates) * 2 + 256);
+    refined = sparsemap_create(sparsemap_get_capacity(candidates) * 2 + 256);
     if (refined == NULL)
         return candidates;  /* OOM; fall back to unrefined */
 
@@ -815,7 +815,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
     if (result != NULL && sparsemap_cardinality(result) > 0 &&
         st->q.mode == TRIGRAM_QUERY_CNF)
     {
-        sparsemap_t *filtered = sparsemap(sparsemap_get_capacity(result));
+        sparsemap_t *filtered = sparsemap_create(sparsemap_get_capacity(result));
         if (filtered != NULL)
         {
             uint64 tid_idx = sparsemap_minimum(result);

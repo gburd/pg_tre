@@ -397,7 +397,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
      */
     {
         size_t cap = (size_t) b->n_tids * 16 + 1024;
-        sparsemap_t *fresh = sparsemap(cap);
+        sparsemap_t *fresh = sparsemap_create(cap);
         int k;
         if (fresh == NULL)
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
@@ -411,7 +411,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
         }
         sz = sparsemap_get_size(fresh);
         {
-            uint8_t *smap_data = ((uint8_t **) fresh)[2];  /* m_data */
+            const uint8_t *smap_data = (const uint8_t *) sparsemap_get_data(fresh);
             if (sz > 0)
             {
                 copy = (uint8 *) palloc(sz + 16);
@@ -511,7 +511,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
 
                 /* Build sparsemap for this slice */
                 size_t cap = (size_t)tids_in_leaf * 16 + 1024;
-                sparsemap_t *slice_smap = sparsemap(cap);
+                sparsemap_t *slice_smap = sparsemap_create(cap);
                 uint8 *slice_bytes;
                 Size slice_sz;
                 int k;
@@ -529,7 +529,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
 
                 slice_sz = sparsemap_get_size(slice_smap);
                 slice_bytes = (uint8 *) palloc(slice_sz + 16);
-                memcpy(slice_bytes, ((uint8_t **) slice_smap)[2], slice_sz);
+                memcpy(slice_bytes, sparsemap_get_data(slice_smap), slice_sz);
                 memset(slice_bytes + slice_sz, 0, 16);
                 free(slice_smap);
 
@@ -733,7 +733,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
                            const uint8 *inline_data, Size inline_bytes)
 {
     /*
-     * Return an OWNED sparsemap (allocated by sparsemap()) so the
+     * Return an OWNED sparsemap (allocated by sparsemap_create()) so the
      * caller can safely pass it to sparsemap_union, which may need
      * to grow via sparsemap_set_data_size.  The earlier wrap-based
      * implementation looked correct in isolation but caused heap
@@ -745,7 +745,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
      */
     if (inline_data != NULL)
     {
-        sparsemap_t *sm = sparsemap(inline_bytes + 64);
+        sparsemap_t *sm = sparsemap_create(inline_bytes + 64);
         if (sm == NULL)
             return NULL;
         memcpy(sparsemap_get_data(sm), inline_data, inline_bytes);
@@ -762,7 +762,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             (PgTrePostingLeafHeader *) PageGetContents(page);
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
         Size    bytes = hdr->sparsemap_bytes;
-        sparsemap_t *sm = sparsemap(bytes + 64);
+        sparsemap_t *sm = sparsemap_create(bytes + 64);
 
         if (sm == NULL)
         {
@@ -787,7 +787,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             Size next_bytes = next_hdr->sparsemap_bytes;
 
             /* Create a temporary sparsemap for this leaf */
-            sparsemap_t *next_sm = sparsemap(next_bytes + 64);
+            sparsemap_t *next_sm = sparsemap_create(next_bytes + 64);
             if (next_sm == NULL)
             {
                 UnlockReleaseBuffer(next_buf);
@@ -815,7 +815,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
     }
 
     /* Empty posting: a 64-byte zeroed sparsemap is a valid empty map. */
-    return sparsemap(64);
+    return sparsemap_create(64);
 }
 
 /*

@@ -470,7 +470,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
          */
         {
             size_t cap = (size_t) e->n_tids * 16 + 1024;
-            sparsemap_t *fresh_acc = sparsemap(cap);
+            sparsemap_t *fresh_acc = sparsemap_create(cap);
             if (fresh_acc == NULL)
                 ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                     errmsg("pg_tre: merge accumulator allocation failed")));
