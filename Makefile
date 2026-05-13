@@ -153,7 +153,7 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # ------------------------------------------------------------------
 # Convenience targets
 # ------------------------------------------------------------------
-.PHONY: localcheck tapcheck vendor-clean distclean-full dist
+.PHONY: localcheck tapcheck tap vendor-clean distclean-full dist
 
 # ------------------------------------------------------------------
 # Release tarball
@@ -195,6 +195,17 @@ tapcheck:
 	fi
 	PG_CONFIG='$(PG_CONFIG)' PERL5LIB='$(shell $(PG_CONFIG) --libdir)/perl5' \
 		prove -v test/t/*.pl
+
+# TAP tests for v1.0.0-final blockers: concurrency, replication, crash recovery.
+# These are the production-ready tests that gate the v1.0.0 release.
+tap:
+	@echo "Running v1.0.0-final blocker TAP tests..."
+	@if ! command -v prove >/dev/null 2>&1; then \
+		echo "ERROR: prove not found. Install Test::More and Test::Harness."; \
+		exit 1; \
+	fi
+	PG_CONFIG='$(PG_CONFIG)' PERL5LIB='$(shell $(PG_CONFIG) --libdir)/perl5' \
+		prove -v tap/*.pl
 
 vendor-clean:
 	-$(MAKE) -C $(TRE_DIR) distclean 2>/dev/null || true

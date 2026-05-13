@@ -38,6 +38,17 @@ if grep -q "^FAIL" /tmp/pg_tre_check.log; then
     exit 1
 fi
 
+echo "==> TAP tests (v1.0.0-final blockers)"
+if command -v prove >/dev/null 2>&1; then
+    PG_CONFIG="$PG_CONFIG" make tap 2>&1 | tee /tmp/pg_tre_tap.log | tail -20
+    if grep -qE "Failed|not ok" /tmp/pg_tre_tap.log; then
+        echo "FAIL: TAP tests failing" >&2
+        exit 1
+    fi
+else
+    echo "WARN: prove not found, skipping TAP tests"
+fi
+
 echo "==> Core benchmark (quick)"
 if [ -f bench/bench.sql ]; then
     createdb -U "$USER" -h /tmp release_smoke 2>/dev/null || true
