@@ -222,7 +222,8 @@ static BlockNumber
 write_single_leaf(Relation index, uint64 trigram_hash,
                   const uint8 *data, Size sz,
                   const uint8 *payload_data, Size payload_sz,
-                  uint64 min_tid, uint64 max_tid, uint64 n_tids)
+                  uint64 min_tid, uint64 max_tid, uint64 n_tids,
+                  BlockNumber right_link)
 {
     Buffer  buf;
     Page    page;
@@ -253,7 +254,7 @@ write_single_leaf(Relation index, uint64 trigram_hash,
      * line-pointer area (we don't use line pointers on this page).  Store
      * it at the start of the lower-free region. */
     hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
-    hdr->right_link      = InvalidBlockNumber;
+    hdr->right_link      = right_link;
     hdr->min_tid         = min_tid;
     hdr->max_tid         = max_tid;
     hdr->sparsemap_bytes = (uint32) sz;
@@ -462,7 +463,8 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                                             bytes, sz,
                                             payload_bytes, payload_sz,
                                             b->min_tid, b->max_tid,
-                                            b->n_tids);
+                                            b->n_tids,
+                                            InvalidBlockNumber);
         /* When stored on-disk, we don't need the palloc'd copies. */
         pfree(copy);
         if (payload_bytes)
