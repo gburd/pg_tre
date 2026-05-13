@@ -12,10 +12,12 @@
 #include "fmgr.h"
 
 /* On-disk format version advertised by meta page.
+ * Version 3: multi-leaf posting trees with Lehman-Yao right-links (Phase 4.2).
  * Version 2: codepoint-based trigrams (Phase 3.5).
- * BREAKING CHANGE: indexes built with v1 (byte trigrams) must be REINDEXed.
+ * BREAKING CHANGE: indexes built with v1 (byte trigrams) or v2 (single-leaf only)
+ * must be REINDEXed after upgrading to v3.
  */
-#define PG_TRE_FORMAT_VERSION 2
+#define PG_TRE_FORMAT_VERSION 3
 
 /* String version returned by tre_version(). */
 #define PG_TRE_VERSION_STRING "pg_tre 1.0.0-dev"

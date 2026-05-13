@@ -1,0 +1,215 @@
+-- test/sql/parser.sql - Phase 3 parser tests
+--
+-- Test regex parser, AST construction, and tre_pattern type.
+-- Load extension
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+CREATE EXTENSION
+-- Test tre_pattern type I/O
+SELECT 'abc'::tre_pattern;
+ tre_pattern 
+-------------
+ abc
+(1 row)
+
+SELECT 'abc@1'::tre_pattern;
+ tre_pattern 
+-------------
+ abc@1
+(1 row)
+
+SELECT 'abc@2:1,1,1'::tre_pattern;
+ tre_pattern 
+-------------
+ abc@2
+(1 row)
+
+-- Test tre_pattern constructors
+SELECT tre_pattern('hello');
+ tre_pattern 
+-------------
+ hello
+(1 row)
+
+SELECT tre_pattern('world', 1);
+ tre_pattern 
+-------------
+ world@1
+(1 row)
+
+SELECT tre_pattern('test', 2, 1, 1, 1);
+ tre_pattern 
+-------------
+ test@2
+(1 row)
+
+-- Test parser with simple patterns
+SELECT tre_parse_debug('a');
+ tre_parse_debug 
+-----------------
+ LITERAL(a)
+(1 row)
+
+SELECT tre_parse_debug('abc');
+ tre_parse_debug 
+-----------------
+ CONCAT         +
+   CONCAT       +
+     LITERAL(a) +
+     LITERAL(b) +
+   LITERAL(c)
+(1 row)
+
+SELECT tre_parse_debug('a|b');
+ tre_parse_debug 
+-----------------
+ ALT            +
+   LITERAL(a)   +
+   LITERAL(b)
+(1 row)
+
+SELECT tre_parse_debug('a*');
+ tre_parse_debug 
+-----------------
+ REP{0,-1}      +
+   LITERAL(a)
+(1 row)
+
+SELECT tre_parse_debug('a+');
+ tre_parse_debug 
+-----------------
+ REP{1,-1}      +
+   LITERAL(a)
+(1 row)
+
+SELECT tre_parse_debug('a?');
+ tre_parse_debug 
+-----------------
+ REP{0,1}       +
+   LITERAL(a)
+(1 row)
+
+SELECT tre_parse_debug('a{3}');
+ tre_parse_debug 
+-----------------
+ REP{3,3}       +
+   LITERAL(a)
+(1 row)
+
+SELECT tre_parse_debug('a{2,5}');
+ tre_parse_debug 
+-----------------
+ REP{2,5}       +
+   LITERAL(a)
+(1 row)
+
+SELECT tre_parse_debug('(ab)+');
+ tre_parse_debug 
+-----------------
+ REP{1,-1}      +
+   CONCAT       +
+     LITERAL(a) +
+     LITERAL(b)
+(1 row)
+
+SELECT tre_parse_debug('.');
+ tre_parse_debug 
+-----------------
+ ANY(.)
+(1 row)
+
+SELECT tre_parse_debug('^start');
+   tre_parse_debug    
+----------------------
+ CONCAT              +
+   CONCAT            +
+     CONCAT          +
+       CONCAT        +
+         CONCAT      +
+           ANCHOR(^) +
+           LITERAL(s)+
+         LITERAL(t)  +
+       LITERAL(a)    +
+     LITERAL(r)      +
+   LITERAL(t)
+(1 row)
+
+SELECT tre_parse_debug('end$');
+ tre_parse_debug  
+------------------
+ CONCAT          +
+   CONCAT        +
+     CONCAT      +
+       LITERAL(e)+
+       LITERAL(n)+
+     LITERAL(d)  +
+   ANCHOR($)
+(1 row)
+
+SELECT tre_parse_debug('[abc]');
+ tre_parse_debug 
+-----------------
+ CLASS(a-c)
+(1 row)
+
+SELECT tre_parse_debug('[a-z]');
+ tre_parse_debug 
+-----------------
+ CLASS(a-z)
+(1 row)
+
+SELECT tre_parse_debug('[^0-9]');
+ tre_parse_debug 
+-----------------
+ CLASS(^0-9)
+(1 row)
+
+SELECT tre_parse_debug('a{~1}');
+ tre_parse_debug 
+-----------------
+ APPROX{~1}     +
+   LITERAL(a)
+(1 row)
+
+-- Test extraction (stub returns ALWAYS_TRUE for now)
+SELECT tre_extract_debug('hello');
+                  tre_extract_debug                   
+------------------------------------------------------
+ k=0 mode=CNF                                        +
+ AND of 3 conjuncts:                                 +
+   Conjunct 0: 1 alternatives:                       +
+     trigram_hash=14849989470820438601 [0,2147483647]+
+   Conjunct 1: 1 alternatives:                       +
+     trigram_hash=15759022874420093218 [0,2147483647]+
+   Conjunct 2: 1 alternatives:                       +
+     trigram_hash=2670364887423234892 [0,2147483647] +
+ 
+(1 row)
+
+SELECT tre_extract_debug('a|b|c');
+         tre_extract_debug         
+-----------------------------------
+ k=0 mode=CNF                     +
+ ALWAYS_TRUE (extraction defeated)
+(1 row)
+
+-- Test %~~ operator with legacy tre_amatch
+SELECT 'hello' %~~ tre_pattern('hello', 0);
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'hello' %~~ tre_pattern('helo', 1);
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'hello' %~~ tre_pattern('world', 0);
+ ?column? 
+----------
+ f
+(1 row)
+
+\echo 'Parser tests complete'
+Parser tests complete

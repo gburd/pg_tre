@@ -128,10 +128,23 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
  * is built once per scan, then OR-ed into each disjunct's posting
  * during resolve_conjunct below.
  */
+/*
+ * Pending-list overlay: for each trigram in the query, collect the set
+ * of TIDs found in the pending list.  We collect into a palloc'd uint64
+ * array (resilient under repeated grow/shrink) and lazily convert to a
+ * sparsemap on first lookup.  An earlier implementation used
+ * sparsemap_set_data_size to dynamically grow a calloc-backed sparsemap
+ * during collection, which under high-volume pending-list scans hit a
+ * heap-corruption path inside the realloc.  See tap/concurrency.pl
+ * regression for the gate.
+ */
 typedef struct PendingOverlayEntry
 {
     uint64       trigram_hash;
-    sparsemap_t *tids;         /* malloc-backed */
+    uint64      *tids_arr;     /* palloc'd, sorted by insertion order */
+    int          tids_n;
+    int          tids_cap;
+    sparsemap_t *tids;         /* lazily built on first overlay_lookup */
 } PendingOverlayEntry;
 
 typedef struct PendingOverlay
@@ -162,23 +175,30 @@ static PendingOverlayEntry *
 overlay_find_or_create(PendingOverlay *ov, uint64 h)
 {
     int i;
+    MemoryContext old;
+    PendingOverlayEntry *e;
+
     for (i = 0; i < ov->n; i++)
         if (ov->entries[i].trigram_hash == h)
             return &ov->entries[i];
 
+    old = MemoryContextSwitchTo(ov->mcxt);
     if (ov->n >= ov->alloced)
     {
-        MemoryContext old = MemoryContextSwitchTo(ov->mcxt);
         ov->alloced = (ov->alloced == 0) ? 16 : ov->alloced * 2;
         ov->entries = ov->entries
             ? repalloc(ov->entries, ov->alloced * sizeof(*ov->entries))
             : palloc(ov->alloced * sizeof(*ov->entries));
-        MemoryContextSwitchTo(old);
     }
 
-    ov->entries[ov->n].trigram_hash = h;
-    ov->entries[ov->n].tids         = sparsemap(512);
-    return &ov->entries[ov->n++];
+    e = &ov->entries[ov->n++];
+    e->trigram_hash = h;
+    e->tids_arr     = palloc(sizeof(uint64) * 64);
+    e->tids_n       = 0;
+    e->tids_cap     = 64;
+    e->tids         = NULL;
+    MemoryContextSwitchTo(old);
+    return e;
 }
 
 static void
@@ -187,7 +207,6 @@ overlay_collect_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
     PendingOverlay *ov = ctx;
     PendingOverlayEntry *e;
     uint64 packed;
-    uint64 rc;
 
     (void) position;
 
@@ -196,16 +215,16 @@ overlay_collect_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
 
     e = overlay_find_or_create(ov, hash);
     packed = pg_tre_pack_tid(tid);
-    rc = sparsemap_add(e->tids, packed);
-    if (rc == SPARSEMAP_IDX_MAX)
+
+    if (e->tids_n >= e->tids_cap)
     {
-        size_t cap = sparsemap_get_capacity(e->tids);
-        sparsemap_t *g = sparsemap_set_data_size(e->tids, NULL,
-                                                  cap == 0 ? 1024 : cap * 2);
-        if (g == NULL) return;  /* best-effort */
-        e->tids = g;
-        sparsemap_add(e->tids, packed);
+        MemoryContext old = MemoryContextSwitchTo(ov->mcxt);
+        e->tids_cap *= 2;
+        e->tids_arr = repalloc(e->tids_arr,
+                               sizeof(uint64) * e->tids_cap);
+        MemoryContextSwitchTo(old);
     }
+    e->tids_arr[e->tids_n++] = packed;
 }
 
 static void
@@ -218,13 +237,85 @@ overlay_build(PendingOverlay *ov, Relation index, const TrigramQuery *q,
     pg_tre_pending_scan(index, overlay_collect_cb, ov);
 }
 
+static int
+overlay_uint64_cmp(const void *a, const void *b)
+{
+    uint64 x = *(const uint64 *) a;
+    uint64 y = *(const uint64 *) b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
 static sparsemap_t *
 overlay_lookup(const PendingOverlay *ov, uint64 h)
 {
-    int i;
+    int i, k;
+    PendingOverlayEntry *e;
+    sparsemap_t *sm;
+
     for (i = 0; i < ov->n; i++)
-        if (ov->entries[i].trigram_hash == h)
-            return ov->entries[i].tids;
+    {
+        if (ov->entries[i].trigram_hash != h)
+            continue;
+
+        e = (PendingOverlayEntry *) &ov->entries[i];
+        if (e->tids != NULL)
+            return e->tids;
+
+        if (e->tids_n == 0)
+            return NULL;
+
+        /* Lazy materialise: sort + dedupe + build a sparsemap of the
+         * exact size needed.  Avoids the dynamic-grow path in
+         * sparsemap_set_data_size that triggered heap corruption
+         * under heavy concurrent insert load (caught by
+         * tap/concurrency.pl). */
+        qsort(e->tids_arr, e->tids_n, sizeof(uint64), overlay_uint64_cmp);
+
+        sm = sparsemap(2048);
+        if (sm == NULL)
+            return NULL;
+
+        for (k = 0; k < e->tids_n; k++)
+        {
+            uint64 packed = e->tids_arr[k];
+            uint64 rc;
+
+            if (k > 0 && packed == e->tids_arr[k - 1])
+                continue;  /* dedupe */
+
+            rc = sparsemap_add(sm, packed);
+            if (rc == SPARSEMAP_IDX_MAX)
+            {
+                size_t cap = sparsemap_get_capacity(sm);
+                sparsemap_t *g;
+
+                /* Use the static-buffer path: allocate fresh, copy.
+                 * Avoids realloc inside the active sparsemap. */
+                g = sparsemap(cap == 0 ? 4096 : cap * 2);
+                if (g == NULL)
+                {
+                    free(sm);
+                    return NULL;
+                }
+                {
+                    uint64 idx = sparsemap_minimum(sm);
+                    uint64 maxidx = sparsemap_maximum(sm);
+                    while (sparsemap_cardinality(sm) > 0 && idx <= maxidx)
+                    {
+                        if (sparsemap_contains(sm, idx))
+                            sparsemap_add(g, idx);
+                        if (idx == UINT64_MAX) break;
+                        idx++;
+                    }
+                }
+                free(sm);
+                sm = g;
+                sparsemap_add(sm, packed);
+            }
+        }
+        e->tids = sm;
+        return sm;
+    }
     return NULL;
 }
 
@@ -233,8 +324,11 @@ overlay_free(PendingOverlay *ov)
 {
     int i;
     for (i = 0; i < ov->n; i++)
+    {
         if (ov->entries[i].tids)
             free(ov->entries[i].tids);
+        /* tids_arr is palloc'd in ov->mcxt and freed when context resets. */
+    }
 }
 
 /*

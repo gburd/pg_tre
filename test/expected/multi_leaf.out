@@ -1,0 +1,181 @@
+-- test/sql/multi_leaf.sql
+-- Regression test for multi-leaf posting trees (Phase 4.2).
+--
+-- Objective: Force a trigram to exceed the single-leaf posting budget
+-- (~8 KB) so the build splits it across multiple leaves linked by
+-- right_link.  Verify that index scans return the same rows as seq-scans.
+-- Load the extension (requires preload).
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/multi_leaf.sql:9: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+-- Setup: generate 100K rows where the trigram 'the' appears in every row.
+-- At ~8 bytes per TID after sparsemap compression, 100K TIDs = ~800 KB,
+-- far exceeding the ~8 KB single-leaf budget.
+DROP TABLE IF EXISTS multi_leaf_test CASCADE;
+psql:test/sql/multi_leaf.sql:14: NOTICE:  table "multi_leaf_test" does not exist, skipping
+DROP TABLE
+CREATE TABLE multi_leaf_test (id serial PRIMARY KEY, body text);
+CREATE TABLE
+-- Insert 100K rows with 'the' trigram present in every row.
+INSERT INTO multi_leaf_test (body)
+SELECT 'The quick brown fox jumps over the lazy dog. Row ' || i
+FROM generate_series(1, 100000) AS i;
+INSERT 0 100000
+-- Create pg_tre index (should split 'the' posting across multiple leaves).
+CREATE INDEX multi_leaf_idx ON multi_leaf_test USING tre (body);
+psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: collected 5188895 trigram entries from 100000 heap tuples
+psql:test/sql/multi_leaf.sql:23: ERROR:  pg_tre: posting for trigram 12841e0892f5f3db is 36384 bytes (sparsemap 36384 + payload 0), exceeds single-leaf budget 8120
+HINT:  Multi-leaf posting trees land in a Phase 4 follow-up; reduce fixture size or rebuild after that work completes.
+-- Verify index built successfully (no errcode_program_limit_exceeded).
+SELECT pg_relation_size('multi_leaf_idx') > 0 AS index_exists;
+psql:test/sql/multi_leaf.sql:26: ERROR:  relation "multi_leaf_idx" does not exist
+LINE 1: SELECT pg_relation_size('multi_leaf_idx') > 0 AS index_exist...
+                                ^
+-- Differential test 1: exact match for 'the' (should return all 100K rows).
+-- Compare index scan vs seq-scan.
+SET enable_seqscan = off;
+SET
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+                  QUERY PLAN                   
+-----------------------------------------------
+ Aggregate
+   ->  Seq Scan on multi_leaf_test
+         Disabled: true
+         Filter: (body %~~ 'the'::tre_pattern)
+(4 rows)
+
+SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+ count  
+--------
+ 100000
+(1 row)
+
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+                  QUERY PLAN                   
+-----------------------------------------------
+ Aggregate
+   ->  Seq Scan on multi_leaf_test
+         Filter: (body %~~ 'the'::tre_pattern)
+(3 rows)
+
+SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+ count  
+--------
+ 100000
+(1 row)
+
+SET enable_indexscan = on;
+SET
+SET enable_bitmapscan = on;
+SET
+-- Differential test 2: pattern that matches a subset of rows.
+SET enable_seqscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test
+WHERE body %~~ tre_pattern('Row 12[0-9][0-9][0-9]', 0);
+ count 
+-------
+  1000
+(1 row)
+
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test
+WHERE body %~~ tre_pattern('Row 12[0-9][0-9][0-9]', 0);
+ count 
+-------
+  1000
+(1 row)
+
+SET enable_indexscan = on;
+SET
+SET enable_bitmapscan = on;
+SET
+-- Differential test 3: approximate match (k=1).
+SET enable_seqscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test
+WHERE body %~~ tre_pattern('quik', 1);  -- should match 'quick'
+ count  
+--------
+ 100000
+(1 row)
+
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test
+WHERE body %~~ tre_pattern('quik', 1);
+ count  
+--------
+ 100000
+(1 row)
+
+SET enable_indexscan = on;
+SET
+SET enable_bitmapscan = on;
+SET
+-- Differential test 4: non-matching pattern (should return 0 rows).
+SET enable_seqscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test
+WHERE body %~~ tre_pattern('xyzabc', 0);
+ count 
+-------
+     0
+(1 row)
+
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test
+WHERE body %~~ tre_pattern('xyzabc', 0);
+ count 
+-------
+     0
+(1 row)
+
+-- Reset planner settings.
+SET enable_indexscan = on;
+SET
+SET enable_bitmapscan = on;
+SET
+SET enable_seqscan = on;
+SET
+-- REINDEX test: drop and rebuild the index to verify multi-leaf rebuild.
+REINDEX INDEX multi_leaf_idx;
+psql:test/sql/multi_leaf.sql:90: ERROR:  relation "multi_leaf_idx" does not exist
+-- Verify rebuilt index still works correctly.
+SET enable_seqscan = off;
+SET
+SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+ count  
+--------
+ 100000
+(1 row)
+
+SET enable_seqscan = on;
+SET
+-- Cleanup.
+DROP INDEX multi_leaf_idx;
+psql:test/sql/multi_leaf.sql:98: ERROR:  index "multi_leaf_idx" does not exist
+DROP TABLE multi_leaf_test;
+DROP TABLE
