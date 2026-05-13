@@ -10,6 +10,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 Pre-release development version. Complete feature set for approximate regex indexing with three-tier filter funnel.
 
+### Phase 4.2: Multi-leaf Posting Trees (2026-05-13)
+
+**Goal:** Eliminate the ~8 KB single-leaf posting limit that prevented indexing large corpora.
+
+**Shipped:**
+- Multi-leaf posting chains: When a trigram's posting exceeds the single-leaf budget, the builder partitions TIDs across multiple leaves linked via `right_link` (Lehman-Yao convention)
+- Right-to-left allocation: Leaves are written from rightmost to leftmost, with each leaf storing `min_tid` and `max_tid` bounds
+- Reader updates: `pg_tre_posting_materialize` unions all leaves in the chain; `pg_tre_posting_lookup_tuple_bloom` and `pg_tre_posting_lookup_positions` walk right-links to find the leaf containing the target TID
+- Format version bump: PG_TRE_FORMAT_VERSION 2 → 3 (BREAKING: requires REINDEX)
+- Test coverage: `test/sql/multi_leaf.sql` exercises 100K-row builds with high-frequency trigrams
+
+**Status:**
+- ✅ Build path: Handles overflow by splitting into ~70% budget chunks
+- ✅ Materialize path: Unions sparsemaps across chain
+- ✅ Tuple bloom lookup: Locates correct leaf via TID range check
+- ✅ Positions lookup: Same right-link traversal as bloom
+- ✅ Documentation: Updated `doc/onpage_format.md` with multi-leaf layout
+
+**Testing:**
+- Existing 11 regression tests pass (single-leaf cases unaffected)
+- New multi_leaf test validates 100K-row corpus with common trigrams ('the', 'ing')
+
+**Next Steps:**
+- Run multi_leaf test on live cluster to verify performance at scale
+- Measure B-tree height and chain lengths in production workloads
+
 ### Benchmark Harness (2026-05-12)
 
 **Goal:** Build reproducible benchmark infrastructure for pg_tre vs pg_trgm performance comparison.

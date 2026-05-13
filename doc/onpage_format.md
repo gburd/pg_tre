@@ -1,4 +1,4 @@
-# pg_tre on-disk page format (v1)
+# pg_tre on-disk page format (v3)
 
 Authoritative declarations live in `include/pg_tre/page.h`.  This
 document is the narrative reference and the place where format
@@ -8,6 +8,16 @@ All multi-byte fields use native byte order.  All pages are the
 Postgres cluster page size (default 8 KiB) and begin with the
 standard `PageHeaderData` at offset 0 and end with a
 `PageTreOpaqueData` trailer in the special area.
+
+## Format version history
+
+- **v3 (Phase 4.2)**: Multi-leaf posting trees. When a single trigram's
+  posting exceeds ~8 KB, the builder splits it across multiple leaves
+  linked by `right_link` (Lehman-Yao convention). Each leaf stores
+  `min_tid` and `max_tid` bounds. Readers traverse the chain to find
+  the leaf containing a target TID.
+- **v2 (Phase 3.5)**: Codepoint-based trigrams.
+- **v1**: Initial format with byte-based trigrams.
 
 ## Meta page (block 0)
 
@@ -62,12 +72,18 @@ Internal (POSTING) and leaf (POSTING_L) pages.
 
 ### POSTING_L (leaf)
 
+Phase 4.2: supports multi-leaf chains when a single trigram's posting
+exceeds the ~8 KB single-leaf budget. Leaves are linked via `right_link`
+(Lehman-Yao style). Each leaf stores its TID range in `min_tid` and
+`max_tid`. Readers traverse right-links to find the leaf containing a
+target TID.
+
     +-----------------------------------+
     | PageHeaderData                    |  24 B
     +-----------------------------------+
     | PgTrePostingLeafHeader            |  40 B
-    |   right_link                      |
-    |   min_tid / max_tid               |
+    |   right_link                      |  next leaf in chain (or InvalidBlockNumber)
+    |   min_tid / max_tid               |  TID range for this leaf
     |   sparsemap_bytes                 |
     |   payload_bytes                   |
     |   payload_offset                  |
@@ -87,9 +103,11 @@ Internal (POSTING) and leaf (POSTING_L) pages.
     |   page_kind = POSTING_L           |
     +-----------------------------------+
 
-Access by TID: sparsemap_rank(map, 0, TID, true) gives the entry
-index; multiply by sizeof(payload record) -- or walk the variable-
-length region via per-entry offset table -- to locate payload.
+Access by TID:
+1. Walk right-links until `min_tid <= target <= max_tid`
+2. Within that leaf: `sparsemap_rank(map, 0, TID, true)` gives the entry
+   index; multiply by sizeof(payload record) -- or walk the variable-
+   length region via per-entry offset table -- to locate payload.
 
 ## Range summary tree
 
