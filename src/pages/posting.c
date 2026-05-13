@@ -993,17 +993,45 @@ pg_tre_posting_lookup_positions(Relation index,
     if (!BlockNumberIsValid(root))
         return 0;  /* no posting tree */
 
-    /* Step 2: read posting leaf page */
+    /* Step 2: walk right-link chain to find leaf containing packed_tid */
     {
-        Buffer buf;
+        BlockNumber cur_blk = root;
+        Buffer buf = InvalidBuffer;
         Page page;
         PgTrePostingLeafHeader *hdr;
         Size smap_size;
 
-        buf = ReadBuffer(index, root);
-        LockBuffer(buf, BUFFER_LOCK_SHARE);
-        page = BufferGetPage(buf);
-        hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
+        /* Walk right-links until we find the leaf with min_tid <= target <= max_tid */
+        while (BlockNumberIsValid(cur_blk))
+        {
+            buf = ReadBuffer(index, cur_blk);
+            LockBuffer(buf, BUFFER_LOCK_SHARE);
+            page = BufferGetPage(buf);
+            hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
+
+            /* Check if this leaf contains the target TID */
+            if (packed_tid >= hdr->min_tid && packed_tid <= hdr->max_tid)
+            {
+                /* Found the right leaf */
+                break;
+            }
+
+            /* Move to next leaf */
+            BlockNumber next_blk = hdr->right_link;
+            UnlockReleaseBuffer(buf);
+            cur_blk = next_blk;
+
+            if (!BlockNumberIsValid(cur_blk))
+            {
+                /* TID not in any leaf */
+                return 0;
+            }
+        }
+
+        if (!BlockNumberIsValid(cur_blk))
+            return 0;
+
+        /* Now buf points to the leaf containing packed_tid */
 
         /* Check if this leaf has payload */
         if (hdr->payload_offset == 0)
