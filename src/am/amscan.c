@@ -568,7 +568,13 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         return candidates;
                     }
                     refined = grown;
-                    sparsemap_add(refined, idx);
+                    rc = sparsemap_add(refined, idx);
+                    if (rc == SPARSEMAP_IDX_MAX)
+                    {
+                        /* Still failed after grow; bail out. */
+                        free(refined);
+                        return candidates;
+                    }
                 }
             }
         }

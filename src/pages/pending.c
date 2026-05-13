@@ -508,30 +508,21 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         }
 
         /*
-         * Re-serialize to a palloc'd buffer (same trick as posting.c's
-         * build_finish).
+         * Rather than manually re-serializing, just copy the merged
+         * sparsemap. The sparsemap library handles the serialization
+         * internally, avoiding the capacity estimation issues that
+         * led to heap corruption with wrapped maps.
          */
-        sz = sparsemap_get_size(merged);
-        out_cap = (sz == 0) ? 16 : sz + 16;
-        out_buf = MemoryContextAllocZero(mc->mcxt, out_cap);
-        fresh = sparsemap_wrap(out_buf, out_cap);
+        fresh = sparsemap_copy(merged);
+        if (fresh == NULL)
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                errmsg("pg_tre: out of memory copying sparsemap")));
 
-        min_idx = sparsemap_minimum(merged);
-        max_idx = sparsemap_maximum(merged);
-        if (sparsemap_cardinality(merged) > 0)
-        {
-            for (idx = min_idx; idx <= max_idx; idx++)
-            {
-                if (sparsemap_contains(merged, idx))
-                {
-                    if (sparsemap_add(fresh, idx) == SPARSEMAP_IDX_MAX)
-                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                            errmsg("pg_tre: merge serialize overflow")));
-                }
-                if (idx == max_idx) break;
-            }
-        }
         sz = sparsemap_get_size(fresh);
+
+        /* Copy the serialized data to a palloc'd buffer. */
+        out_buf = MemoryContextAlloc(mc->mcxt, sz);
+        memcpy(out_buf, sparsemap_get_data(fresh), sz);
         free(fresh);
 
         /* Decide inline vs on-disk leaf. */
