@@ -1,0 +1,89 @@
+-- test/sql/dnf_resolution.sql
+--
+-- Regression test for the DNF (k>0) within-tile resolution semantics.
+--
+-- The bug fixed in commit 34c5e52 caused the AM to intersect
+-- (AND) the within-tile trigram alternatives instead of unioning
+-- (OR) them.  The full p5_read fixture has enough rows that the
+-- bug masked itself: with ~50 rows, the wrong-mode result still
+-- happened to match the right-mode result.  The fixtures here
+-- are deliberately tiny so that a single misplaced operator
+-- changes the row count.
+--
+-- Each subtest constructs a row whose body matches the canonical
+-- pattern under k=1 by exactly one edit, then asserts that the
+-- index returns it.  If the within-tile semantics regress to
+-- AND, the row is dropped because the canonical trigrams aren't
+-- all present.
+
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+
+DROP TABLE IF EXISTS dnf_t;
+CREATE TABLE dnf_t (id int PRIMARY KEY, body text);
+
+-- Each row is at edit distance 1 from 'foobar' via a different
+-- single-edit class:
+INSERT INTO dnf_t VALUES
+  (1, 'foobar'),       -- exact (k=0)
+  (2, 'fooar'),        -- delete 'b'
+  (3, 'foovbar'),      -- insert 'v' at position 3
+  (4, 'foopar'),       -- substitute 'b' -> 'p'
+  (5, 'unrelated');    -- must NOT match
+
+CREATE INDEX dnf_idx ON dnf_t USING tre (body);
+
+SET enable_seqscan = off;
+
+-- Sanity: k=0 returns only the exact row.
+SELECT id FROM dnf_t WHERE body %~~ tre_pattern('foobar', 0) ORDER BY id;
+
+-- The real test: k=1 must return rows 1, 2, 3, 4 (every kind of
+-- single edit) but not row 5.  If the AM regresses to AND-within-
+-- tile, row 1 is the only one that has every spine trigram of
+-- 'foobar' and the test fails.
+SELECT id FROM dnf_t WHERE body %~~ tre_pattern('foobar', 1) ORDER BY id;
+
+-- k=2 should additionally tolerate a 2-edit miss.
+INSERT INTO dnf_t VALUES (6, 'fopar');   -- 2 edits from 'foobar'
+SELECT id FROM dnf_t WHERE body %~~ tre_pattern('foobar', 2) ORDER BY id;
+
+-- Cross-check with seq-scan: index and seq must agree exactly.
+DO $$
+DECLARE
+  ix int[]; sq int[];
+BEGIN
+  EXECUTE 'SET LOCAL enable_seqscan = off';
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM dnf_t '
+          'WHERE body %~~ tre_pattern($1, $2)'
+    USING 'foobar', 1
+    INTO ix;
+  EXECUTE 'SET LOCAL enable_seqscan = on';
+  EXECUTE 'SET LOCAL enable_indexscan = off';
+  EXECUTE 'SET LOCAL enable_bitmapscan = off';
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM dnf_t '
+          'WHERE tre_amatch(body, $1, $2)'
+    USING 'foobar', 1
+    INTO sq;
+  IF ix IS NOT DISTINCT FROM sq THEN
+    RAISE NOTICE 'OK: idx=% seq=%', ix, sq;
+  ELSE
+    RAISE EXCEPTION 'DNF resolution mismatch: idx=% seq=%', ix, sq;
+  END IF;
+END$$;
+
+-- Multi-tile case: k=2 with a longer pattern produces multiple
+-- tiles; verify the inter-tile OR also works correctly.
+DROP TABLE IF EXISTS dnf_long;
+CREATE TABLE dnf_long (id int PRIMARY KEY, body text);
+INSERT INTO dnf_long VALUES
+  (1, 'approximate'),       -- exact
+  (2, 'aproximate'),        -- 1 edit
+  (3, 'aproxmate'),         -- 2 edits
+  (4, 'totally other');     -- no match
+CREATE INDEX dnf_long_idx ON dnf_long USING tre (body);
+
+SELECT id FROM dnf_long WHERE body %~~ tre_pattern('approximate', 2)
+  ORDER BY id;
+
+DROP TABLE dnf_t;
+DROP TABLE dnf_long;

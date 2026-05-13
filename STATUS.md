@@ -263,6 +263,84 @@ Release tag pending TAP test execution and final QA review.
 - GUCs `pg_tre.range_size_blocks` and `pg_tre.bloom_tuple_bits`
   are SIGHUP-level; per-index reloptions are a v1.1 followup.
 
+## v1.0.0-final blockers
+
+Work required to take pg_tre from rc1 to a v1.0.0 production
+release.  Each item links to its primary code path; the
+closing test or proof-of-life is in parens.
+
+### Scale and correctness ceilings
+- [ ] **Multi-leaf posting trees with right-links**
+      (`src/pages/posting.c::write_single_leaf`,
+      `src/pages/posting.c::pg_tre_posting_materialize`).  Today
+      a single trigram's posting list must fit in one 8 KB
+      page (~50K TIDs after sparsemap compression).  At
+      INSERT time the build raises
+      `errcode_program_limit_exceeded` when this is
+      exceeded.  Production tables with common trigrams
+      (‘the’, ‘ing’, ‘tio’) hit this at < 1M rows.  Required
+      shape: B-tree of leaf pages with Lehman-Yao right-link
+      traversal in `pg_tre_posting_materialize`; allocation
+      via `pg_tre_extend` of additional leaves; chunked TID
+      streaming back to the caller.
+      (Test: `tap/multi_leaf_posting.pl` builds a 2M-row
+      table with `repeat('the ', 100)` rows; index build
+      succeeds; differential scan matches seq-scan.)
+- [ ] **Coverage test for the AND-vs-OR DNF resolution
+      bug** (`src/am/amscan.c::pg_tre_amgetbitmap` DNF
+      branch).  The current regression suite passed even
+      while the AM intersected within-tile alternatives
+      instead of unioning them.  A single-row fixture per
+      tile shape would have caught it.
+      (Test: `test/sql/dnf_resolution.sql`.)
+
+### Concurrency, durability, replication
+- [ ] **Concurrency TAP test**
+      (`tap/concurrency.pl`).  N writers + M readers + 1
+      vacuumer for a fixed duration.  Compares final index
+      contents to the heap via `tre_amatch` seq-scan;
+      passes only on exact equality.  Required to validate
+      the Lehman-Yao right-link logic in
+      `src/pages/upper.c` and the pending-list overlay
+      flush in `src/pages/pending.c`.
+- [ ] **Streaming replication TAP test**
+      (`tap/replication.pl`).  Stand up a primary + replica
+      via `PostgresNode`, apply 100K random
+      `(insert, update, delete)`, wait for catch-up, verify
+      both nodes return identical rows for a panel of
+      indexed queries.  Validates the custom rmgr handlers
+      in `src/wal/xlog.c` end-to-end.
+- [ ] **Crash-recovery-under-load TAP test**
+      (`tap/crash_recovery.pl`).  Background writer load,
+      then `kill -9` the postmaster mid-pending-flush /
+      mid-build / mid-vacuum.  After restart, every WAL
+      replay must produce an index whose contents agree
+      with a freshly-rebuilt index.
+
+### Verification
+- [ ] **Regex parser fuzzing harness**
+      (`fuzz/parse_regex_fuzz.c`).  libFuzzer wrapper around
+      `tre_parse_regex` plus `regex_extract_query` plus
+      `pg_tre_tile_query`.  Goal: ≥ 24 CPU-hours, no
+      crashes; corpus checked in.
+- [ ] **Real-corpus benchmark at 1M rows**
+      (`bench/bench_1m.sql`, results in `doc/perf.md`).
+      Replace the existing 10K-row demo numbers with at
+      least one million rows of representative text
+      (e.g. Wikipedia abstracts, Linux kernel commit
+      messages, or generated synthetic with realistic
+      Zipfian trigram distribution).  Compare pg_tre vs
+      pg_trgm vs seq-scan for k∈{0,1,2}.
+
+### Operations
+- [ ] **≥30-day external beta**.  At least one external
+      user runs pg_tre on a non-critical workload for a
+      month.  Bug reports addressed before tagging
+      v1.0.0.  This is the only item on the blocker list
+      that has no automated proxy; it exists because every
+      storage engine I trust today survived a similar
+      first-beta period.
+
 ## v1.0.0-rc1 limitations (won't-fix for rc1)
 
 These are documented compromises, not silent failures.  Each

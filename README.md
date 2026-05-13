@@ -435,21 +435,33 @@ Packaging templates for Debian (`debian/`), RPM
 ## Status and roadmap
 
 See [STATUS.md](STATUS.md) for the live phase tracker. Current
-state is **1.0.0-rc1 candidate**:
+state is **1.0.0-rc1 candidate** — feature-complete and
+correct, but **not yet validated for production use**.
 
-- **Production-ready**: build, scan, incremental writes, crash
-  recovery, approximate regex k≤2, UTF-8, DoS hardening,
-  planner cost model, three-tier filter funnel including
-  per-tuple bloom (tier-3).
-- **Documented compromises in v1.0.0**: single-leaf posting
-  trees (~50K TIDs / trigram), no parallel index scan, DNF
-  positional filter disabled (recheck preserves correctness).
-  See `STATUS.md` “v1.0.0-rc1 limitations” for the full list
-  with code-path references.
-- **Queued for v1.1**: multi-leaf posting trees with
-  right-links, parallel index scan, tighter DNF positional
-  filtering, per-index reloptions for range / bloom GUCs,
-  Lehman-Yao online splitter exercised under concurrency.
+- **Feature-complete**: build, scan, incremental writes,
+  crash recovery (single-node), approximate regex k≤2,
+  UTF-8, DoS hardening, planner cost model, three-tier
+  filter funnel including per-tuple bloom (tier-3).
+- **Correctness gates green**: 9/9 differential regression
+  tests (seq-scan vs index-scan must match exactly).
+- **Production-readiness gaps still open**:
+    - Single-leaf posting trees cap at ≈50K TIDs / trigram;
+      common trigrams in 1M+ row tables will hit the cap and
+      the AM raises `errcode_program_limit_exceeded` at
+      INSERT time. Multi-leaf posting trees with right-links
+      are required and queued.
+    - Concurrency, streaming replication, and crash
+      recovery under load have implementations but no TAP
+      tests; behaviour under contention is unverified.
+    - No fuzzing of the regex parser surface.
+    - Benchmarks have only been run at 10K rows; scale
+      validation pending.
+  See `STATUS.md` “v1.0.0-final blockers” for the full list
+  with file:function references.
+- **Documented v1.0.0 design compromises**: no parallel
+  index scan (heap scan still parallelises), DNF positional
+  filter disabled (recheck preserves correctness),
+  Lehman-Yao online split bypassed via pending-list overlay.
 
 Tag and release process documented in
 [`doc/release-checklist.md`](doc/release-checklist.md). A
