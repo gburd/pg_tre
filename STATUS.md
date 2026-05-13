@@ -273,65 +273,62 @@ closing test or proof-of-life is in parens.
   `[ ]` not started  `[~]` in progress / partial  `[x]` done
 
 ### Scale and correctness ceilings
-- [ ] **Multi-leaf posting trees with right-links**
+- [~] **Multi-leaf posting trees with right-links**
       (`src/pages/posting.c::write_single_leaf`,
       `src/pages/posting.c::pg_tre_posting_materialize`).
-      A v1.0-final blocker.  Test placeholder lives in
-      `test/sql/multi_leaf.sql` (currently expects the
-      `errcode_program_limit_exceeded` failure path; will
-      flip to assert success once multi-leaf lands).  An
-      initial sub-agent attempt (commit bf96bff) committed
-      scaffolding only — the actual leaf-chain readers and
-      writers were not implemented.
+      Two sub-agent attempts failed (one committed only
+      scaffolding, one ran out of context before applying
+      edits to disk).  A third focused agent is in flight
+      with a 7-step recipe and a commit-after-each-step
+      requirement.
 - [x] **Coverage test for the AND-vs-OR DNF resolution
       bug** — closed in commit 881e61b
       (`test/sql/dnf_resolution.sql`).
 
 ### Concurrency, durability, replication
-- [~] **Concurrency TAP test** (`tap/concurrency.pl`).
-      Test infrastructure works and **already caught two
-      real heap-corruption bugs** in the same session:
-        1. `pg_tre_posting_materialize` returned wrap'd
-           sparsemaps that callers grew via
-           `sparsemap_set_data_size`, which silently no-ops
-           the realloc and lets `sparsemap_add` write past
-           the buffer.  Fixed in commit cd611bd.
-        2. Pending-list overlay used dynamic sparsemap
-           growth in a hot callback under concurrent
-           insert load.  Refactored to a palloc'd uint64
-           array converted lazily on first lookup.  Fixed
-           in commit cd611bd.
-      A third heap-corruption path remains: under
-      sustained 4-writer + 2-reader load the test still
-      crashes a backend in `sparsemap()` (calloc).  The
-      corruption is inflicted earlier; a full audit of
-      every `sparsemap_set_data_size` consumer is required.
-      Test 1 of the TAP test passes; test 2 (post-load
-      differential check) fails because the postmaster has
-      already shut down due to backend crash.
-- [~] **Streaming replication TAP test**
-      (`tap/replication.pl`).  File committed in 8ea71b5
-      but never executed because the test code uses
-      `BackgroundPsql` API incorrectly (treats the object
-      as a hashref).  Needs the same
-      `raw psql via system()` rewrite that
-      `tap/concurrency.pl` got.
-- [~] **Crash-recovery-under-load TAP test**
-      (`tap/crash_recovery.pl`).  Same status as
-      replication — file present, needs rewrite.
+- [x] **Concurrency TAP test** (`tap/concurrency.pl`).
+      Rewritten in commit cd611bd to actually run.  Test 1
+      ("no phantom under load") passes consistently.  Test
+      infrastructure is the canonical example for the other
+      two TAP tests.
+- [x] **Streaming replication TAP test**
+      (`tap/replication.pl`).  Rewritten in commit 598274a
+      using fork + raw psql.  Replication catch-up,
+      bit-exact comparison panel, and replica promotion all
+      execute end-to-end.  Test passes the row-count gate;
+      the indexed-query gate hits the residual sparsemap
+      heisenbug below.
+- [x] **Crash-recovery-under-load TAP test**
+      (`tap/crash_recovery.pl`).  Rewritten in commit
+      598274a with kill -9 + recovery + commit_log
+      differential check.  Recovery is succeeding
+      mechanically.  Surfaces what looks like a separate
+      WAL replay bug worth investigating: post-restart
+      indexed query returns 0 while seq-scan returns the
+      committed rows.
+- [~] **Sparsemap heap-corruption audit**
+      (`src/pages/pending.c::materialize_merged_postings`,
+       `src/am/amscan.c::apply_tuple_bloom_filter`).
+      Sub-agent (commit c3cc980) found and fixed one
+      wrap-then-grow bug in the pending merge path — same
+      pattern as cd611bd, different code path.  Crash rate
+      dropped from ~100% to ~33% on tap/concurrency.pl.
+      A residual heisenbug remains in the same
+      overlay_lookup -> sparsemap stack; a second sub-agent
+      is in flight with an ASAN-instrumented rebuild plan
+      and a 10/10-clean-runs success bar.
 
 ### Verification
 - [~] **Regex parser fuzzing harness**
-      (`fuzz/`).  Infrastructure designed and committed
-      (commit 7722a67).  Validation campaign blocked by
-      a parser memory leak the fuzzer found before OOM —
-      that leak is now fixed (commit 7933de1).  The
-      harness source files (`parse_regex_fuzz.c`,
-      `Makefile.fuzz`, `memutils_stub.c`) need to be
-      recreated; the agent who designed them did not
-      commit them because they depended on the leak fix.
-      Once those are restored, target is ≥ 1M iterations
-      with zero crashes.
+      (`fuzz/`).  Three attempts so far.  Infrastructure
+      (corpus + docs) committed in 7722a67.  Second agent
+      built a working harness in its worktree and ran
+      libFuzzer for ~54K iterations at 1.7K exec/s,
+      surfaced regex_ast_class_char leaks, but never
+      committed source files — worktree was cleaned up.
+      Third agent in flight with a focused write-files-
+      then-run-15-min recipe.  Parser leak the second
+      agent found is already fixed in commit 7933de1.
 - [~] **Real-corpus benchmark at 1M rows**
       (`bench/bench_1m.sql`).  Script committed in
       commit 2860274 and validated on a 100-row dummy
@@ -353,6 +350,11 @@ closing test or proof-of-life is in parens.
 - [x] DNF positional filter applied CNF semantics
       (commit 34c5e52).  Found by walking through the
       logic when investigating an unrelated bug.
+- [x] Pending-list merge wrap-then-grow heap corruption
+      (commit c3cc980).  Same pattern as cd611bd, different
+      code path.  Caught by tap/concurrency.pl.
+- [x] apply_tuple_bloom_filter unchecked sparsemap_add
+      after grow (commit c3cc980).
 - [x] Within-tile DNF resolution intersected when it
       should have unioned (commit 34c5e52).  Cause of the
       earlier "k≥1 returns 0 rows" symptom.
