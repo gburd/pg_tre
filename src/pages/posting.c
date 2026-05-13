@@ -772,8 +772,45 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         memcpy(sparsemap_get_data(sm), sm_bytes, bytes);
         sparsemap_open(sm, sparsemap_get_data(sm), bytes + 64);
 
-        /* Phase 2: no right-link traversal (single-leaf postings). */
+        /* Phase 4.2: traverse right-link chain and union all leaves. */
+        BlockNumber next_blk = hdr->right_link;
         UnlockReleaseBuffer(buf);
+
+        while (BlockNumberIsValid(next_blk))
+        {
+            Buffer next_buf = pg_tre_read(index, next_blk, PG_TRE_PAGE_POSTING_L,
+                                         BUFFER_LOCK_SHARE);
+            Page next_page = BufferGetPage(next_buf);
+            PgTrePostingLeafHeader *next_hdr =
+                (PgTrePostingLeafHeader *) PageGetContents(next_page);
+            uint8 *next_sm_bytes = (uint8 *) next_hdr + MAXALIGN(sizeof(*next_hdr));
+            Size next_bytes = next_hdr->sparsemap_bytes;
+
+            /* Create a temporary sparsemap for this leaf */
+            sparsemap_t *next_sm = sparsemap(next_bytes + 64);
+            if (next_sm == NULL)
+            {
+                UnlockReleaseBuffer(next_buf);
+                free(sm);
+                return NULL;
+            }
+            memcpy(sparsemap_get_data(next_sm), next_sm_bytes, next_bytes);
+            sparsemap_open(next_sm, sparsemap_get_data(next_sm), next_bytes + 64);
+
+            /* Union this leaf's sparsemap into the accumulator */
+            if (sparsemap_union(sm, next_sm) != 0)
+            {
+                free(next_sm);
+                UnlockReleaseBuffer(next_buf);
+                free(sm);
+                return NULL;
+            }
+            free(next_sm);
+
+            next_blk = next_hdr->right_link;
+            UnlockReleaseBuffer(next_buf);
+        }
+
         return sm;
     }
 
