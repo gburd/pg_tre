@@ -45,16 +45,32 @@ tre_parse_debug(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(tre_extract_debug);
+PG_FUNCTION_INFO_V1(tre_extract_debug_k);
 
 /*
  * tre_extract_debug(text) -> text
+ * tre_extract_debug(text, int) -> text
  *
- * Parse a regex, extract trigrams, and return a debug dump of the query tree.
+ * Parse a regex, extract trigrams, and return a debug dump of the query
+ * tree.  The optional second argument is the global edit budget (k).
  */
+static Datum tre_extract_debug_impl(text *pattern_text, int32 max_cost);
+
 Datum
 tre_extract_debug(PG_FUNCTION_ARGS)
 {
-	text *pattern_text = PG_GETARG_TEXT_PP(0);
+	return tre_extract_debug_impl(PG_GETARG_TEXT_PP(0), 0);
+}
+
+Datum
+tre_extract_debug_k(PG_FUNCTION_ARGS)
+{
+	return tre_extract_debug_impl(PG_GETARG_TEXT_PP(0), PG_GETARG_INT32(1));
+}
+
+static Datum
+tre_extract_debug_impl(text *pattern_text, int32 max_cost)
+{
 	char *pattern = VARDATA_ANY(pattern_text);
 	int pattern_len = VARSIZE_ANY_EXHDR(pattern_text);
 	TreParseCtx ctx;
@@ -71,7 +87,7 @@ tre_extract_debug(PG_FUNCTION_ARGS)
 	}
 
 	/* Extract trigrams */
-	if (!regex_extract_query(&ctx, 0, &query))
+	if (!regex_extract_query(&ctx, max_cost, &query))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
@@ -80,6 +96,9 @@ tre_extract_debug(PG_FUNCTION_ARGS)
 
 	/* Format the query */
 	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "k=%d mode=%s\n", max_cost,
+					 query.mode == TRIGRAM_QUERY_DNF ? "DNF" : "CNF");
 
 	if (query.always_true)
 	{
@@ -91,10 +110,14 @@ tre_extract_debug(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		appendStringInfo(&buf, "AND of %d conjuncts:\n", query.n);
+		appendStringInfo(&buf, "%s of %d %s:\n",
+						 query.mode == TRIGRAM_QUERY_DNF ? "OR" : "AND",
+						 query.n,
+						 query.mode == TRIGRAM_QUERY_DNF ? "tiles" : "conjuncts");
 		for (i = 0; i < query.n; i++)
 		{
-			appendStringInfo(&buf, "  Conjunct %d: OR of %d disjuncts:\n",
+			appendStringInfo(&buf, "  %s %d: %d alternatives:\n",
+							 query.mode == TRIGRAM_QUERY_DNF ? "Tile" : "Conjunct",
 							 i, query.conjuncts[i].n);
 			for (j = 0; j < query.conjuncts[i].n; j++)
 			{

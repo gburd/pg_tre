@@ -68,8 +68,16 @@ SET
 SELECT id, body FROM tier3_test 
 WHERE body %~~ tre_pattern('fox', 1) 
 ORDER BY id;
-psql:test/sql/tier3.sql:49: ERROR:  pg_tre: regex extraction produced no selective trigrams (always_true); index scan cannot answer this query
-HINT:  Use seq-scan (SET enable_seqscan=on) or a pattern with at least one literal trigram.
+ id |          body           
+----+-------------------------
+  1 | the quick brown fox
+  3 | foxes are quick animals
+  4 | another fox appears
+  6 | fox fox fox
+  7 | quick and dirty fox
+  8 | the red fox runs fast
+(6 rows)
+
 -- Expected: same 6 rows plus possibly 'foxes' variants
 -- Cleanup
 DROP TABLE tier3_test CASCADE;

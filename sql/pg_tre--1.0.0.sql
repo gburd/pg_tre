@@ -54,6 +54,11 @@ CREATE FUNCTION tre_extract_debug(text)
     AS 'MODULE_PATHNAME', 'tre_extract_debug'
     LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION tre_extract_debug(text, int)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'tre_extract_debug_k'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 -- ---------------------------------------------------------------------
 -- Access method registration
 -- ---------------------------------------------------------------------

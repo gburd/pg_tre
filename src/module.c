@@ -29,7 +29,7 @@ int  pg_tre_default_max_cost       = 3;
 int  pg_tre_pending_list_limit_kb  = 4096;   /* 4 MiB */
 int  pg_tre_range_size_blocks      = 128;
 int  pg_tre_bloom_tuple_bits       = 128;
-int  pg_tre_max_extraction_fanout  = 256;
+int  pg_tre_max_extraction_fanout  = 4096;
 int  pg_tre_max_nfa_states         = 10000;
 int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
@@ -67,7 +67,7 @@ pg_tre_init_guc(void)
         "Maximum number of trigram disjuncts a query may emit.",
         NULL,
         &pg_tre_max_extraction_fanout,
-        256, 1, 65536, PGC_USERSET, 0, NULL, NULL, NULL);
+        4096, 1, 65536, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.max_nfa_states",
         "Reject patterns whose compiled NFA exceeds this state count.",

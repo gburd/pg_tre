@@ -261,8 +261,60 @@ Release tag pending TAP test execution and final QA review.
   apt-installed PostgreSQL where pg_regress works and `make
   installcheck` can be used instead.
 - GUCs `pg_tre.range_size_blocks` and `pg_tre.bloom_tuple_bits`
-  are currently SIGHUP-level; Phase 6 will move these to
-  per-index reloptions where they belong.
+  are SIGHUP-level; per-index reloptions are a v1.1 followup.
+
+## v1.0.0-rc1 limitations (won't-fix for rc1)
+
+These are documented compromises, not silent failures.  Each
+maps to a specific code path with a clear error or graceful
+degradation.
+
+- **Single-leaf posting trees** (`src/pages/posting.c`).  Each
+  trigram's posting list is capped at one 8 KB page (~50K
+  TIDs after sparsemap compression).  Build raises a clear
+  `errcode_program_limit_exceeded` if a single trigram exceeds
+  this for one row's worth of trigrams; in practice only
+  pathological 40 KB+ rows hit it.  Multi-leaf B-tree of
+  posting leaves with right-links is queued for v1.1.
+
+- **No parallel index scan** (`src/am/amapi.c`,
+  `amcanparallel = false`).  Bitmap heap scans built from a
+  pg_tre index already parallelize on the heap side, which
+  recovers most of the wall-clock benefit on large tables.
+  Parallel posting-tree merge is queued for v1.1.
+
+- **Lehman-Yao online split not exercised**
+  (`src/pages/upper.c`).  Page splits during build are eager
+  and serial.  Runtime inserts via `aminsert` go to the
+  pending-list overlay (`src/pages/pending.c`); the upper
+  tree is rebuilt wholesale at flush.  This sidesteps
+  concurrent split correctness questions and works for the
+  fastupdate=on default.  A true concurrent online splitter
+  is queued for v1.1.
+
+- **Extraction always_true → lossy bitmap fallback**
+  (`src/am/amscan.c`).  When the trigram extractor cannot
+  produce a useful conjunction (pattern with no 3-char
+  literal run, very short pattern with high k, or fanout cap
+  exceeded), `amgetbitmap` emits a fully-lossy TIDBitmap
+  covering every block of the heap relation.  The executor
+  recheck (`tre_match_scalar` → `pg_tre_amatch`) then
+  performs the actual TRE match.  Performance degrades to
+  sequential-scan equivalent in this case; correctness is
+  preserved.  The cost estimator returns `disable_cost` for
+  these queries so the planner picks an actual seq-scan
+  whenever `enable_seqscan` is on (the default).
+
+- **DNF positional filter disabled**
+  (`src/am/amscan.c`).  Per-tuple position checking is
+  applied for CNF queries (k=0 exact regex) but skipped for
+  DNF queries (k≥1 tiled).  Tile alternative arrays widen
+  position windows beyond what per-TID filtering can
+  usefully exploit without spine reconstruction.  The
+  executor recheck filters all candidates so correctness is
+  preserved; this is purely a missed CPU optimization on the
+  index side.  Tighter DNF positional filtering is queued
+  for v1.1.
 
 ## Phase 5 -- Approximate regex & three-tier funnel (IN PROGRESS)
 

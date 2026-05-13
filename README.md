@@ -226,16 +226,26 @@ simply aren't expressible in those tools at all.
 
 pg_tre has two entry points with identical match semantics:
 
-- `tre_amatch(body, pattern, k)` — always correct, sequential
-  scan, any pattern.
-- `body %~~ tre_pattern(pattern, k)` — indexed path, used when
-  the pattern has at least one literal run of 3+ characters to
-  anchor trigram filtering. See the `p5_read` regression test
-  for the supported pattern shapes.
+- `tre_amatch(body, pattern, k)` — a function that always
+  works for any pattern and any `k`, used as a sequential
+  scan filter.
+- `body %~~ tre_pattern(pattern, k)` — an operator that the
+  planner can drive against the pg_tre index. When trigram
+  extraction cannot produce a useful anchor (very short
+  pattern with high `k`, no literal run, or fanout overflow),
+  the AM emits a fully-lossy bitmap covering the heap and
+  lets the executor recheck filter. **Correctness is
+  preserved either way**; only the index speedup is lost in
+  the fallback case. The cost estimator surfaces this so the
+  planner picks an actual seq-scan whenever `enable_seqscan`
+  is on (the default).
 
-The examples below are written with `tre_amatch` so they run
-unconditionally; swap in `%~~` with the same arguments to get
-the indexed plan when the pattern qualifies.
+The examples below use `tre_amatch` so they run
+unconditionally and the prose claims hold without depending
+on extraction succeeding for every pattern shape. Swap in
+`%~~` with the same arguments to drive the index path; it
+falls back to the lossy bitmap (≈ seq-scan cost) on the
+patterns where the trigram extractor can't anchor.
 
 ### Example 1: Error-message triage across noisy loggers
 
@@ -428,10 +438,18 @@ See [STATUS.md](STATUS.md) for the live phase tracker. Current
 state is **1.0.0-rc1 candidate**:
 
 - **Production-ready**: build, scan, incremental writes, crash
-  recovery, approximate regex k≤2, UTF-8, DoS hardening, planner
-  cost model.
-- **Pre-1.0.0 polish in flight**: tier-3 bloom reactivation,
-  multi-leaf posting trees, parallel index scan.
+  recovery, approximate regex k≤2, UTF-8, DoS hardening,
+  planner cost model, three-tier filter funnel including
+  per-tuple bloom (tier-3).
+- **Documented compromises in v1.0.0**: single-leaf posting
+  trees (~50K TIDs / trigram), no parallel index scan, DNF
+  positional filter disabled (recheck preserves correctness).
+  See `STATUS.md` “v1.0.0-rc1 limitations” for the full list
+  with code-path references.
+- **Queued for v1.1**: multi-leaf posting trees with
+  right-links, parallel index scan, tighter DNF positional
+  filtering, per-index reloptions for range / bloom GUCs,
+  Lehman-Yao online splitter exercised under concurrency.
 
 Tag and release process documented in
 [`doc/release-checklist.md`](doc/release-checklist.md). A

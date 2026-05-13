@@ -22,6 +22,7 @@
 #include "utils/builtins.h"
 #include "varatt.h"
 
+#include "pg_tre/amapi.h"
 #include "pg_tre/pg_tre.h"
 
 #include <string.h>

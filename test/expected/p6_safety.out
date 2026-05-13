@@ -124,7 +124,7 @@ SHOW pg_tre.tuple_bloom_enable;
 SHOW pg_tre.max_extraction_fanout;
  pg_tre.max_extraction_fanout 
 ------------------------------
- 256
+ 4096
 (1 row)
 
 SHOW pg_tre.compile_timeout_ms;

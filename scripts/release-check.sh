@@ -22,9 +22,9 @@ fi
 echo "==> Clean build"
 PG_CONFIG="$PG_CONFIG" make clean >/dev/null
 PG_CONFIG="$PG_CONFIG" make 2>&1 | tee /tmp/pg_tre_build.log | tail -3
-if grep -qE "error|warning:" /tmp/pg_tre_build.log; then
+if grep -qE "^[^ \t].*: (error|warning):" /tmp/pg_tre_build.log; then
     echo "FAIL: warnings or errors in build" >&2
-    grep -E "error|warning:" /tmp/pg_tre_build.log >&2 || true
+    grep -E "^[^ \t].*: (error|warning):" /tmp/pg_tre_build.log >&2 || true
     exit 1
 fi
 

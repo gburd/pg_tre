@@ -21,7 +21,9 @@
 #include "access/amapi.h"
 #include "access/genam.h"
 #include "access/relscan.h"
+#include "access/table.h"
 #include "nodes/tidbitmap.h"
+#include "storage/bufmgr.h"
 #include "utils/elog.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -494,23 +496,52 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                  errmsg("pg_tre: amgetbitmap called without amrescan")));
 
     /*
-     * Phase 3: if extraction gave up (always_true), we must return
-     * every TID for correctness.  But our posting lists only contain
-     * trigram-bearing rows, so "every TID" isn't something we can
-     * produce cheaply from an inverted index.  The correct behavior
-     * is to refuse the scan and let the planner pick seq-scan.
-     * Phase 6's cost estimator is supposed to prevent ever reaching
-     * this point; in Phase 3 we surface it as a clear error to aid
-     * diagnosis in tests.
+     * If extraction gave up (always_true), the index has no useful
+     * filter information for this pattern.  Emit a fully-lossy
+     * TIDBitmap covering every block of the heap; the executor's
+     * recheck (tre_match_scalar -> pg_tre_amatch) will discard
+     * non-matches.  Performance degrades to a sequential scan but
+     * correctness is preserved.  This path is reached when:
+     *   - pattern has no literal run >= 3 chars to anchor trigrams
+     *   - global k is so large that Navarro tiling has no spine
+     *   - per-tile uleven expansion exceeds max_extraction_fanout
+     * The cost estimator already reports disable_cost so the planner
+     * normally picks a seq-scan; this fallback only fires when
+     * enable_seqscan=off has forced index use.
      */
     if (st->q.always_true)
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("pg_tre: regex extraction produced no selective "
-                        "trigrams (always_true); index scan cannot answer "
-                        "this query"),
-                 errhint("Use seq-scan (SET enable_seqscan=on) or a "
-                         "pattern with at least one literal trigram.")));
+    {
+        Relation   heap = scan->heapRelation;
+        BlockNumber  nblocks;
+        BlockNumber  blk;
+        int64        emitted = 0;
+
+        /*
+         * scan->heapRelation is set by the executor for index-only and
+         * bitmap scans before amgetbitmap is called.  If for any reason
+         * it is not available, fall back to the index relation's heap
+         * via the catalog.
+         */
+        if (heap == NULL)
+            heap = table_open(scan->indexRelation->rd_index->indrelid,
+                              AccessShareLock);
+
+        nblocks = RelationGetNumberOfBlocks(heap);
+        for (blk = 0; blk < nblocks; blk++)
+        {
+            tbm_add_page(tbm, blk);
+            emitted++;
+        }
+
+        if (heap != scan->heapRelation)
+            table_close(heap, AccessShareLock);
+
+        ereport(DEBUG1,
+                (errmsg("pg_tre: extraction always_true; emitted lossy "
+                        "bitmap covering %ld blocks (recheck will filter)",
+                        (long) emitted)));
+        return emitted;
+    }
 
     old = MemoryContextSwitchTo(st->scan_cxt);
 
@@ -573,15 +604,22 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
         }
         else  /* TRIGRAM_QUERY_DNF */
         {
-            /* DNF: OR across tiles.  For each tile (conjunct in DNF),
-             * compute AND of its disjuncts, then union into result. */
+            /*
+             * DNF semantics from Navarro tiling: at least one tile
+             * must have at least one of its alternative trigrams
+             * present in the row.  Within a tile the alternatives
+             * are OR (the trigram at this spine position OR any of
+             * its k=1 / k=2 universal-Levenshtein neighbours).  Across
+             * tiles is also OR (pigeonhole: with k edits and k+1
+             * tiles, at least one tile is untouched).  Both layers
+             * are OR, so the candidate set is the union of all
+             * posting lists referenced by any disjunct of any tile.
+             */
             for (i = 0; i < st->q.n; i++)
             {
                 const TrigramConjunct *tile = &st->q.conjuncts[i];
-                sparsemap_t *tile_result = NULL;
                 int j;
 
-                /* Within this tile, AND all trigrams together */
                 for (j = 0; j < tile->n; j++)
                 {
                     PgTreUpperRef ref;
@@ -602,9 +640,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                     if (pend != NULL)
                     {
                         if (sm == NULL)
-                        {
                             sm = sparsemap_copy(pend);
-                        }
                         else
                         {
                             sparsemap_t *u = sparsemap_union(sm, pend);
@@ -614,47 +650,15 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                     }
 
                     if (sm == NULL)
-                    {
-                        /* This trigram not present; tile can't match */
-                        if (tile_result != NULL)
-                            free(tile_result);
-                        tile_result = NULL;
-                        break;
-                    }
+                        continue;  /* trigram not present in any row */
 
-                    if (tile_result == NULL)
-                    {
-                        tile_result = sm;
-                    }
-                    else
-                    {
-                        sparsemap_t *intersect = sparsemap_intersection(tile_result, sm);
-                        free(tile_result);
-                        free(sm);
-                        tile_result = intersect;
-                        if (tile_result == NULL ||
-                            (sparsemap_get_size(tile_result) != 0 &&
-                             sparsemap_cardinality(tile_result) == 0))
-                        {
-                            if (tile_result) free(tile_result);
-                            tile_result = NULL;
-                            break;
-                        }
-                    }
-                }
-
-                /* Union this tile's result into the overall result (OR) */
-                if (tile_result != NULL)
-                {
                     if (result == NULL)
-                    {
-                        result = tile_result;
-                    }
+                        result = sm;
                     else
                     {
-                        sparsemap_t *merged = sparsemap_union(result, tile_result);
+                        sparsemap_t *merged = sparsemap_union(result, sm);
                         free(result);
-                        free(tile_result);
+                        free(sm);
                         result = merged;
                     }
                 }
@@ -680,8 +684,17 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      *
      * Re-enabled after fixing rank-based offset bug in
      * pg_tre_posting_lookup_positions (same as lookup_tuple_bloom).
+     *
+     * Skip for DNF queries: tile alternatives store widened position
+     * windows that are correct for tier-2 lookup but too loose to
+     * filter individual TIDs without per-tile spine reconstruction.
+     * The executor recheck (tre_match_scalar -> pg_tre_amatch) is
+     * authoritative and runs on every candidate row regardless of
+     * this filter, so skipping it here only loses an optimization,
+     * not correctness.
      */
-    if (result != NULL && sparsemap_cardinality(result) > 0)
+    if (result != NULL && sparsemap_cardinality(result) > 0 &&
+        st->q.mode == TRIGRAM_QUERY_CNF)
     {
         sparsemap_t *filtered = sparsemap(sparsemap_get_capacity(result));
         if (filtered != NULL)
@@ -693,12 +706,21 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
             {
                 if (sparsemap_contains(result, tid_idx))
                 {
-                    bool passes = true;
+                    /*
+                     * CNF: passes only if EVERY conjunct passes (start true,
+                     * fail-fast on any failure).
+                     * DNF: passes if ANY tile passes (start false, succeed-fast
+                     * on any success).
+                     */
+                    bool passes = (st->q.mode == TRIGRAM_QUERY_CNF);
                     int ci, j;
 
                     /* For each conjunct/tile, check if required trigrams
                      * appear at valid positions */
-                    for (ci = 0; ci < st->q.n && passes; ci++)
+                    for (ci = 0;
+                         ci < st->q.n &&
+                         (st->q.mode == TRIGRAM_QUERY_CNF ? passes : !passes);
+                         ci++)
                     {
                         const TrigramConjunct *conj = &st->q.conjuncts[ci];
 

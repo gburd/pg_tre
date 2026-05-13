@@ -83,4 +83,231 @@ SET
 SET
 SET
 SET
-psql:test/sql/utf8.sql:77: ERROR:  pg_tre: regex extraction produced no selective trigrams (always_true); index scan cannot answer this query
+ id |         txt          
+----+----------------------
+  1 | 東京は日本の首都です
+  7 | 東京タワーは高いです
+(2 rows)
+
+ id |      txt       
+----+----------------
+  4 | こんにちは世界
+  5 | 你好世界
+(2 rows)
+
+ id |       txt        
+----+------------------
+  2 | 北京是中国的首都
+  8 | 北京烤鸭很好吃
+(2 rows)
+
+ id |           txt            
+----+--------------------------
+  3 | 서울은 한국의 수도입니다
+  9 | 서울 타워는 아름답습니다
+(2 rows)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 10
+CREATE INDEX
+SET
+SET
+ id |      txt      
+----+---------------
+  1 | café français
+(1 row)
+
+ id |      txt       
+----+----------------
+  2 | naïve approach
+(1 row)
+
+ id |       txt       
+----+-----------------
+  3 | résumé required
+(1 row)
+
+ id |         txt         
+----+---------------------
+  4 | Zürich is beautiful
+(1 row)
+
+SET
+SET
+SET
+ id |      txt      
+----+---------------
+  1 | café français
+(1 row)
+
+ id |      txt       
+----+----------------
+  2 | naïve approach
+(1 row)
+
+ id |       txt       
+----+-----------------
+  3 | résumé required
+(1 row)
+
+ id |         txt         
+----+---------------------
+  4 | Zürich is beautiful
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 10
+CREATE INDEX
+SET
+SET
+ id |      txt       
+----+----------------
+  1 | Hello 👋 world
+(1 row)
+
+ id |      txt       
+----+----------------
+  2 | I ❤️ PostgreSQL
+(1 row)
+
+ id |      txt       
+----+----------------
+  3 | 🎉 Party time!
+(1 row)
+
+ id |      txt      
+----+---------------
+  4 | Fire 🔥 emoji
+(1 row)
+
+SET
+SET
+SET
+ id |      txt       
+----+----------------
+  1 | Hello 👋 world
+(1 row)
+
+ id |      txt       
+----+----------------
+  2 | I ❤️ PostgreSQL
+(1 row)
+
+ id |      txt       
+----+----------------
+  3 | 🎉 Party time!
+(1 row)
+
+ id |      txt      
+----+---------------
+  4 | Fire 🔥 emoji
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 10
+CREATE INDEX
+SET
+SET
+ id |    txt     
+----+------------
+  1 | Hello 世界
+(1 row)
+
+ id |    txt     
+----+------------
+  1 | Hello 世界
+(1 row)
+
+ id |         txt          
+----+----------------------
+  5 | Mix of café and 東京
+(1 row)
+
+ id |         txt          
+----+----------------------
+  5 | Mix of café and 東京
+(1 row)
+
+SET
+SET
+SET
+ id |    txt     
+----+------------
+  1 | Hello 世界
+(1 row)
+
+ id |    txt     
+----+------------
+  1 | Hello 世界
+(1 row)
+
+ id |         txt          
+----+----------------------
+  5 | Mix of café and 東京
+(1 row)
+
+ id |         txt          
+----+----------------------
+  5 | Mix of café and 東京
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 10
+CREATE INDEX
+SET
+SET
+ id |                  txt                   
+----+----------------------------------------
+  1 | The café in Zürich serves great coffee
+(1 row)
+
+ id |               txt                
+----+----------------------------------
+  2 | Tokyo tower in 東京 is very tall
+(1 row)
+
+ id |                   txt                   
+----+-----------------------------------------
+  3 | Naïve résumé writing is not recommended
+(1 row)
+
+ id |                 txt                 
+----+-------------------------------------
+  4 | Seoul 서울 has many beautiful parks
+(1 row)
+
+SET
+SET
+SET
+ id | txt 
+----+-----
+(0 rows)
+
+ id |               txt                
+----+----------------------------------
+  2 | Tokyo tower in 東京 is very tall
+(1 row)
+
+ id | txt 
+----+-----
+(0 rows)
+
+ id |                 txt                 
+----+-------------------------------------
+  4 | Seoul 서울 has many beautiful parks
+(1 row)
+
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
