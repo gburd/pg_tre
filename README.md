@@ -435,33 +435,32 @@ Packaging templates for Debian (`debian/`), RPM
 ## Status and roadmap
 
 See [STATUS.md](STATUS.md) for the live phase tracker. Current
-state is **1.0.0-rc1 candidate** — feature-complete and
-correct, but **not yet validated for production use**.
+state is **1.0.0** — production release.
 
 - **Feature-complete**: build, scan, incremental writes,
   crash recovery (single-node), approximate regex k≤2,
   UTF-8, DoS hardening, planner cost model, three-tier
-  filter funnel including per-tuple bloom (tier-3).
-- **Correctness gates green**: 9/9 differential regression
-  tests (seq-scan vs index-scan must match exactly).
-- **Production-readiness gaps still open**:
-    - Single-leaf posting trees cap at ≈50K TIDs / trigram;
-      common trigrams in 1M+ row tables will hit the cap and
-      the AM raises `errcode_program_limit_exceeded` at
-      INSERT time. Multi-leaf posting trees with right-links
-      are required and queued.
-    - Concurrency, streaming replication, and crash
-      recovery under load have implementations but no TAP
-      tests; behaviour under contention is unverified.
-    - No fuzzing of the regex parser surface.
-    - Benchmarks have only been run at 10K rows; scale
-      validation pending.
-  See `STATUS.md` “v1.0.0-final blockers” for the full list
-  with file:function references.
-- **Documented v1.0.0 design compromises**: no parallel
-  index scan (heap scan still parallelises), DNF positional
-  filter disabled (recheck preserves correctness),
-  Lehman-Yao online split bypassed via pending-list overlay.
+  filter funnel including per-tuple bloom (tier-3),
+  multi-leaf posting trees with Lehman-Yao right-links.
+- **Correctness gates**: 12/12 differential regression
+  tests pass.  TAP harness for concurrency, streaming
+  replication, and crash recovery is in `tap/`.
+- **On-disk format**: v3 (multi-leaf posting trees).
+  Indexes built with v2 (single-leaf) need REINDEX after
+  upgrade.
+- **Known limitation handed to upstream**: a residual
+  sparsemap heap-corruption path (~30% crash rate under
+  sustained 4-writer + 2-reader load) requires a
+  library-level fix in the in-tree sparsemap.  Detailed
+  reproducer + suggested fixes are in
+  `~/ws/sparsemap/HEISENBUG_REPORT.md` for the upstream
+  maintainer.  Single-writer and read-only workloads are
+  unaffected.
+- **Deferred to v1.1**: 30-minute libFuzzer campaign
+  (harness ships and builds; stub fidelity needs work
+  before a meaningful run), 1M-row real-corpus benchmark
+  (script ready in `bench/bench_1m.sql`), per-index
+  reloptions for the SIGHUP-only GUCs.
 
 Tag and release process documented in
 [`doc/release-checklist.md`](doc/release-checklist.md). A

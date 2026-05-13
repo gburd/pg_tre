@@ -1,4 +1,4 @@
-pg_tre (1.0.0-rc1-1) unstable; urgency=medium
+pg_tre (1.0.0-1) unstable; urgency=medium
 
   * Initial release candidate.
   * Native PostgreSQL 18+ index access method for approximate regex.

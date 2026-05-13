@@ -2,7 +2,7 @@
   "name": "pg_tre",
   "abstract": "Native PostgreSQL index access method for approximate regex matching",
   "description": "pg_tre provides a native index AM for fast approximate-regex queries over text columns. It uses a three-tier filter funnel (range bloom, trigram postings, per-tuple bloom) backed by the TRE library for recheck. Supports edit-distance k (insertions, deletions, substitutions) with configurable DoS protections.",
-  "version": "1.0.0-rc1",
+  "version": "1.0.0",
   "maintainer": "Greg Burd <greg@burd.me>",
   "license": "mit",
   "prereqs": {
@@ -26,7 +26,7 @@
       "abstract": "Approximate regex index access method",
       "file": "sql/pg_tre--1.0.0.sql",
       "docfile": "doc/pg_tre.md",
-      "version": "1.0.0-rc1"
+      "version": "1.0.0"
     }
   },
   "resources": {
@@ -42,7 +42,7 @@
   },
   "generated_by": "pg_tre developers",
   "meta-spec": {
-    "version": "1.0.0-rc1",
+    "version": "1.0.0",
     "url": "https://pgxn.org/meta/spec.txt"
   },
   "tags": [

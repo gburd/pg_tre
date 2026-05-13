@@ -10,7 +10,7 @@ Summary:        PostgreSQL approximate-regex index access method
 
 License:        MIT AND BSD-2-Clause
 URL:            https://codeberg.org/gregburd/pg_tre
-Source0:        %{name}-%{version}-rc1.tar.gz
+Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  %{pgname}-devel >= 18
 BuildRequires:  autoconf automake libtool gettext m4

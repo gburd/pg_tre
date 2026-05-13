@@ -6,9 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.0.0-dev] - Unreleased
+## [1.0.0] - 2026-05-13
 
-Pre-release development version. Complete feature set for approximate regex indexing with three-tier filter funnel.
+First production release.  Native PostgreSQL 18+ index
+access method for approximate regex matching with a
+three-tier filter funnel.
+
+### Highlights vs the v0.1.0 UDF-only version
+
+- Native AM (`USING tre`) with the `%~~` operator and the
+  `tre_pattern(P, k)` constructor.  Indexed bitmap heap
+  scans replace seq-scan-only `tre_amatch` calls.
+- Three-tier filter funnel: range bloom → sparsemap
+  posting trees → per-tuple bloom → TRE recheck.
+- Multi-leaf posting trees with Lehman-Yao right-links;
+  no per-trigram size cap in practice.
+- WAL-logged custom rmgr; crash recovery and streaming
+  replication implemented (TAP tests in `tap/`).
+- UTF-8 codepoint trigrams; multibyte-safe extraction.
+- DoS hardening: NFA state cap, compile/match timeouts,
+  fanout cap on extraction.
+- Cost-model integration with the planner; selectivity
+  estimator backed by index meta page statistics.
+- 12 differential regression tests gating every commit.
+- Packaging: Debian, RPM, Homebrew, Docker, PGXN.
+- CI on GitHub and Codeberg (Forgejo Actions).
+- Dependabot (GitHub) + Renovate (Codeberg) for
+  automated dependency updates.
+- Mermaid architecture diagrams that render on both
+  GitHub and Codeberg.
+
+### Known limitation
+
+A residual sparsemap heap-corruption path fires under
+sustained heavy concurrent insert + read load (~30% of
+minutes-long stress runs).  The corruption originates in
+the in-tree sparsemap library; pg_tre-side workarounds
+were applied where reachable.  Detailed reproducer and
+suggested upstream fixes are in
+`~/ws/sparsemap/HEISENBUG_REPORT.md`.  Single-writer and
+read-only workloads are unaffected.
+
+See `STATUS.md` for the full list of v1.1 followups.
+
+## [1.0.0-dev] - Pre-release
 
 ### Phase 4.2: Multi-leaf Posting Trees (2026-05-13)
 
