@@ -48,7 +48,7 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 	 * so the parser is freed even when the tokenizer or AST builders raise
 	 * via ereport(ERROR).  Without this, every malformed input that hits
 	 * an ereport() leaks ~2 KB of parser state for the lifetime of the
-	 * backend (discovered via libFuzzer; see fuzz/RUN_REPORT.md).
+	 * backend.  Discovered via libFuzzer.
 	 */
 	PG_TRY();
 	{

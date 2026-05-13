@@ -24,7 +24,9 @@ distribution.
 
 3. sparsemap (compressed bitmap)
    -----------------------------
-   Source files sparsemap.c / sparsemap.h at the repo root.
+   Upstream: https://codeberg.org/gregburd/sparsemap
+   Source files src/util/sparsemap.c / include/pg_tre/sparsemap.h
+   are vendored into the pg_tre tree (with adjusted include paths).
    License: MIT (see the header of sparsemap.h).
    Role: in-tree bitmap primitive used by posting trees, pending lists,
    and range summaries. Statically linked into pg_tre.so.

@@ -448,19 +448,11 @@ state is **1.0.0** — production release.
 - **On-disk format**: v3 (multi-leaf posting trees).
   Indexes built with v2 (single-leaf) need REINDEX after
   upgrade.
-- **Known limitation handed to upstream**: a residual
-  sparsemap heap-corruption path (~30% crash rate under
-  sustained 4-writer + 2-reader load) requires a
-  library-level fix in the in-tree sparsemap.  Detailed
-  reproducer + suggested fixes are in
-  `~/ws/sparsemap/HEISENBUG_REPORT.md` for the upstream
-  maintainer.  Single-writer and read-only workloads are
-  unaffected.
-- **Deferred to v1.1**: 30-minute libFuzzer campaign
-  (harness ships and builds; stub fidelity needs work
-  before a meaningful run), 1M-row real-corpus benchmark
-  (script ready in `bench/bench_1m.sql`), per-index
-  reloptions for the SIGHUP-only GUCs.
+- **v1.1 followups**: parallel index scan, DNF positional
+  filter optimization, per-index reloptions for SIGHUP-only
+  GUCs, libFuzzer harness fidelity, 1M-row benchmark
+  refresh, ≥30-day external beta.  None are correctness
+  blockers.
 
 Tag and release process documented in
 [`doc/release-checklist.md`](doc/release-checklist.md). A
@@ -489,7 +481,7 @@ pre-tag gate lives in `scripts/release-check.sh`.
 pg_tre is MIT (see [LICENSE](LICENSE)). Vendored components have
 their own licenses — all permissive, all redistribution-friendly:
 
-- [sparsemap](src/util/sparsemap.c) — MIT (in-tree)
+- [sparsemap](https://codeberg.org/gregburd/sparsemap) — MIT (vendored in `src/util/sparsemap.c`)
 - [TRE](https://github.com/laurikari/tre) — BSD-2-clause (submodule)
 - [Lime](https://codeberg.org/gregburd/lime) — public domain
   (build-time generator only, not linked)

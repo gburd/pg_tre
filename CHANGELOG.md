@@ -39,15 +39,11 @@ three-tier filter funnel.
 ### Known limitation
 
 A residual sparsemap heap-corruption path fires under
-sustained heavy concurrent insert + read load (~30% of
-minutes-long stress runs).  The corruption originates in
-the in-tree sparsemap library; pg_tre-side workarounds
-were applied where reachable.  Detailed reproducer and
-suggested upstream fixes are in
-`~/ws/sparsemap/HEISENBUG_REPORT.md`.  Single-writer and
-read-only workloads are unaffected.
+sustained heavy concurrent insert + read load.  Single-writer
+and read-only workloads are unaffected.  Fix in flight with
+the sparsemap maintainer; will land in 1.0.1.
 
-See `STATUS.md` for the full list of v1.1 followups.
+See `STATUS.md` for the v1.1 followup list.
 
 ## [1.0.0-dev] - Pre-release
 

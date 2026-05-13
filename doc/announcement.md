@@ -113,7 +113,7 @@ Performance depends heavily on pattern selectivity and edit distance. Patterns w
 pg_tre builds on:
 - **TRE** (Ville Laurikari) — approximate regex matching library
 - **Lime** (Greg Burd) — LALR(1) parser generator (Lemon fork)
-- **sparsemap** — compressed bitmap primitive (MIT)
+- **[sparsemap](https://codeberg.org/gregburd/sparsemap)** — compressed bitmap primitive (MIT)
 - **Russ Cox** — trigram extraction algorithm ([2012 article](https://swtch.com/~rsc/regexp/regexp4.html))
 - **Gonzalo Navarro** — error-tolerant indexing techniques (1999-2001 papers)
 

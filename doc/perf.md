@@ -45,8 +45,8 @@ Navarro (k+1)-tiling produces many OR alternatives, each of which
 individually matches many rows; the AND of tiles narrows the
 candidate set but not aggressively. The three-tier funnel with
 active tier-3 per-tuple bloom is expected to cut this to 5-10 ms.
-Tier-3 is currently gated off pending a separate bug (see
-doc/tier3-reenable-summary.md).
+Tier-3 ships in 1.0.0 (multi-leaf posting trees + per-tuple
+bloom).  Earlier rc1 numbers are below for context.
 
 ### Approximate k=2 on a 1250-row match (non-selective pattern)
 

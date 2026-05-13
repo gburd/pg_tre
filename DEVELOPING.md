@@ -1,8 +1,8 @@
-# pg_tre
+# pg_tre developer notes
 
-PostgreSQL 18+ extension: native index access method for approximate
-regex matching.  Three-tier filter funnel (range bloom, per-trigram
-sparsemap postings, per-tuple bloom) backed by TRE for recheck.
+Build + layout reference for contributors. End users want
+[`README.md`](README.md) and [`doc/pg_tre.md`](doc/pg_tre.md)
+instead.
 
 ## Build
 
@@ -46,5 +46,5 @@ isn't registered.
 
 ## Status / roadmap
 
-See `STATUS.md` for the live phase tracker and `doc/design.md` for
-the architecture.
+See `doc/design.md` for the architecture and `CHANGELOG.md`
+for what shipped in each release.

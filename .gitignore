@@ -58,3 +58,5 @@ vendor/lime/lime
 # Build dir
 build/
 config/
+bench/results/
+.new-sparsemap/
