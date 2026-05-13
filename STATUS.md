@@ -269,77 +269,93 @@ Work required to take pg_tre from rc1 to a v1.0.0 production
 release.  Each item links to its primary code path; the
 closing test or proof-of-life is in parens.
 
+**Status legend:**
+  `[ ]` not started  `[~]` in progress / partial  `[x]` done
+
 ### Scale and correctness ceilings
 - [ ] **Multi-leaf posting trees with right-links**
       (`src/pages/posting.c::write_single_leaf`,
-      `src/pages/posting.c::pg_tre_posting_materialize`).  Today
-      a single trigram's posting list must fit in one 8 KB
-      page (~50K TIDs after sparsemap compression).  At
-      INSERT time the build raises
-      `errcode_program_limit_exceeded` when this is
-      exceeded.  Production tables with common trigrams
-      (‘the’, ‘ing’, ‘tio’) hit this at < 1M rows.  Required
-      shape: B-tree of leaf pages with Lehman-Yao right-link
-      traversal in `pg_tre_posting_materialize`; allocation
-      via `pg_tre_extend` of additional leaves; chunked TID
-      streaming back to the caller.
-      (Test: `tap/multi_leaf_posting.pl` builds a 2M-row
-      table with `repeat('the ', 100)` rows; index build
-      succeeds; differential scan matches seq-scan.)
-- [ ] **Coverage test for the AND-vs-OR DNF resolution
-      bug** (`src/am/amscan.c::pg_tre_amgetbitmap` DNF
-      branch).  The current regression suite passed even
-      while the AM intersected within-tile alternatives
-      instead of unioning them.  A single-row fixture per
-      tile shape would have caught it.
-      (Test: `test/sql/dnf_resolution.sql`.)
+      `src/pages/posting.c::pg_tre_posting_materialize`).
+      A v1.0-final blocker.  Test placeholder lives in
+      `test/sql/multi_leaf.sql` (currently expects the
+      `errcode_program_limit_exceeded` failure path; will
+      flip to assert success once multi-leaf lands).  An
+      initial sub-agent attempt (commit bf96bff) committed
+      scaffolding only — the actual leaf-chain readers and
+      writers were not implemented.
+- [x] **Coverage test for the AND-vs-OR DNF resolution
+      bug** — closed in commit 881e61b
+      (`test/sql/dnf_resolution.sql`).
 
 ### Concurrency, durability, replication
-- [ ] **Concurrency TAP test**
-      (`tap/concurrency.pl`).  N writers + M readers + 1
-      vacuumer for a fixed duration.  Compares final index
-      contents to the heap via `tre_amatch` seq-scan;
-      passes only on exact equality.  Required to validate
-      the Lehman-Yao right-link logic in
-      `src/pages/upper.c` and the pending-list overlay
-      flush in `src/pages/pending.c`.
-- [ ] **Streaming replication TAP test**
-      (`tap/replication.pl`).  Stand up a primary + replica
-      via `PostgresNode`, apply 100K random
-      `(insert, update, delete)`, wait for catch-up, verify
-      both nodes return identical rows for a panel of
-      indexed queries.  Validates the custom rmgr handlers
-      in `src/wal/xlog.c` end-to-end.
-- [ ] **Crash-recovery-under-load TAP test**
-      (`tap/crash_recovery.pl`).  Background writer load,
-      then `kill -9` the postmaster mid-pending-flush /
-      mid-build / mid-vacuum.  After restart, every WAL
-      replay must produce an index whose contents agree
-      with a freshly-rebuilt index.
+- [~] **Concurrency TAP test** (`tap/concurrency.pl`).
+      Test infrastructure works and **already caught two
+      real heap-corruption bugs** in the same session:
+        1. `pg_tre_posting_materialize` returned wrap'd
+           sparsemaps that callers grew via
+           `sparsemap_set_data_size`, which silently no-ops
+           the realloc and lets `sparsemap_add` write past
+           the buffer.  Fixed in commit cd611bd.
+        2. Pending-list overlay used dynamic sparsemap
+           growth in a hot callback under concurrent
+           insert load.  Refactored to a palloc'd uint64
+           array converted lazily on first lookup.  Fixed
+           in commit cd611bd.
+      A third heap-corruption path remains: under
+      sustained 4-writer + 2-reader load the test still
+      crashes a backend in `sparsemap()` (calloc).  The
+      corruption is inflicted earlier; a full audit of
+      every `sparsemap_set_data_size` consumer is required.
+      Test 1 of the TAP test passes; test 2 (post-load
+      differential check) fails because the postmaster has
+      already shut down due to backend crash.
+- [~] **Streaming replication TAP test**
+      (`tap/replication.pl`).  File committed in 8ea71b5
+      but never executed because the test code uses
+      `BackgroundPsql` API incorrectly (treats the object
+      as a hashref).  Needs the same
+      `raw psql via system()` rewrite that
+      `tap/concurrency.pl` got.
+- [~] **Crash-recovery-under-load TAP test**
+      (`tap/crash_recovery.pl`).  Same status as
+      replication — file present, needs rewrite.
 
 ### Verification
-- [ ] **Regex parser fuzzing harness**
-      (`fuzz/parse_regex_fuzz.c`).  libFuzzer wrapper around
-      `tre_parse_regex` plus `regex_extract_query` plus
-      `pg_tre_tile_query`.  Goal: ≥ 24 CPU-hours, no
-      crashes; corpus checked in.
-- [ ] **Real-corpus benchmark at 1M rows**
-      (`bench/bench_1m.sql`, results in `doc/perf.md`).
-      Replace the existing 10K-row demo numbers with at
-      least one million rows of representative text
-      (e.g. Wikipedia abstracts, Linux kernel commit
-      messages, or generated synthetic with realistic
-      Zipfian trigram distribution).  Compare pg_tre vs
-      pg_trgm vs seq-scan for k∈{0,1,2}.
+- [~] **Regex parser fuzzing harness**
+      (`fuzz/`).  Infrastructure designed and committed
+      (commit 7722a67).  Validation campaign blocked by
+      a parser memory leak the fuzzer found before OOM —
+      that leak is now fixed (commit 7933de1).  The
+      harness source files (`parse_regex_fuzz.c`,
+      `Makefile.fuzz`, `memutils_stub.c`) need to be
+      recreated; the agent who designed them did not
+      commit them because they depended on the leak fix.
+      Once those are restored, target is ≥ 1M iterations
+      with zero crashes.
+- [~] **Real-corpus benchmark at 1M rows**
+      (`bench/bench_1m.sql`).  Script committed in
+      commit 2860274 and validated on a 100-row dummy
+      fixture.  Full 1M-row run is gated on multi-leaf
+      posting trees — 'database' alone will appear in
+      ~50K rows and the current single-leaf cap will
+      reject the build.
 
 ### Operations
-- [ ] **≥30-day external beta**.  At least one external
-      user runs pg_tre on a non-critical workload for a
-      month.  Bug reports addressed before tagging
-      v1.0.0.  This is the only item on the blocker list
-      that has no automated proxy; it exists because every
-      storage engine I trust today survived a similar
-      first-beta period.
+- [ ] **≥30-day external beta**.  Not started.  Ask the
+      customer to run on staging.  No automated proxy
+      replaces this.
+
+### Pre-existing bugs surfaced by this work
+- [x] Parser memory leak on `ereport(ERROR)` paths
+      (commit 7933de1).  Found by libFuzzer; fixed via
+      `PG_TRY/PG_FINALLY` wrapper around the Lime parser
+      malloc/free.  No regression.
+- [x] DNF positional filter applied CNF semantics
+      (commit 34c5e52).  Found by walking through the
+      logic when investigating an unrelated bug.
+- [x] Within-tile DNF resolution intersected when it
+      should have unioned (commit 34c5e52).  Cause of the
+      earlier "k≥1 returns 0 rows" symptom.
 
 ## v1.0.0-rc1 limitations (won't-fix for rc1)
 
