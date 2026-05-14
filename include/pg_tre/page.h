@@ -122,7 +122,7 @@ typedef struct PgTrePostingLeafHeader
     uint32      sparsemap_bytes;        /* size of the sparsemap blob */
     uint32      payload_bytes;          /* size of the payload region */
     uint32      payload_offset;         /* offset from page start */
-    uint16      n_entries;              /* sparsemap_cardinality cache */
+    uint16      n_entries;              /* sm_cardinality cache */
     uint16      _pad;
 } PgTrePostingLeafHeader;
 

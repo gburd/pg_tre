@@ -133,7 +133,7 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
  * of TIDs found in the pending list.  We collect into a palloc'd uint64
  * array (resilient under repeated grow/shrink) and lazily convert to a
  * sparsemap on first lookup.  An earlier implementation used
- * sparsemap_set_data_size to dynamically grow a calloc-backed sparsemap
+ * sm_set_data_size to dynamically grow a calloc-backed sparsemap
  * during collection, which under high-volume pending-list scans hit a
  * heap-corruption path inside the realloc.  See tap/concurrency.pl
  * regression for the gate.
@@ -266,12 +266,12 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
 
         /* Lazy materialise: sort + dedupe + build a sparsemap of the
          * exact size needed.  Avoids the dynamic-grow path in
-         * sparsemap_set_data_size that triggered heap corruption
+         * sm_set_data_size that triggered heap corruption
          * under heavy concurrent insert load (caught by
          * tap/concurrency.pl). */
         qsort(e->tids_arr, e->tids_n, sizeof(uint64), overlay_uint64_cmp);
 
-        sm = sparsemap_create(16384);  /* Start with larger capacity to reduce grows */
+        sm = sm_create(16384);  /* Start with larger capacity to reduce grows */
         if (sm == NULL)
             return NULL;
 
@@ -283,20 +283,20 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
             if (k > 0 && packed == e->tids_arr[k - 1])
                 continue;  /* dedupe */
 
-            rc = sparsemap_add(sm, packed);
-            if (rc == SPARSEMAP_IDX_MAX)
+            rc = sm_add(sm, packed);
+            if (rc == SM_IDX_MAX)
             {
-                size_t old_cap = sparsemap_get_capacity(sm);
+                size_t old_cap = sm_get_capacity(sm);
                 size_t new_cap = (old_cap == 0) ? 4096 : old_cap * 2;
-                size_t used = sparsemap_get_size(sm);
+                size_t used = sm_get_size(sm);
                 void *old_data;
                 sparsemap_t *g;
 
                 /* Grow: allocate a larger map, copy the serialized data,
                  * then re-initialize to compute m_data_used from the data.
-                 * This avoids the manual loop + sparsemap_add pattern that
+                 * This avoids the manual loop + sm_add pattern that
                  * could overflow and corrupt the heap. */
-                g = sparsemap_create(new_cap);
+                g = sm_create(new_cap);
                 if (g == NULL)
                 {
                     free(sm);
@@ -304,18 +304,18 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
                 }
 
                 /* Copy the serialized data from the old map */
-                old_data = (void *) sparsemap_get_data(sm);
-                memcpy((void *) sparsemap_get_data(g), old_data, used);
+                old_data = (void *) sm_get_data(sm);
+                memcpy((void *) sm_get_data(g), old_data, used);
 
                 /* Re-initialize to set m_data_used from the copied data */
-                sparsemap_open(g, (uint8_t *) sparsemap_get_data(g), new_cap);
+                sm_open(g, (uint8_t *) sm_get_data(g), new_cap);
 
                 free(sm);
                 sm = g;
 
                 /* Retry the add on the larger map. */
-                rc = sparsemap_add(sm, packed);
-                if (rc == SPARSEMAP_IDX_MAX)
+                rc = sm_add(sm, packed);
+                if (rc == SM_IDX_MAX)
                 {
                     /* Still failed after grow; should not happen but handle gracefully. */
                     free(sm);
@@ -371,11 +371,11 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
         {
             if (sm == NULL)
             {
-                sm = sparsemap_copy(pend);
+                sm = sm_copy(pend);
             }
             else
             {
-                sparsemap_t *u = sparsemap_union(sm, pend);
+                sparsemap_t *u = sm_union(sm, pend);
                 free(sm);
                 sm = u;
             }
@@ -390,7 +390,7 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
         }
         else
         {
-            sparsemap_t *merged = sparsemap_union(accum, sm);
+            sparsemap_t *merged = sm_union(accum, sm);
             free(accum);
             free(sm);
             accum = merged;
@@ -402,9 +402,9 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
 }
 
 /*
- * Scanner callback: reserved for a future fast-path using sparsemap_scan
+ * Scanner callback: reserved for a future fast-path using sm_scan
  * (which emits 64-bit vectors).  Phase 3 walks set bits via
- * sparsemap_contains instead; the callback version becomes useful in
+ * sm_contains instead; the callback version becomes useful in
  * Phase 5 when we batch TIDs through tier-3 bloom refinement before
  * emitting.
  */
@@ -444,7 +444,7 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     Size bloom_bytes;
     int i, j;
 
-    if (candidates == NULL || sparsemap_cardinality(candidates) == 0)
+    if (candidates == NULL || sm_cardinality(candidates) == 0)
         return candidates;
 
     /* Phase 5: per-tuple blooms are (pg_tre_bloom_tuple_bits + 7) / 8 bytes */
@@ -452,16 +452,16 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     if (bloom_bytes > sizeof(bloom_buf))
         bloom_bytes = sizeof(bloom_buf);  /* defensive */
 
-    refined = sparsemap_create(sparsemap_get_capacity(candidates) * 2 + 256);
+    refined = sm_create(sm_get_capacity(candidates) * 2 + 256);
     if (refined == NULL)
         return candidates;  /* OOM; fall back to unrefined */
 
-    maxidx = sparsemap_maximum(candidates);
-    idx = sparsemap_minimum(candidates);
+    maxidx = sm_maximum(candidates);
+    idx = sm_minimum(candidates);
 
     while (idx <= maxidx)
     {
-        if (sparsemap_contains(candidates, idx))
+        if (sm_contains(candidates, idx))
         {
             bool passes = true;
 
@@ -565,11 +565,11 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
 
             if (passes)
             {
-                uint64 rc = sparsemap_add(refined, idx);
-                if (rc == SPARSEMAP_IDX_MAX)
+                uint64 rc = sm_add(refined, idx);
+                if (rc == SM_IDX_MAX)
                 {
-                    size_t cap = sparsemap_get_capacity(refined);
-                    sparsemap_t *grown = sparsemap_set_data_size(
+                    size_t cap = sm_get_capacity(refined);
+                    sparsemap_t *grown = sm_set_data_size(
                         refined, NULL, cap * 2 + 256);
                     if (grown == NULL)
                     {
@@ -578,8 +578,8 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         return candidates;
                     }
                     refined = grown;
-                    rc = sparsemap_add(refined, idx);
-                    if (rc == SPARSEMAP_IDX_MAX)
+                    rc = sm_add(refined, idx);
+                    if (rc == SM_IDX_MAX)
                     {
                         /* Still failed after grow; bail out. */
                         free(refined);
@@ -705,13 +705,13 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                 }
                 else
                 {
-                    sparsemap_t *merged = sparsemap_intersection(result, sm);
+                    sparsemap_t *merged = sm_intersection(result, sm);
                     free(result);
                     free(sm);
                     result = merged;
                     if (result == NULL ||
-                        (sparsemap_get_size(result) != 0 &&
-                         sparsemap_cardinality(result) == 0))
+                        (sm_get_size(result) != 0 &&
+                         sm_cardinality(result) == 0))
                     {
                         if (result) free(result);
                         result = NULL;
@@ -759,10 +759,10 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                     if (pend != NULL)
                     {
                         if (sm == NULL)
-                            sm = sparsemap_copy(pend);
+                            sm = sm_copy(pend);
                         else
                         {
-                            sparsemap_t *u = sparsemap_union(sm, pend);
+                            sparsemap_t *u = sm_union(sm, pend);
                             free(sm);
                             sm = u;
                         }
@@ -775,7 +775,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                         result = sm;
                     else
                     {
-                        sparsemap_t *merged = sparsemap_union(result, sm);
+                        sparsemap_t *merged = sm_union(result, sm);
                         free(result);
                         free(sm);
                         result = merged;
@@ -790,7 +790,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
     /* Phase 5 tier-3: apply per-tuple bloom filtering.
      *
      * Re-enabled after fixing rank-based offset bug in
-     * pg_tre_posting_lookup_tuple_bloom.  sparsemap_rank(map, 0, tid, true)
+     * pg_tre_posting_lookup_tuple_bloom.  sm_rank(map, 0, tid, true)
      * returns count INCLUDING tid, so we skip (rank-1) entries, not rank.
      */
     if (result != NULL && st->q.global_max_cost >= 0)
@@ -812,18 +812,18 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      * this filter, so skipping it here only loses an optimization,
      * not correctness.
      */
-    if (result != NULL && sparsemap_cardinality(result) > 0 &&
+    if (result != NULL && sm_cardinality(result) > 0 &&
         st->q.mode == TRIGRAM_QUERY_CNF)
     {
-        sparsemap_t *filtered = sparsemap_create(sparsemap_get_capacity(result));
+        sparsemap_t *filtered = sm_create(sm_get_capacity(result));
         if (filtered != NULL)
         {
-            uint64 tid_idx = sparsemap_minimum(result);
-            uint64 tid_maxidx = sparsemap_maximum(result);
+            uint64 tid_idx = sm_minimum(result);
+            uint64 tid_maxidx = sm_maximum(result);
 
             while (tid_idx <= tid_maxidx)
             {
-                if (sparsemap_contains(result, tid_idx))
+                if (sm_contains(result, tid_idx))
                 {
                     /*
                      * CNF: passes only if EVERY conjunct passes (start true,
@@ -950,7 +950,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
                     if (passes)
                     {
-                        if (sparsemap_add(filtered, tid_idx) == SPARSEMAP_IDX_MAX)
+                        if (sm_add(filtered, tid_idx) == SM_IDX_MAX)
                         {
                             /* Overflow; give up on filtering */
                             free(filtered);
@@ -980,17 +980,17 @@ done:
         /*
          * Walk the set bits via contains() in [min, max].  This is O(n)
          * where n = range span; for Phase 3 fixtures this is fine.
-         * Phase 5 uses the faster sparsemap_scan callback path once
+         * Phase 5 uses the faster sm_scan callback path once
          * we wire the chunk-base index through.
          */
-        maxidx = sparsemap_maximum(result);
-        idx    = sparsemap_minimum(result);
+        maxidx = sm_maximum(result);
+        idx    = sm_minimum(result);
 
-        if (sparsemap_cardinality(result) > 0)
+        if (sm_cardinality(result) > 0)
         {
             while (idx <= maxidx)
             {
-                if (sparsemap_contains(result, idx))
+                if (sm_contains(result, idx))
                 {
                     ItemPointerData tid;
                     pg_tre_unpack_tid(idx, &tid);

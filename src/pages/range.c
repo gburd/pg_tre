@@ -109,22 +109,22 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
 
         /* Materialize the posting's sparsemap. */
         smap = pg_tre_posting_materialize(index, posting_root, inline_data, inline_bytes);
-        if (smap == NULL || sparsemap_cardinality(smap) == 0)
+        if (smap == NULL || sm_cardinality(smap) == 0)
         {
             if (smap != NULL)
                 free(smap);
             continue;
         }
 
-        min_tid = sparsemap_minimum(smap);
-        max_tid = sparsemap_maximum(smap);
+        min_tid = sm_minimum(smap);
+        max_tid = sm_maximum(smap);
 
         /* Iterate over this posting's TIDs and union into range blooms. */
         {
             uint64 tid;
             for (tid = min_tid; tid <= max_tid; tid++)
             {
-                if (!sparsemap_contains(smap, tid))
+                if (!sm_contains(smap, tid))
                     continue;
 
                 BlockNumber heap_blk = (BlockNumber) (tid >> 16);

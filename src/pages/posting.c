@@ -77,7 +77,7 @@ struct PgTrePostingBuilder
     /*
      * Phase 4.1: accumulate TIDs into a palloc'd dynamic array instead of
      * a dynamically-grown malloc-backed sparsemap.  The sparsemap dynamic
-     * resize path (sparsemap_set_data_size with data=NULL) triggers glibc
+     * resize path (sm_set_data_size with data=NULL) triggers glibc
      * heap corruption for certain size transitions; palloc/repalloc is
      * solid.  The array is converted to a sparsemap once at finish time
      * when we know the final cardinality.
@@ -100,7 +100,7 @@ pg_tre_posting_build_begin(Relation index, uint64 trigram_hash,
 {
     /* Default initial size: 1024 bytes.  Callers that know the TID count
      * up-front should call pg_tre_posting_build_begin_sized() instead to
-     * avoid the dynamic-resize path through sparsemap_set_data_size(),
+     * avoid the dynamic-resize path through sm_set_data_size(),
      * which has a latent bug on repeated grows.  The sized variant is
      * used by the pending-list merge path where cardinality is known. */
     return pg_tre_posting_build_begin_sized(index, trigram_hash,
@@ -397,21 +397,21 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
      */
     {
         size_t cap = (size_t) b->n_tids * 16 + 1024;
-        sparsemap_t *fresh = sparsemap_create(cap);
+        sparsemap_t *fresh = sm_create(cap);
         int k;
         if (fresh == NULL)
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                 errmsg("pg_tre: failed to allocate sparsemap for serialization")));
         for (k = 0; k < b->n_tids; k++)
         {
-            if (sparsemap_add(fresh, b->tids[k]) == SPARSEMAP_IDX_MAX)
+            if (sm_add(fresh, b->tids[k]) == SM_IDX_MAX)
                 ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                    errmsg("pg_tre: sparsemap_add overflow for n_tids=%d cap=%zu",
+                    errmsg("pg_tre: sm_add overflow for n_tids=%d cap=%zu",
                            b->n_tids, cap)));
         }
-        sz = sparsemap_get_size(fresh);
+        sz = sm_get_size(fresh);
         {
-            const uint8_t *smap_data = (const uint8_t *) sparsemap_get_data(fresh);
+            const uint8_t *smap_data = (const uint8_t *) sm_get_data(fresh);
             if (sz > 0)
             {
                 copy = (uint8 *) palloc(sz + 16);
@@ -511,7 +511,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
 
                 /* Build sparsemap for this slice */
                 size_t cap = (size_t)tids_in_leaf * 16 + 1024;
-                sparsemap_t *slice_smap = sparsemap_create(cap);
+                sparsemap_t *slice_smap = sm_create(cap);
                 uint8 *slice_bytes;
                 Size slice_sz;
                 int k;
@@ -522,14 +522,14 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
 
                 for (k = 0; k < tids_in_leaf; k++)
                 {
-                    if (sparsemap_add(slice_smap, b->tids[tid_idx + k]) == SPARSEMAP_IDX_MAX)
+                    if (sm_add(slice_smap, b->tids[tid_idx + k]) == SM_IDX_MAX)
                         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                            errmsg("pg_tre: sparsemap_add overflow in multi-leaf")));
+                            errmsg("pg_tre: sm_add overflow in multi-leaf")));
                 }
 
-                slice_sz = sparsemap_get_size(slice_smap);
+                slice_sz = sm_get_size(slice_smap);
                 slice_bytes = (uint8 *) palloc(slice_sz + 16);
-                memcpy(slice_bytes, sparsemap_get_data(slice_smap), slice_sz);
+                memcpy(slice_bytes, sm_get_data(slice_smap), slice_sz);
                 memset(slice_bytes + slice_sz, 0, 16);
                 free(slice_smap);
 
@@ -672,13 +672,13 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sparsemap_t **out,
     if (s->inline_data != NULL && !s->served_inline)
     {
         /* Wrap over a palloc'd copy so we own stable storage.
-         * Call sparsemap_open so m_data_used reflects the serialized
+         * Call sm_open so m_data_used reflects the serialized
          * content (wrap alone leaves m_data_used=0). */
         uint8 *buf = (uint8 *) palloc(s->inline_bytes);
         memcpy(buf, s->inline_data, s->inline_bytes);
-        s->smap = sparsemap_wrap(buf, s->inline_bytes);
+        s->smap = sm_wrap(buf, s->inline_bytes);
         if (s->smap != NULL)
-            sparsemap_open(s->smap, buf, s->inline_bytes);
+            sm_open(s->smap, buf, s->inline_bytes);
         s->served_inline = true;
         *out = s->smap;
         if (min_tid_blk) *min_tid_blk = 0;
@@ -702,9 +702,9 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sparsemap_t **out,
         copy = (uint8 *) palloc(hdr->sparsemap_bytes + 8);
         memcpy(copy, sm_bytes, hdr->sparsemap_bytes);
 
-        s->smap = sparsemap_wrap(copy, hdr->sparsemap_bytes);
+        s->smap = sm_wrap(copy, hdr->sparsemap_bytes);
         if (s->smap != NULL)
-            sparsemap_open(s->smap, copy, hdr->sparsemap_bytes);
+            sm_open(s->smap, copy, hdr->sparsemap_bytes);
         s->pinned_buf = InvalidBuffer;   /* already copied; release */
         UnlockReleaseBuffer(buf);
 
@@ -733,23 +733,23 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
                            const uint8 *inline_data, Size inline_bytes)
 {
     /*
-     * Return an OWNED sparsemap (allocated by sparsemap_create()) so the
-     * caller can safely pass it to sparsemap_union, which may need
-     * to grow via sparsemap_set_data_size.  The earlier wrap-based
+     * Return an OWNED sparsemap (allocated by sm_create()) so the
+     * caller can safely pass it to sm_union, which may need
+     * to grow via sm_set_data_size.  The earlier wrap-based
      * implementation looked correct in isolation but caused heap
      * corruption when the consumer grew the wrap'd map: the wrap'd
      * struct's m_data points at a foreign buffer, so
-     * sparsemap_set_data_size cannot in-place realloc and instead
-     * silently bumps m_capacity, after which sparsemap_add writes
+     * sm_set_data_size cannot in-place realloc and instead
+     * silently bumps m_capacity, after which sm_add writes
      * past the actual buffer.  Caught by tap/concurrency.pl.
      */
     if (inline_data != NULL)
     {
-        sparsemap_t *sm = sparsemap_create(inline_bytes + 64);
+        sparsemap_t *sm = sm_create(inline_bytes + 64);
         if (sm == NULL)
             return NULL;
-        memcpy(sparsemap_get_data(sm), inline_data, inline_bytes);
-        sparsemap_open(sm, sparsemap_get_data(sm), inline_bytes + 64);
+        memcpy(sm_get_data(sm), inline_data, inline_bytes);
+        sm_open(sm, sm_get_data(sm), inline_bytes + 64);
         return sm;
     }
 
@@ -762,15 +762,15 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             (PgTrePostingLeafHeader *) PageGetContents(page);
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
         Size    bytes = hdr->sparsemap_bytes;
-        sparsemap_t *sm = sparsemap_create(bytes + 64);
+        sparsemap_t *sm = sm_create(bytes + 64);
 
         if (sm == NULL)
         {
             UnlockReleaseBuffer(buf);
             return NULL;
         }
-        memcpy(sparsemap_get_data(sm), sm_bytes, bytes);
-        sparsemap_open(sm, sparsemap_get_data(sm), bytes + 64);
+        memcpy(sm_get_data(sm), sm_bytes, bytes);
+        sm_open(sm, sm_get_data(sm), bytes + 64);
 
         /* Phase 4.2: traverse right-link chain and union all leaves. */
         BlockNumber next_blk = hdr->right_link;
@@ -787,18 +787,18 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             Size next_bytes = next_hdr->sparsemap_bytes;
 
             /* Create a temporary sparsemap for this leaf */
-            sparsemap_t *next_sm = sparsemap_create(next_bytes + 64);
+            sparsemap_t *next_sm = sm_create(next_bytes + 64);
             if (next_sm == NULL)
             {
                 UnlockReleaseBuffer(next_buf);
                 free(sm);
                 return NULL;
             }
-            memcpy(sparsemap_get_data(next_sm), next_sm_bytes, next_bytes);
-            sparsemap_open(next_sm, sparsemap_get_data(next_sm), next_bytes + 64);
+            memcpy(sm_get_data(next_sm), next_sm_bytes, next_bytes);
+            sm_open(next_sm, sm_get_data(next_sm), next_bytes + 64);
 
             /* Union this leaf's sparsemap into the accumulator */
-            if (sparsemap_union(sm, next_sm) != 0)
+            if (sm_union(sm, next_sm) != 0)
             {
                 free(next_sm);
                 UnlockReleaseBuffer(next_buf);
@@ -815,7 +815,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
     }
 
     /* Empty posting: a 64-byte zeroed sparsemap is a valid empty map. */
-    return sparsemap_create(64);
+    return sm_create(64);
 }
 
 /*
@@ -909,21 +909,21 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
         }
 
         /* Wrap the sparsemap to test membership and compute rank. */
-        smap = sparsemap_wrap(sm_bytes, hdr->sparsemap_bytes);
+        smap = sm_wrap(sm_bytes, hdr->sparsemap_bytes);
         if (smap != NULL)
-            sparsemap_open(smap, sm_bytes, hdr->sparsemap_bytes);
-        if (!sparsemap_contains(smap, packed_tid))
+            sm_open(smap, sm_bytes, hdr->sparsemap_bytes);
+        if (!sm_contains(smap, packed_tid))
         {
             free(smap);
             UnlockReleaseBuffer(buf);
             return false;
         }
 
-        /* Compute rank: sparsemap_rank(x, y, true) returns the count of set
+        /* Compute rank: sm_rank(x, y, true) returns the count of set
          * bits from x to y INCLUSIVE.  So if packed_tid is the Nth TID
          * (0-indexed), rank will be N+1, and we need to skip N entries.
          * Hence: skip (rank - 1) entries, not rank entries. */
-        rank = sparsemap_rank(smap, 0, packed_tid, true);
+        rank = sm_rank(smap, 0, packed_tid, true);
         free(smap);
 
         /* Phase 5: payload layout:
@@ -1042,19 +1042,19 @@ pg_tre_posting_lookup_positions(Relation index,
 
         /* Wrap sparsemap */
         smap_size = hdr->payload_offset - sizeof(PgTrePostingLeafHeader);
-        smap = sparsemap_wrap((uint8 *) (hdr + 1), smap_size);
+        smap = sm_wrap((uint8 *) (hdr + 1), smap_size);
         if (smap != NULL)
-            sparsemap_open(smap, (uint8 *) (hdr + 1), smap_size);
+            sm_open(smap, (uint8 *) (hdr + 1), smap_size);
 
         /* Check if TID is present */
-        if (!sparsemap_contains(smap, packed_tid))
+        if (!sm_contains(smap, packed_tid))
         {
             UnlockReleaseBuffer(buf);
             return 0;  /* TID not in posting */
         }
 
         /* Get rank (entry index) for this TID */
-        rank = sparsemap_rank(smap, 0, packed_tid, true);
+        rank = sm_rank(smap, 0, packed_tid, true);
 
         /* Payload starts at payload_offset from page start */
         payload_base = (const uint8 *) page + hdr->payload_offset;

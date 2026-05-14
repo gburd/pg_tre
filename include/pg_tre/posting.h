@@ -15,7 +15,7 @@
  *
  * Payload:  leaf pages optionally carry, parallel to the sparsemap, a
  * per-TID payload region with (position_list, tuple_bloom_128).  The
- * payload is keyed by sparsemap_rank so lookups are O(log N) in the
+ * payload is keyed by sm_rank so lookups are O(log N) in the
  * container hierarchy of sparsemap.  Payload is optional per index
  * (reloption); Phase 5 enables it by default for text opclasses.
  */

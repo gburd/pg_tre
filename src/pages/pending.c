@@ -470,13 +470,13 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
          */
         {
             size_t cap = (size_t) e->n_tids * 16 + 1024;
-            sparsemap_t *fresh_acc = sparsemap_create(cap);
+            sparsemap_t *fresh_acc = sm_create(cap);
             if (fresh_acc == NULL)
                 ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                     errmsg("pg_tre: merge accumulator allocation failed")));
             for (k = 0; k < e->n_tids; k++)
             {
-                if (sparsemap_add(fresh_acc, e->tids[k]) == SPARSEMAP_IDX_MAX)
+                if (sm_add(fresh_acc, e->tids[k]) == SM_IDX_MAX)
                     ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("pg_tre: merge accumulator unexpectedly full")));
             }
@@ -485,7 +485,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         /*
          * Union with the existing posting (if any).  pg_tre_posting_materialize
-         * returns a palloc-backed sparsemap_t wrap; sparsemap_union returns a
+         * returns a palloc-backed sparsemap_t wrap; sm_union returns a
          * new malloc-backed sparsemap.
          */
         existing = NULL;
@@ -500,7 +500,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         if (existing != NULL)
         {
-            sparsemap_t *u = sparsemap_union(existing, merged);
+            sparsemap_t *u = sm_union(existing, merged);
             free(existing);
             free(merged);
             merged = u;
@@ -512,20 +512,20 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
          * internally, avoiding the capacity estimation issues that
          * led to heap corruption with wrapped maps.
          */
-        fresh = sparsemap_copy(merged);
+        fresh = sm_copy(merged);
         if (fresh == NULL)
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                 errmsg("pg_tre: out of memory copying sparsemap")));
 
-        sz = sparsemap_get_size(fresh);
+        sz = sm_get_size(fresh);
 
         /* Capture range now; we use it on the on-disk path below. */
-        min_idx = sparsemap_minimum(merged);
-        max_idx = sparsemap_maximum(merged);
+        min_idx = sm_minimum(merged);
+        max_idx = sm_maximum(merged);
 
         /* Copy the serialized data to a palloc'd buffer. */
         out_buf = MemoryContextAlloc(mc->mcxt, sz);
-        memcpy(out_buf, sparsemap_get_data(fresh), sz);
+        memcpy(out_buf, sm_get_data(fresh), sz);
         free(fresh);
 
         /* Decide inline vs on-disk leaf. */
@@ -544,11 +544,11 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             size_t expected = (size_t) e->n_tids * 16 + 1024;
             b = pg_tre_posting_build_begin_sized(index, e->trigram_hash,
                                                   false, expected);
-            if (sparsemap_cardinality(merged) > 0)
+            if (sm_cardinality(merged) > 0)
             {
                 for (j = min_idx; j <= max_idx; j++)
                 {
-                    if (sparsemap_contains(merged, j))
+                    if (sm_contains(merged, j))
                     {
                         ItemPointerData tid;
                         pg_tre_unpack_tid(j, &tid);
