@@ -745,11 +745,9 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
      */
     if (inline_data != NULL)
     {
-        sparsemap_t *sm = sm_create(inline_bytes + 64);
+        sparsemap_t *sm = sm_open_copy(inline_data, inline_bytes, 64);
         if (sm == NULL)
             return NULL;
-        memcpy(sm_get_data(sm), inline_data, inline_bytes);
-        sm_open(sm, sm_get_data(sm), inline_bytes + 64);
         return sm;
     }
 
@@ -762,15 +760,13 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             (PgTrePostingLeafHeader *) PageGetContents(page);
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
         Size    bytes = hdr->sparsemap_bytes;
-        sparsemap_t *sm = sm_create(bytes + 64);
+        sparsemap_t *sm = sm_open_copy(sm_bytes, bytes, 64);
 
         if (sm == NULL)
         {
             UnlockReleaseBuffer(buf);
             return NULL;
         }
-        memcpy(sm_get_data(sm), sm_bytes, bytes);
-        sm_open(sm, sm_get_data(sm), bytes + 64);
 
         /* Phase 4.2: traverse right-link chain and union all leaves. */
         BlockNumber next_blk = hdr->right_link;
@@ -786,26 +782,34 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             uint8 *next_sm_bytes = (uint8 *) next_hdr + MAXALIGN(sizeof(*next_hdr));
             Size next_bytes = next_hdr->sparsemap_bytes;
 
-            /* Create a temporary sparsemap for this leaf */
-            sparsemap_t *next_sm = sm_create(next_bytes + 64);
+            /* Materialize this leaf's sparsemap. */
+            sparsemap_t *next_sm = sm_open_copy(next_sm_bytes, next_bytes, 64);
             if (next_sm == NULL)
             {
                 UnlockReleaseBuffer(next_buf);
-                free(sm);
+                sm_free(sm);
                 return NULL;
             }
-            memcpy(sm_get_data(next_sm), next_sm_bytes, next_bytes);
-            sm_open(next_sm, sm_get_data(next_sm), next_bytes + 64);
 
-            /* Union this leaf's sparsemap into the accumulator */
-            if (sm_union(sm, next_sm) != 0)
+            /*
+             * Union next_sm into sm.  sm_union() returns a freshly
+             * allocated result map and does NOT modify either input;
+             * NULL means allocation failure.  Earlier code here
+             * inverted the success/failure check (treating non-NULL
+             * as failure), which silently dropped every leaf past
+             * the first and made multi-leaf posting trees return
+             * zero rows on lookup.
+             */
+            sparsemap_t *merged = sm_union(sm, next_sm);
+            sm_free(next_sm);
+            if (merged == NULL)
             {
-                free(next_sm);
                 UnlockReleaseBuffer(next_buf);
-                free(sm);
+                sm_free(sm);
                 return NULL;
             }
-            free(next_sm);
+            sm_free(sm);
+            sm = merged;
 
             next_blk = next_hdr->right_link;
             UnlockReleaseBuffer(next_buf);

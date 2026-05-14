@@ -4,8 +4,8 @@
 %global pgname postgresql%{pgmajor}
 
 Name:           pg_tre
-Version:        1.0.0
-Release:        0.rc1%{?dist}
+Version:        1.1.0
+Release:        1%{?dist}
 Summary:        PostgreSQL approximate-regex index access method
 
 License:        MIT AND BSD-2-Clause
@@ -44,9 +44,16 @@ export PG_CONFIG=/usr/pgsql-%{pgmajor}/bin/pg_config
 %doc README.md doc/pg_tre.md doc/perf.md
 /usr/pgsql-%{pgmajor}/lib/pg_tre.so
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre.control
+/usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.1.0.sql
+/usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.0.0--1.1.0.sql
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.0.0.sql
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre--0.1.0--1.0.0.sql
 
 %changelog
+* Thu May 14 2026 Greg Burd <greg@burd.me> - 1.1.0-1
+- Vendor sparsemap 2.2.0; adopt sm_open_copy, sm_add_grow, sm_next_member.
+- Fix multi-leaf right-link sm_union reversed-logic bug.
+- Gate tier-3 bloom and positional filter on pg_tre.tuple_bloom_enable.
+
 * Tue May 12 2026 Greg Burd <greg@burd.me> - 1.0.0-0.rc1
 - Initial release candidate.

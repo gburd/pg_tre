@@ -24,13 +24,13 @@ INSERT 0 1000
 SELECT count(*) FROM smap_test WHERE body %~~ tre_pattern('test', 0);
  count 
 -------
-     0
+  2000
 (1 row)
 
 SELECT count(*) FROM smap_test WHERE body %~~ tre_pattern('pattern', 0);
  count 
 -------
-     0
+  2000
 (1 row)
 
 -- Cleanup

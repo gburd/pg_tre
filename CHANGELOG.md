@@ -6,6 +6,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] - 2026-05-14
+
+Maintenance release.  Same on-disk format as 1.0.0; no
+re-index required.
+
+### Fixed
+
+- Multi-leaf posting trees: the right-link chain walker in
+  `pg_tre_posting_materialize` had inverted success/failure
+  logic on `sm_union` (treating the success path as failure),
+  which silently dropped every leaf past the first.  Index
+  scans on tables with any posting tree wide enough to split
+  across leaves returned only the rows from the root leaf;
+  on a 100K-row test case that meant the index returned 0
+  rows for matches that the seq-scan returned 100,000 rows
+  for.  Fixed and covered by a new differential
+  index-vs-seqscan equivalence check in
+  `test/sql/multi_leaf.sql`.
+- Per-tuple bloom (tier-3) and positional filter are now
+  gated on `pg_tre.tuple_bloom_enable`.  Both filters key
+  their per-TID payload offset off a per-leaf rank that does
+  not accumulate across right-link chains, so any TID past
+  the first leaf reads the wrong payload slot and is
+  rejected.  Until the chain-rank lookup is repaired the
+  GUC bypasses both filters; the executor recheck remains
+  authoritative for correctness.
+
+### Changed
+
+- Vendored sparsemap upgraded from 2.0.0 to 2.2.0.  v2.2.0
+  adds `sm_open_copy` (deserialize-into-fresh-buffer
+  convenience), `sm_add_grow` (auto-doubling add), allocator
+  hooks (`sm_set_allocator` / `sm_create_with_allocator`),
+  and is otherwise drop-in compatible.
+- Adopted `sm_open_copy` at every materialize site
+  (`src/pages/posting.c`), `sm_add_grow` in the overlay
+  accumulator and the tier-3 refine path
+  (`src/am/amscan.c`), and `sm_next_member` in the bitmap
+  emit loop.  The emit loop is now O(cardinality) rather
+  than O(span); on a 100K-row test the previous loop took
+  minutes, the new one returns in milliseconds.
+- `sm_union` callers in `pg_tre_posting_materialize` use
+  `sm_free` rather than `free`, matching the lineage
+  contract for sparsemap-allocated maps.
+
+### Acknowledgements
+
+- The 2.2.0 sparsemap release added the four APIs requested
+  in the integration feedback at the close of the 1.0.x
+  cycle (allocator hooks, `sm_open_copy`, `sm_add_grow`,
+  documentation of breaking-change history).
+
+---
+
 ## [1.0.0] - 2026-05-13
 
 First production release.  Native PostgreSQL 18+ index

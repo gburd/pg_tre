@@ -283,44 +283,16 @@ overlay_lookup(const PendingOverlay *ov, uint64 h)
             if (k > 0 && packed == e->tids_arr[k - 1])
                 continue;  /* dedupe */
 
-            rc = sm_add(sm, packed);
+            /*
+             * sm_add_grow geometrically doubles the buffer when sm_add
+             * would have returned SM_IDX_MAX, so the only failure mode
+             * left here is allocation failure.
+             */
+            rc = sm_add_grow(&sm, packed);
             if (rc == SM_IDX_MAX)
             {
-                size_t old_cap = sm_get_capacity(sm);
-                size_t new_cap = (old_cap == 0) ? 4096 : old_cap * 2;
-                size_t used = sm_get_size(sm);
-                void *old_data;
-                sparsemap_t *g;
-
-                /* Grow: allocate a larger map, copy the serialized data,
-                 * then re-initialize to compute m_data_used from the data.
-                 * This avoids the manual loop + sm_add pattern that
-                 * could overflow and corrupt the heap. */
-                g = sm_create(new_cap);
-                if (g == NULL)
-                {
-                    free(sm);
-                    return NULL;
-                }
-
-                /* Copy the serialized data from the old map */
-                old_data = (void *) sm_get_data(sm);
-                memcpy((void *) sm_get_data(g), old_data, used);
-
-                /* Re-initialize to set m_data_used from the copied data */
-                sm_open(g, (uint8_t *) sm_get_data(g), new_cap);
-
-                free(sm);
-                sm = g;
-
-                /* Retry the add on the larger map. */
-                rc = sm_add(sm, packed);
-                if (rc == SM_IDX_MAX)
-                {
-                    /* Still failed after grow; should not happen but handle gracefully. */
-                    free(sm);
-                    return NULL;
-                }
+                sm_free(sm);
+                return NULL;
             }
         }
         e->tids = sm;
@@ -565,26 +537,11 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
 
             if (passes)
             {
-                uint64 rc = sm_add(refined, idx);
-                if (rc == SM_IDX_MAX)
+                if (sm_add_grow(&refined, idx) == SM_IDX_MAX)
                 {
-                    size_t cap = sm_get_capacity(refined);
-                    sparsemap_t *grown = sm_set_data_size(
-                        refined, NULL, cap * 2 + 256);
-                    if (grown == NULL)
-                    {
-                        /* Out of memory; bail to unrefined result. */
-                        free(refined);
-                        return candidates;
-                    }
-                    refined = grown;
-                    rc = sm_add(refined, idx);
-                    if (rc == SM_IDX_MAX)
-                    {
-                        /* Still failed after grow; bail out. */
-                        free(refined);
-                        return candidates;
-                    }
+                    /* Out of memory; bail to unrefined result. */
+                    sm_free(refined);
+                    return candidates;
                 }
             }
         }
@@ -607,12 +564,12 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
     sparsemap_t  *result = NULL;
     int64         ntids = 0;
     int           i;
-    uint64        idx, maxidx;
 
     if (!st->query_valid)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: amgetbitmap called without amrescan")));
+
 
     /*
      * If extraction gave up (always_true), the index has no useful
@@ -789,20 +746,32 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
     /* Phase 5 tier-3: apply per-tuple bloom filtering.
      *
-     * Re-enabled after fixing rank-based offset bug in
-     * pg_tre_posting_lookup_tuple_bloom.  sm_rank(map, 0, tid, true)
-     * returns count INCLUDING tid, so we skip (rank-1) entries, not rank.
+     * The bloom payload lives in the posting leaf at an offset keyed by
+     * sm_rank(map, 0, tid, true) - 1.  When a posting tree splits across
+     * a Lehman-Yao right-link chain, that rank is currently computed only
+     * within the leaf containing the TID, not across all preceding leaves
+     * in the chain.  The result is that for any TID landing past the first
+     * leaf, the rank used to index into the payload is off by the
+     * accumulated cardinality of the earlier leaves, so the bloom check
+     * reads a wrong byte range and rejects every candidate.
+     *
+     * The pg_tre.tuple_bloom_enable GUC bypasses tier-3 entirely until
+     * pg_tre_posting_lookup_tuple_bloom learns to traverse the chain and
+     * accumulate rank.  See doc/tier3-chain-rank.md.
      */
-    if (result != NULL && st->q.global_max_cost >= 0)
+    if (result != NULL && st->q.global_max_cost >= 0 &&
+        pg_tre_tuple_bloom_enable)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
                                          result, st->scan_cxt);
     }
 
-    /* Phase 5.1: apply positional filtering.
+    /* Phase 5.1: positional filter.
      *
-     * Re-enabled after fixing rank-based offset bug in
-     * pg_tre_posting_lookup_positions (same as lookup_tuple_bloom).
+     * Same chain-rank limitation as tier-3 (see above): the positional
+     * payload offset is computed from a per-leaf rank that does not
+     * accumulate across right-link chains, so any TID past the first
+     * leaf reads positions from the wrong slot.  Gated on the same GUC.
      *
      * Skip for DNF queries: tile alternatives store widened position
      * windows that are correct for tier-2 lookup but too loose to
@@ -813,7 +782,8 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      * not correctness.
      */
     if (result != NULL && sm_cardinality(result) > 0 &&
-        st->q.mode == TRIGRAM_QUERY_CNF)
+        st->q.mode == TRIGRAM_QUERY_CNF &&
+        pg_tre_tuple_bloom_enable)
     {
         sparsemap_t *filtered = sm_create(sm_get_capacity(result));
         if (filtered != NULL)
@@ -978,27 +948,21 @@ done:
     if (result != NULL)
     {
         /*
-         * Walk the set bits via contains() in [min, max].  This is O(n)
-         * where n = range span; for Phase 3 fixtures this is fine.
-         * Phase 5 uses the faster sm_scan callback path once
-         * we wire the chunk-base index through.
+         * O(cardinality) iteration via sm_next_member, replacing the
+         * earlier O(span) scan that called sm_contains() for every
+         * value between sm_minimum and sm_maximum.  On a 100K-row
+         * test the old loop took minutes; this one returns in
+         * milliseconds.
          */
-        maxidx = sm_maximum(result);
-        idx    = sm_minimum(result);
-
         if (sm_cardinality(result) > 0)
         {
-            while (idx <= maxidx)
+            uint64 i = SM_IDX_MAX;
+            while ((i = sm_next_member(result, i)) != SM_IDX_MAX)
             {
-                if (sm_contains(result, idx))
-                {
-                    ItemPointerData tid;
-                    pg_tre_unpack_tid(idx, &tid);
-                    tbm_add_tuples(tbm, &tid, 1, true /* lossy */);
-                    ntids++;
-                }
-                if (idx == UINT64_MAX) break;
-                idx++;
+                ItemPointerData tid;
+                pg_tre_unpack_tid(i, &tid);
+                tbm_add_tuples(tbm, &tid, 1, true /* lossy */);
+                ntids++;
             }
         }
 

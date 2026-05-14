@@ -32,7 +32,9 @@ echo "==> Install"
 PG_CONFIG="$PG_CONFIG" make install >/dev/null 2>&1
 
 echo "==> Regression tests"
-PG_CONFIG="$PG_CONFIG" make localcheck 2>&1 | tee /tmp/pg_tre_check.log | grep -E "^ok|^FAIL"
+PGHOST="${PGHOST:-/home/gburd/.pgrx}" PGPORT="${PGPORT:-28818}" \
+    PG_CONFIG="$PG_CONFIG" bash scripts/run-regress.sh 2>&1 | \
+    tee /tmp/pg_tre_check.log | grep -E "^ok|^FAIL"
 if grep -q "^FAIL" /tmp/pg_tre_check.log; then
     echo "FAIL: regression tests failing" >&2
     exit 1
@@ -51,10 +53,13 @@ fi
 
 echo "==> Core benchmark (quick)"
 if [ -f bench/bench.sql ]; then
-    createdb -U "$USER" -h /tmp release_smoke 2>/dev/null || true
-    psql -U "$USER" -h /tmp -d release_smoke -X -q -f bench/bench.sql \
+    PGHOST="${PGHOST:-/home/gburd/.pgrx}" PGPORT="${PGPORT:-28818}" \
+        createdb -U "$USER" release_smoke 2>/dev/null || true
+    PGHOST="${PGHOST:-/home/gburd/.pgrx}" PGPORT="${PGPORT:-28818}" \
+        psql -U "$USER" -d release_smoke -X -q -f bench/bench.sql \
         > /tmp/pg_tre_bench.out 2>&1 || true
-    dropdb -U "$USER" -h /tmp release_smoke 2>/dev/null || true
+    PGHOST="${PGHOST:-/home/gburd/.pgrx}" PGPORT="${PGPORT:-28818}" \
+        dropdb -U "$USER" release_smoke 2>/dev/null || true
     echo "    bench output: /tmp/pg_tre_bench.out"
 fi
 
@@ -71,6 +76,6 @@ fi
 
 echo ""
 echo "==> All checks passed. Ready to tag:"
-echo "    git tag -a v1.0.0 -m 'pg_tre 1.0.0'"
-echo "    make dist          # produces pg_tre-1.0.0.tar.gz"
+echo "    git tag -a v1.1.0 -m 'pg_tre 1.1.0'"
+echo "    make dist          # produces pg_tre-1.1.0.tar.gz"
 echo ""

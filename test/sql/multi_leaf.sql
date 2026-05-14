@@ -86,6 +86,44 @@ SET enable_indexscan = on;
 SET enable_bitmapscan = on;
 SET enable_seqscan = on;
 
+-- Differential equivalence check: index scan and seq-scan must agree on
+-- every row.  This catches regressions like the multi-leaf right-link
+-- chain bug where index scans silently returned a subset of the heap
+-- match-set.  We compare the full id sets, not just COUNT(*), so a
+-- spurious-match regression also fails.
+SET enable_seqscan = off;
+CREATE TEMP TABLE multi_leaf_idx_ids AS
+    SELECT id FROM multi_leaf_test
+    WHERE body %~~ tre_pattern('the', 0);
+
+SET enable_seqscan = on;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+CREATE TEMP TABLE multi_leaf_seq_ids AS
+    SELECT id FROM multi_leaf_test
+    WHERE body %~~ tre_pattern('the', 0);
+
+SET enable_indexscan = on;
+SET enable_bitmapscan = on;
+
+SELECT
+    (SELECT COUNT(*) FROM multi_leaf_idx_ids) AS idx_rows,
+    (SELECT COUNT(*) FROM multi_leaf_seq_ids) AS seq_rows,
+    (SELECT COUNT(*) FROM multi_leaf_idx_ids) =
+        (SELECT COUNT(*) FROM multi_leaf_seq_ids)
+    AS counts_agree,
+    NOT EXISTS (
+        SELECT 1 FROM multi_leaf_idx_ids EXCEPT
+        SELECT 1 FROM multi_leaf_seq_ids
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM multi_leaf_seq_ids EXCEPT
+        SELECT 1 FROM multi_leaf_idx_ids
+    ) AS row_sets_agree;
+
+DROP TABLE multi_leaf_idx_ids;
+DROP TABLE multi_leaf_seq_ids;
+
 -- REINDEX test: drop and rebuild the index to verify multi-leaf rebuild.
 REINDEX INDEX multi_leaf_idx;
 

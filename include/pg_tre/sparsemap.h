@@ -140,13 +140,87 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "2.0.0"
+#define SM_VERSION_STRING "2.2.0"
 #define SM_VERSION_MAJOR  2
-#define SM_VERSION_MINOR  0
+#define SM_VERSION_MINOR  2
 #define SM_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */
 typedef struct sparsemap sparsemap_t;
+
+/** @brief Custom allocator hooks.
+ *
+ * Sparsemap allocates memory in three places: at construction time
+ * (sm_create / sm_wrap / sm_owned_copy / sm_union / etc.), at grow
+ * time (sm_set_data_size, sm_*_inplace, sm_*_grow), and at free time.
+ *
+ * Embedders that need to route those allocations through a custom
+ * allocator (e.g. PostgreSQL's palloc / pfree, embedded allocators,
+ * arena allocators) can supply a sm_allocator_t.  Two scopes:
+ *
+ *   sm_set_allocator(hooks)             process-wide default; affects
+ *                                       every sparsemap created without
+ *                                       an explicit override.  Pass an
+ *                                       all-zero struct to revert to
+ *                                       libc malloc/free.
+ *
+ *   sm_create_with_allocator(n, hooks)  per-map override; the supplied
+ *                                       hooks are copied into the map
+ *                                       and used for every allocation
+ *                                       on this map.  Maps derived from
+ *                                       it (sm_copy, sm_union, etc.)
+ *                                       inherit the same allocator.
+ *
+ * Contract for the hook implementations:
+ *
+ *   - alloc(n, aux): return a pointer to at least `n` bytes of
+ *     uninitialized memory, or NULL on failure.
+ *   - alloc_zero(n, aux): return at least `n` bytes of *zero-filled*
+ *     memory, or NULL on failure.  Optional: if NULL, sparsemap
+ *     falls back to alloc() + memset(0).  Implement separately when
+ *     your allocator can deliver zeroed memory cheaply (e.g.
+ *     mmap(MAP_ANONYMOUS), kernel page allocator, calloc).
+ *   - realloc(p, n, aux): grow or shrink an existing allocation; return
+ *     the (possibly relocated) pointer or NULL on failure.  p == NULL
+ *     is equivalent to alloc(n, aux).
+ *   - free(p, aux): release an allocation made by alloc/realloc.  Must
+ *     accept p == NULL as a no-op.
+ *   - aligned_alloc / aligned_free: reserved for future SIMD work.
+ *     Not invoked by any 2.2.x code path.
+ *
+ * Any individual function pointer may be NULL; sparsemap falls back
+ * to the libc equivalent for that operation.  An all-zero struct
+ * therefore means "use libc throughout".
+ */
+typedef struct sm_allocator {
+    void *(*alloc)        (size_t n, void *aux);
+    void *(*alloc_zero)   (size_t n, void *aux);
+    void *(*realloc)      (void *p, size_t n, void *aux);
+    void  (*free)         (void *p, void *aux);
+    /* Aligned-allocation slots, reserved for future SIMD work.  Not
+     * exercised by any 2.2.x code path — the regular alloc/realloc
+     * already hand back 8-byte-aligned blocks, which is what every
+     * current sparsemap operation needs.  Provide them now so the
+     * struct shape is stable when SIMD lands; the scalar paths
+     * ignore them.  When implemented, semantics will match C11
+     * aligned_alloc(): `alignment` is a power of two, `n` must be a
+     * multiple of `alignment`. */
+    void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
+    void  (*aligned_free) (void *p, void *aux);
+    void  *aux;
+} sm_allocator_t;
+
+/** @brief Set the process-wide default allocator hooks.
+ *
+ * Affects every sparsemap created subsequently without an explicit
+ * override.  Pass an all-zero struct (e.g. `(sm_allocator_t){0}`) to
+ * reset to libc malloc/realloc/free.  Not thread-safe; intended for
+ * one-shot library initialization.
+ *
+ * The struct is taken by value and copied into a static.  The
+ * caller's copy can go out of scope safely.
+ */
+void sm_set_allocator(sm_allocator_t a);
 
 /** Sentinel value returned when a lookup finds no matching bit. */
 #define SM_IDX_MAX UINT64_MAX
@@ -180,6 +254,22 @@ typedef struct sparsemap sparsemap_t;
  * @endcode
  */
 sparsemap_t *sm_create(size_t size);
+
+/** @brief Allocate a sparsemap with a per-map allocator override.
+ *
+ * Use this when you want a specific allocator for one or a few maps
+ * and the rest of the process can keep using the default.  Pass an
+ * all-zero struct (e.g. `(sm_allocator_t){0}`) to fall back to the
+ * global default (set via sm_set_allocator) — in that case the map
+ * snapshots the global allocator at creation time and uses it for
+ * the lifetime of the map regardless of subsequent sm_set_allocator
+ * calls.
+ *
+ * The hook struct is taken by value and copied into the map.  The
+ * caller's copy can go out of scope safely.  Maps derived from this
+ * one (sm_copy, sm_union, sm_xor, etc.) inherit the same allocator.
+ */
+sparsemap_t *sm_create_with_allocator(size_t size, sm_allocator_t a);
 
 /** @brief Deprecated alias for sm_create().
  *
@@ -287,6 +377,28 @@ void sm_init(sparsemap_t *map, uint8_t *data, size_t size);
  * @param[in]     size  Total capacity of \a data in bytes.
  */
 void sm_open(sparsemap_t *map, uint8_t *data, size_t size);
+
+/** @brief Allocate a fresh map and deserialize raw on-disk bytes into it.
+ *
+ * Convenience for the common pattern:
+ *
+ *     sparsemap_t *m = sm_create(n + slack);
+ *     memcpy(sm_get_data(m), data, n);
+ *     sm_open(m, sm_get_data(m), n + slack);
+ *     // m_alloc_kind ends up SM_WRAPPED; restore SM_OWNED_CONTIGUOUS
+ *     // because the buffer is in fact contiguous with the struct.
+ *
+ * Returns an SM_OWNED_CONTIGUOUS map of capacity `n + slack` whose
+ * first `n` bytes are a copy of `data`.  `slack` is grow-room for
+ * subsequent insertions; pass 0 if you only intend to read from the
+ * result.
+ *
+ * @param[in] data   Pointer to serialized bytes.
+ * @param[in] n      Number of valid bytes at `data`.
+ * @param[in] slack  Extra capacity bytes to allocate beyond `n`.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ */
+sparsemap_t *sm_open_copy(const uint8_t *data, size_t n, size_t slack);
 
 /** @brief Reset the map to empty without freeing memory.
  *
@@ -432,6 +544,30 @@ uint64_t sm_assign(sparsemap_t *map, uint64_t idx, bool value);
  * @endcode
  */
 uint64_t sm_add(sparsemap_t *map, uint64_t idx);
+
+/** @brief Add a bit, growing the map's buffer geometrically if needed.
+ *
+ * Convenience for the common pattern:
+ *
+ *     uint64_t rc = sm_add(m, idx);
+ *     if (rc == SM_IDX_MAX) {
+ *         sparsemap_t *grown = sm_set_data_size(m, NULL,
+ *                                                sm_get_capacity(m) * 2);
+ *         if (!grown) { sm_free(m); return NULL; }
+ *         m = grown;
+ *         rc = sm_add(m, idx);
+ *     }
+ *
+ * On ENOSPC, doubles the buffer (with a 4 KiB floor) and retries.
+ * If the grow succeeds but the retry still ENOSPCs, returns
+ * SM_IDX_MAX and leaves *map valid (and possibly grown).
+ *
+ * @param[in,out] map  Pointer to the map pointer.  Updated to the
+ *                     possibly-relocated map after a grow.
+ * @param[in]     idx  Bit to set.
+ * @returns idx on success, or SM_IDX_MAX on allocation failure.
+ */
+uint64_t sm_add_grow(sparsemap_t **map, uint64_t idx);
 
 /** @brief Clear the bit at \a idx (set to 0).
  *

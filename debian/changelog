@@ -1,3 +1,17 @@
+pg_tre (1.1.0-1) unstable; urgency=medium
+
+  * Vendor sparsemap 2.2.0 (drop-in compatible upgrade from 2.0.0).
+  * Adopt sparsemap's allocator-friendly APIs: sm_open_copy,
+    sm_add_grow, sm_next_member.
+  * Fix multi-leaf right-link sm_union reversed-logic bug that
+    silently dropped every leaf past the first.  Same on-disk
+    format as 1.0.0; no re-index required.
+  * Gate per-tuple bloom and positional filter on
+    pg_tre.tuple_bloom_enable until the chain-rank lookup is
+    repaired; executor recheck remains authoritative.
+
+ -- Greg Burd <greg@burd.me>  Thu, 14 May 2026 10:00:00 +0000
+
 pg_tre (1.0.0-1) unstable; urgency=medium
 
   * Initial release candidate.

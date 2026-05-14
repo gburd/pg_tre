@@ -1,8 +1,14 @@
 # pg_tre status
 
-Released: **1.0.0** (2026-05).  See `CHANGELOG.md` for the full
+Released: **1.1.0** (2026-05).  See `CHANGELOG.md` for the full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+1.1.0 is a maintenance release on the 1.0.0 lineage: same
+on-disk format, same SQL surface, no re-index required.
+It picks up sparsemap 2.2.0 and fixes the multi-leaf
+right-link `sm_union` reversed-logic bug that silently
+dropped every leaf past the first.
 
 ## What ships in 1.0.0
 
@@ -52,10 +58,27 @@ file tracks against.
 - Dependabot (GitHub) and Renovate (Codeberg) for
   dependency updates.
 
-## v1.1 followups
+## v1.2 followups
 
-These are real engineering deliverables, not bugs in 1.0.0.
+These are real engineering deliverables, not bugs in 1.1.0.
 
+- Tier-3 per-tuple bloom and positional filter across
+  multi-leaf chains.  The payload offset for both filters is
+  computed from a per-leaf rank that does not accumulate
+  across right-link chains; until that lookup is repaired,
+  `pg_tre.tuple_bloom_enable` bypasses both filters.
+  Executor recheck stays authoritative for correctness; the
+  filters are CPU optimizations.
+- Migrate the remaining `sm_create + sm_add` build-path
+  loops to `sm_add_grow` and the in-place set-op variants
+  (`sm_union_inplace` etc.) added in sparsemap 2.0/2.2.
+- PostgreSQL palloc allocator hook.  Sparsemap 2.2.0 added
+  `sm_set_allocator` / `sm_create_with_allocator`; routing
+  every sparsemap allocation through palloc + memory
+  contexts would let pg_tre delete its explicit `sm_free`
+  call-sites and let context teardown handle lifetime.
+  The threading question (build-time vs query-time vs DSM)
+  needs design work first.
 - Parallel index scan (`amcanparallel = true`).  Bitmap heap
   scans built from a pg_tre index already parallelize on
   the heap side; AM-side parallelism is the gap.

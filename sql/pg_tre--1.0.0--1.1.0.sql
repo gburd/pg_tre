@@ -1,0 +1,14 @@
+-- pg_tre 1.0.0 -> 1.1.0 upgrade.
+--
+-- 1.1.0 is a same-on-disk-format release: the index AM, page layouts,
+-- WAL records, and SQL surface are byte-identical to 1.0.0.  The
+-- changes are all under the hood:
+--
+--   * vendored sparsemap 2.0.0 -> 2.2.0
+--   * adopted sparsemap's allocator-friendly APIs (sm_open_copy,
+--     sm_add_grow, sm_next_member)
+--   * fixed the multi-leaf right-link sm_union reversed-logic bug
+--     that silently dropped every leaf past the first
+--
+-- No re-index required.  Existing 1.0.0 indexes work as-is.
+-- Nothing to do at the SQL level; the version bump is bookkeeping.
