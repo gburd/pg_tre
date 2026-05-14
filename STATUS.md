@@ -1,12 +1,17 @@
 # pg_tre status
 
-Released: **1.1.0** (2026-05).  See `CHANGELOG.md` for the full
+Released: **1.1.1** (2026-05).  See `CHANGELOG.md` for the full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-1.1.0 is a maintenance release on the 1.0.0 lineage: same
+1.1.1 is a hardening release on the 1.1.0 lineage: vendored
+sparsemap 2.2.0 → 2.3.0 (defensive bounds checks against
+corrupt input), no on-disk format changes, no re-index
+required.
+
+1.1.0 was a maintenance release on the 1.0.0 lineage: same
 on-disk format, same SQL surface, no re-index required.
-It picks up sparsemap 2.2.0 and fixes the multi-leaf
+It picked up sparsemap 2.2.0 and fixed the multi-leaf
 right-link `sm_union` reversed-logic bug that silently
 dropped every leaf past the first.
 

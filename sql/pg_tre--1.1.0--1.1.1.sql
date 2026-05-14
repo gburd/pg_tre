@@ -1,0 +1,11 @@
+-- pg_tre 1.1.0 -> 1.1.1 upgrade.
+--
+-- 1.1.1 is a sparsemap-hardening release.  No on-disk format
+-- changes, no SQL surface changes, no AM behavior changes on
+-- well-formed indexes.  The vendored sparsemap goes from 2.2.0
+-- to 2.3.0, which adds bounds-clamping in the chunk walker, NULL
+-- tolerance in sm_contains, and a UBSan-clean fix in the
+-- diagnostic path.
+--
+-- No re-index required.  Existing 1.1.0 indexes work as-is.
+-- Nothing to do at the SQL level; the version bump is bookkeeping.

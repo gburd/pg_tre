@@ -1,3 +1,13 @@
+pg_tre (1.1.1-1) unstable; urgency=medium
+
+  * Vendor sparsemap 2.3.0 (drop-in compatible upgrade from 2.2.0).
+    Hardening-only release: bounds clamping in __sm_chunk_get_position
+    and sm_contains, bounds-safe chunk walker in __sm_get_size_impl,
+    NULL tolerance in sm_contains, UBSan fix in the diagnostic path.
+  * No on-disk format changes; no re-index required.
+
+ -- Greg Burd <greg@burd.me>  Thu, 14 May 2026 14:00:00 +0000
+
 pg_tre (1.1.0-1) unstable; urgency=medium
 
   * Vendor sparsemap 2.2.0 (drop-in compatible upgrade from 2.0.0).

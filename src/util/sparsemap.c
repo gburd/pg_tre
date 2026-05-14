@@ -715,6 +715,18 @@ __sm_chunk_calc_vector_size(const uint8_t b)
 static inline __attribute__((always_inline)) size_t
 __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 {
+  /* Defense-in-depth: callers compute `bv` as `idx / SM_BITS_PER_VECTOR`
+   * after subtracting the chunk's start offset; on a corrupt buffer
+   * (sm_open of attacker-controlled bytes) the start offset can be
+   * wildly wrong, making `bv` arbitrarily large.  Clamp to the
+   * physical chunk capacity so the loop below never walks past the
+   * 8-byte header word.  Returning 0 here causes the caller to read
+   * chunk->m_data[1] which is also bounded by the chunk_size that
+   * __sm_get_size_impl validated. */
+  if (bv >= SM_FLAGS_PER_INDEX) {
+    return 0;
+  }
+
   /* Handle 4 indices (1 byte) at a time. */
   size_t position = 0;
   register uint8_t *p = (uint8_t *)chunk->m_data;
@@ -908,6 +920,13 @@ __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
     if (idx < __sm_chunk_rle_get_length(chunk)) {
       return true;
     }
+    return false;
+  }
+  /* Defense-in-depth: on a corrupt buffer (attacker-controlled
+   * chunk start offset) the caller's `idx - start` can wrap to a
+   * value way beyond SM_CHUNK_MAX_CAPACITY.  Reject those without
+   * trying to compute `bv`. */
+  if (idx >= SM_CHUNK_MAX_CAPACITY) {
     return false;
   }
   /* in which __sm_bitvec_t is |idx| stored? */
@@ -1623,25 +1642,69 @@ __sm_get_chunk_aligned_offset(const size_t idx)
  *
  * @param[in] map Pointer to the sparse map.
  * @return Total size of the used data in the sparse map.
+ *
+ * Bounds-safe: when called on a possibly-corrupt buffer (after
+ * sm_open) the walker validates each chunk against m_capacity and
+ * truncates the on-disk chunk count if any chunk would extend past
+ * the buffer.  The returned size therefore corresponds to the
+ * largest valid chunk-stream prefix; if the input is
+ * well-formed, behavior is unchanged.
  */
+static void __sm_set_chunk_count(const sparsemap_t *map, size_t new_count);
+
 static size_t
 __sm_get_size_impl(const sparsemap_t *map)
 {
   uint8_t *start = __sm_get_chunk_data(map, 0);
   uint8_t *p = start;
+  uint8_t *end = map->m_data + map->m_capacity;
+
+  /* Defensive: a chunk-data start outside the data buffer means the
+   * map header itself is corrupt.  Return the empty-map size. */
+  if (start < map->m_data || start > end) {
+    return SM_SIZEOF_OVERHEAD;
+  }
 
   const size_t count = __sm_get_chunk_count(map);
+  size_t valid_count = 0;
   for (size_t i = 0; i < count; i++) {
+    /* Each chunk needs at least SM_SIZEOF_OVERHEAD bytes for its
+     * aligned-offset prefix plus sizeof(__sm_bitvec_t) bytes for the
+     * mandatory chunk header word.  If less remains, the on-disk
+     * count is bogus. */
+    if ((size_t)(end - p) < SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)) {
+      break;
+    }
     p += SM_SIZEOF_OVERHEAD;
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p);
     const size_t chunk_size = __sm_chunk_get_size(&chunk);
+    /* __sm_chunk_get_size returns at minimum sizeof(__sm_bitvec_t).
+     * A chunk that claims to extend past `end` indicates corrupt
+     * flags; stop walking. */
+    if (chunk_size < sizeof(__sm_bitvec_t) || (size_t)(end - p) < chunk_size) {
+      /* Roll back the SM_SIZEOF_OVERHEAD we just advanced; we want
+       * to report the size up to the last *complete* chunk. */
+      p -= SM_SIZEOF_OVERHEAD;
+      break;
+    }
     if (i + 1 < count) {
       __builtin_prefetch(p + chunk_size + SM_SIZEOF_OVERHEAD, 0, 1);
     }
     p += chunk_size;
+    valid_count++;
   }
-  return SM_SIZEOF_OVERHEAD + p - start;
+
+  /* If the walker truncated, fix up the on-disk chunk count so
+   * subsequent operations see only the valid prefix.  This is the
+   * only place we mutate the map during what is logically a
+   * read; the const cast is intentional and the mutation is safe
+   * (we're correcting attacker-controlled corruption to a
+   * consistent, harmless state). */
+  if (valid_count != count) {
+    __sm_set_chunk_count((sparsemap_t *)map, valid_count);
+  }
+  return SM_SIZEOF_OVERHEAD + (p - start);
 }
 
 /**
@@ -2846,6 +2909,13 @@ sm_get_capacity(const sparsemap_t *map)
 __attribute__((hot)) bool
 sm_contains(sparsemap_t *map, uint64_t idx)
 {
+  /* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
+   * cheap insurance for consumers that pass the result of
+   * sm_intersection / sm_difference / sm_xor unchecked, which
+   * legitimately return NULL when the result is empty. */
+  if (map == NULL) {
+    return false;
+  }
   __sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
   /* Get the __sm_chunk_t which manages this index */
@@ -2905,6 +2975,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
   if ((ssize_t)offset == -1) {
     /* There are no chunks in the map, there is nothing to clear, this is a
      * no-op. */
+    offset = SM_IDX_MAX;  /* gate coalesce off; chunk is uninitialized */
     goto done;
   }
 
@@ -2922,6 +2993,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
     /* Our search resulted in the first chunk that starts after the index but
      * that means there is no chunk that contains this index, so again this is
      * a no-op. */
+    offset = SM_IDX_MAX;  /* gate coalesce off; chunk is uninitialized */
     goto done;
   }
 
@@ -2934,6 +3006,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
      * Our search resulted in a chunk however it's capacity doesn't encompass
      * this index, so again a no-op.
      */
+    offset = SM_IDX_MAX;  /* gate coalesce off; chunk untouched */
     goto done;
   }
 
@@ -6685,7 +6758,11 @@ _qcc_format_chunk(const __sm_idx_t start, const __sm_chunk_t *chunk, const bool 
     char desc_str[(2 * SM_FLAGS_PER_INDEX + 1) * sizeof(wchar_t)] = { 0 };
     char *str = desc_str;
     int mixed = 0;
-    for (int i = 1; i <= SM_FLAGS_PER_INDEX; i++) {
+    /* Loop bound: i in [0, SM_FLAGS_PER_INDEX).  The original
+     * `i <= SM_FLAGS_PER_INDEX` shifted by 2 * 32 = 64, which is UB
+     * on a 64-bit type and tripped UBSan when the diagnostic code
+     * fired on a property-test failure. */
+    for (int i = 0; i < SM_FLAGS_PER_INDEX; i++) {
       const uint8_t flag = SM_CHUNK_GET_FLAGS(desc, i);
       switch (flag) {
       case SM_PAYLOAD_NONE:

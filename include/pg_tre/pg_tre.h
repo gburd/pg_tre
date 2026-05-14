@@ -18,7 +18,7 @@
 #define PG_TRE_FORMAT_VERSION 3
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.1.0"
+#define PG_TRE_VERSION_STRING "pg_tre 1.1.1"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;

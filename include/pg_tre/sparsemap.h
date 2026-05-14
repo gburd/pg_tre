@@ -140,9 +140,9 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "2.2.0"
+#define SM_VERSION_STRING "2.3.0"
 #define SM_VERSION_MAJOR  2
-#define SM_VERSION_MINOR  2
+#define SM_VERSION_MINOR  3
 #define SM_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */

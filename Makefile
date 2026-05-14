@@ -16,7 +16,7 @@
 
 EXTENSION    = pg_tre
 MODULE_big   = pg_tre
-DATA         = sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql
+DATA         = sql/pg_tre--1.1.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql
 DATA_built   =
 REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8
 REGRESS_OPTS = --inputdir=test --outputdir=test
@@ -158,7 +158,7 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # ------------------------------------------------------------------
 # Release tarball
 # ------------------------------------------------------------------
-PG_TRE_VERSION = 1.1.0
+PG_TRE_VERSION = 1.1.1
 DIST_NAME      = pg_tre-$(PG_TRE_VERSION)
 
 dist:

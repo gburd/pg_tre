@@ -6,6 +6,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.1] - 2026-05-14
+
+Hardening release.  Same on-disk format as 1.1.0; no re-index
+required.
+
+### Changed
+
+- Vendored sparsemap upgraded from 2.2.0 to 2.3.0.  v2.3.0 is
+  defensive-bounds-checking only; the on-disk byte layout, public
+  API, and behavior on well-formed input are byte-identical to
+  2.2.0.  Specifically:
+
+  * `__sm_chunk_get_position` clamps `bv` to the physical chunk
+    capacity so an `sm_open` of attacker-controlled bytes with a
+    wildly-wrong start offset can no longer walk past the chunk
+    header word.
+  * `sm_contains` rejects indices >= `SM_CHUNK_MAX_CAPACITY`
+    instead of computing a wrapped `bv`, and now returns false
+    on a NULL map (cheap insurance for callers passing the
+    result of `sm_intersection` / `sm_difference` / `sm_xor`
+    unchecked, which legitimately return NULL on empty results).
+  * `__sm_get_size_impl` now walks chunks bounds-safely against
+    `m_capacity`, truncating the on-disk chunk count to the
+    largest valid prefix when a chunk would extend past the
+    buffer.  Behavior is unchanged on well-formed input; the
+    walker matters only when sparsemap consumes a corrupt buffer.
+  * Stub coalesce paths in `sm_remove` initialize `offset =
+    SM_IDX_MAX` so the no-op branches don't read uninitialized
+    chunk metadata.
+  * UBSan-clean fix in the diagnostic chunk-formatter (loop bound
+    was off-by-one and shifted by 64 on a 64-bit value).
+
+  None of these are observable from pg_tre under correct
+  operation.  They harden sparsemap against corrupt or malicious
+  input.
+
+---
+
 ## [1.1.0] - 2026-05-14
 
 Maintenance release.  Same on-disk format as 1.0.0; no
