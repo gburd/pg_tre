@@ -559,6 +559,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             {
                 for (j = min_idx; j <= max_idx; j++)
                 {
+                    CHECK_FOR_INTERRUPTS();
                     if (sm_contains(merged, j))
                     {
                         ItemPointerData tid;
