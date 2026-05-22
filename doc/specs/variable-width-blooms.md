@@ -4,13 +4,14 @@
 
 **Owner:** unassigned.
 
-**Prerequisite:** ~~multi-leaf chain-rank repair~~ —
-struct-vs-bytes bloom-header fix landed in 1.2.1.  Tier-3
-works correctly on posting-tree candidates at all scales.
-A residual pending-overlay regression keeps
-`pg_tre.tuple_bloom_enable` default at `false`; once that's
-resolved, variable-width blooms become an incremental size
-optimization on top of working tier-3.
+**Prerequisite:** ~~multi-leaf chain-rank repair~~ — fully
+resolved in 1.2.3.  The struct-vs-bytes bloom-header fix
+(1.2.2) plus the pending-overlay positional-filter fix
+(1.2.3) close out the long-running tier-3 bypass.  Tier-3
+is on by default and works correctly across single-leaf,
+multi-leaf, and pending-overlay code paths.  Variable-width
+blooms are now an incremental size optimization on top of
+working tier-3.
 
 ## Problem
 

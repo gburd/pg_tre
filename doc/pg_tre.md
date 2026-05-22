@@ -286,7 +286,7 @@ WITH (
   pending_list_limit = 4096,      -- Pending list size in KiB (default: 4096)
   bloom_tuple_bits = 128,         -- Per-tuple bloom size (default: 128)
   range_size_blocks = 128,        -- Blocks per range entry (default: 128)
-  tuple_bloom_enable = false      -- Enable tier-3 blooms (default: false; see note)
+  tuple_bloom_enable = true       -- Enable tier-3 blooms (default: true)
 );
 ```
 
@@ -299,13 +299,16 @@ WITH (
 **range_size_blocks:** Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.
 
 **tuple_bloom_enable:** Per-tuple bloom and positional filter
-(tier-3).  **Default: false** in 1.1.x and 1.2.x.  The 1.2.1
-release fixed a long-standing struct-vs-bytes bug in the scan-
-side bloom check (was masquerading as a "chain-rank lookup"
-issue), but a residual pending-overlay regression keeps the
-default at `false` until v1.3.  Setting `on` works correctly
-for stable workloads (no recent INSERTs / pending list
-flushed); avoid for write-heavy fastupdate workloads.
+(tier-3).  **Default: true** in 1.2.3 and later.  When enabled,
+the candidate set from tier-2 is refined per-row using a
+128-bit bloom of the row's distinct trigrams; rows whose
+blooms don't contain a required query trigram are dropped
+before the executor recheck.  History: 1.1.x and 1.2.0 kept
+this off due to a struct-vs-bytes bug in the scan-side bloom
+check; the bug was identified in 1.2.2 and the residual
+pending-overlay interaction was fixed in 1.2.3.  Disable only
+if you've measured no benefit for your workload (the storage
+overhead is ~16 bytes per row plus the upper-tree bookkeeping).
 
 ### GUCs (Configuration Variables)
 
@@ -335,7 +338,7 @@ SET pg_tre.pending_list_limit = 4096;    -- KiB
 SET pg_tre.range_size_blocks = 128;      -- heap blocks
 SET pg_tre.bloom_tuple_bits = 128;       -- bits
 SET pg_tre.fastupdate = true;
-SET pg_tre.tuple_bloom_enable = false;   -- 1.2.x default
+SET pg_tre.tuple_bloom_enable = true;    -- 1.2.3 default
 ```
 
 Context: `PGC_USERSET` (can set per-session), except `range_size_blocks` and `bloom_tuple_bits` are `PGC_SIGHUP` (require reload).

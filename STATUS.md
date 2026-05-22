@@ -1,10 +1,10 @@
 # pg_tre status
 
-Released: **1.2.3-dev** (2026-05).  See `CHANGELOG.md` for full
+Released: **1.2.3** (2026-05).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-1.2.2 is a patch release on the 1.0.0 lineage: same on-disk
+1.2.3 is a patch release on the 1.0.0 lineage: same on-disk
 format, no re-index required.  Headline additions:
 
 - **Similarity ranking** — `tre_distance(text, tre_pattern)`,
@@ -13,16 +13,13 @@ format, no re-index required.  Headline additions:
   for BM25 ranking.  Use
   `WHERE body %~~ pattern ORDER BY body <@> pattern ASC LIMIT N`
   to return the N closest matches.
-- **Tier-3 per-tuple bloom — partial fix.**  The
-  struct-vs-bytes mismatch in the scan-side bloom check
-  (root cause of the long-standing "chain-rank lookup"
-  followup) is fixed.  Tier-3 works correctly on
-  posting-tree candidates at all scales.  A separate
-  pending-overlay regression surfaced during the
-  investigation: pending-list TIDs are still incorrectly
-  rejected when tier-3 is on, so the GUC default stays at
-  `false` for 1.2.1.  Setting it to `on` post-VACUUM (when
-  pending is flushed) works correctly.
+- **Tier-3 per-tuple bloom — fully restored to default ON
+  in 1.2.3.**  The struct-vs-bytes mismatch (1.2.2) plus the
+  pending-overlay positional-filter fix (1.2.3) close out the
+  long-running "chain-rank lookup repair" followup.  Tier-3
+  works correctly across single-leaf, multi-leaf, and
+  pending-overlay code paths at all tested scales (50 / 5K /
+  100K rows).
 - **WAL replay correctness** — three real bugs in our custom
   rmgr's redo path were caught by the new
   `test/scripts/replication.sh` and fixed (loop bound off by
@@ -49,7 +46,7 @@ format, no re-index required.  Headline additions:
 plus a multi-leaf right-link `sm_union` reversed-logic fix
 that silently dropped every leaf past the first.
 
-## What ships in 1.2.2
+## What ships in 1.2.3
 
 ### Storage and recovery
 
@@ -86,10 +83,11 @@ that silently dropped every leaf past the first.
   `pg_tre.max_extraction_fanout`, `pg_tre.max_nfa_states`,
   `pg_tre.compile_timeout_ms`, `pg_tre.match_timeout_ms`,
   `pg_tre.fastupdate`, `pg_tre.tuple_bloom_enable`.
-- `pg_tre.tuple_bloom_enable = false` by default: the tier-3
-  per-tuple bloom and positional filter are gated until the
-  chain-rank lookup is repaired (v1.3 followup).  Recheck
-  remains authoritative for correctness.
+- `pg_tre.tuple_bloom_enable = true` by default (1.2.3+):
+  the tier-3 per-tuple bloom and positional filter run
+  routinely.  The 1.2.2 bloom-header fix and the 1.2.3
+  pending-overlay fix together resolved the long-running
+  bypass.  Recheck remains authoritative for correctness.
 - Reloptions: `bloom_tuple_bits`, `range_size_blocks`,
   `fastupdate`, `tuple_bloom_enable`, `pending_list_limit`.
 
@@ -120,15 +118,14 @@ Pre-tag gate: `scripts/release-check.sh`.
 
 ## v1.3 followups
 
-- ~~Fix the chain-rank lookup~~ — **root cause fixed in
-  1.2.1.**  The struct-vs-bytes mismatch in the scan-side
-  bloom check that has been masquerading as a "chain-rank"
-  issue is now fixed; tier-3 works correctly on
-  posting-tree candidates at all scales.  Multi-leaf chain
-  walking and per-leaf rank computation were already
-  correct.  A residual pending-overlay regression remains
-  (pending-list TIDs are rejected when tier-3 is on), so
-  the GUC default stays at `false` until that's resolved.
+- ~~Fix the chain-rank lookup~~ — **fully resolved in 1.2.3.**
+  Two-part fix: 1.2.2 corrected a struct-vs-bytes mismatch in
+  the scan-side bloom check; 1.2.3 corrected a positional-
+  filter bug that dropped pending-list-only TIDs.  Tier-3 is
+  back on by default and tested across single-leaf,
+  multi-leaf, and pending-overlay code paths.  Multi-leaf
+  chain walking and per-leaf rank computation were already
+  correct.
 - **Inline-data scan-path bug** discovered while tuning
   `PG_TRE_INLINE_POSTING_MAX` in 1.2.1 (and reverted to
   256 for that release).  Two regressions appear at
@@ -143,9 +140,11 @@ Pre-tag gate: `scripts/release-check.sh`.
   Fix unlocks raising the threshold to 1024+ bytes for
   significant size reduction on sparse-trigram corpora.
 - Variable-width per-tuple blooms (see
-  `doc/specs/variable-width-blooms.md`).  Depends on the
-  chain-rank repair landing first.  Yields ~70-80%
-  per-tuple-bloom payload reduction on short-text corpora.
+  `doc/specs/variable-width-blooms.md`).  Tier-3 chain-rank
+  prerequisite is now resolved (1.2.3); variable-width
+  becomes an incremental size optimization on top of
+  working tier-3.  Yields ~70-80% per-tuple-bloom payload
+  reduction on short-text corpora.
 - Delta-aware WAL redo so we can drop `REGBUF_FORCE_IMAGE`
   and only ship FPIs as a fallback.  Today every WAL record
   carries a full-page image of every modified buffer, which
@@ -182,8 +181,9 @@ Pre-tag gate: `scripts/release-check.sh`.
   are false today; `CREATE INDEX CONCURRENTLY` works
   through standard PG machinery and does not require
   `amcanbuildparallel`.
-- Multi-leaf chain-rank repair so tier-3 / positional
-  filters work across right-link chains.
+- ~~Multi-leaf chain-rank repair~~ — **resolved in 1.2.3**
+  (was a struct-vs-bytes bloom-header bug + a positional-
+  filter bug, not a chain-rank issue).
 - Whole-tree `clang-format` reformat (deferred to keep
   git-blame useful for legacy code).
 - PG17 support in CI matrix (codebase currently uses

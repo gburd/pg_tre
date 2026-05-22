@@ -16,8 +16,8 @@
 
 EXTENSION    = pg_tre
 MODULE_big   = pg_tre
-DATA         = sql/pg_tre--1.2.3-dev.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
-       sql/pg_tre--1.2.2--1.2.3-dev.sql \
+DATA         = sql/pg_tre--1.2.3.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+       sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
 REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity concurrently cardinality
@@ -298,7 +298,7 @@ coverage-report:
 # ------------------------------------------------------------------
 # Release tarball
 # ------------------------------------------------------------------
-PG_TRE_VERSION = 1.2.3-dev
+PG_TRE_VERSION = 1.2.3
 DIST_NAME      = pg_tre-$(PG_TRE_VERSION)
 
 dist:

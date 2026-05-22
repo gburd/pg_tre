@@ -6,6 +6,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.3] — 2026-05-22 — tier-3 re-enabled by default
+
+Patch release on the 1.2 lineage.  Same on-disk format as
+1.2.2; no re-index required; `ALTER EXTENSION pg_tre UPDATE
+TO '1.2.3'` has no SQL work to do.
+
+### Fixed
+
+- **Pending-overlay regression that kept tier-3 disabled in
+  1.2.2.**  Root cause: the positional filter in
+  `pg_tre_amgetbitmap` silently dropped TIDs whose conjunct
+  trigrams were all in the pending list (not yet flushed to
+  posting trees).  Mechanism: for each conjunct, the
+  positional filter loops over disjuncts and calls
+  `pg_tre_upper_lookup(trigram)`; when the trigram isn't in
+  the upper tree (because it's only in the pending list),
+  the loop does `continue`.  If NONE of the disjunct's
+  trigrams are in the upper tree, the loop finishes with
+  `conj_pass=false` (initialized) and the TID is dropped.
+
+  Fix: track whether any disjunct was actually evaluated.
+  If none were (all pending-only), conservative-pass the
+  conjunct so the candidate falls through to the executor
+  recheck.  This matches the tier-3 bloom branch's
+  pre-existing conservative-pass semantics.
+
+### Changed
+
+- **`pg_tre.tuple_bloom_enable` default flipped back to
+  `true`.**  With the bloom-header fix from 1.2.2 plus the
+  positional-filter fix above, tier-3 works correctly on
+  both posting-tree-resident candidates and pending-list
+  candidates, at all scales (tested 50 / 5K / 100K rows).
+  Multi-leaf chain walking, per-leaf rank computation, and
+  the pending overlay all interact correctly.  This
+  resolves the long-running "chain-rank lookup repair"
+  v1.3 followup that's been carried since 1.0.0.
+
+### Verified
+
+- 15/15 regression tests pass two consecutive runs with
+  tier-3 default ON.
+- `wal_audit.sh`: 3/3 tests pass.
+- `replication.sh`: 4/4 tests pass (Test 2 was the
+  reproducer for the pending-overlay regression).
+- Build clean with `-Werror`.
+- `ALTER EXTENSION pg_tre UPDATE TO '1.2.3'` from 1.0.0,
+  1.1.0, 1.1.1, 1.2.1, and 1.2.2 verified working.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.2.2] — 2026-05-22 — tier-3 bloom-header fix
 
 Patch release on the 1.2 lineage.  Same on-disk format as
