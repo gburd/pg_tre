@@ -864,6 +864,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                         {
                             /* CNF: at least one disjunct must have valid positions */
                             bool conj_pass = false;
+                            bool any_evaluated = false;
                             for (j = 0; j < conj->n && !conj_pass; j++)
                             {
                                 const TrigramDisjunct *dis = &conj->alts[j];
@@ -874,6 +875,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                                 if (!pg_tre_upper_lookup(scan->indexRelation,
                                                         dis->trigram_hash, &ref))
                                     continue;
+                                any_evaluated = true;
 
                                 n_positions = pg_tre_posting_lookup_positions(
                                                 scan->indexRelation,
@@ -900,6 +902,20 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                                     }
                                 }
                             }
+                            /*
+                             * If no disjunct's trigram lives in the upper tree
+                             * (e.g. all trigrams are pending-list-only after
+                             * a recent INSERT), we couldn't evaluate the
+                             * positional filter for this conjunct.  Treat it
+                             * as a conservative pass so the candidate falls
+                             * through to the executor recheck rather than
+                             * being silently dropped.  This matches the
+                             * tier-3 bloom branch's conservative-pass
+                             * semantics for trigrams that are in the
+                             * pending list but not yet flushed.
+                             */
+                            if (!any_evaluated)
+                                conj_pass = true;
                             if (!conj_pass)
                                 passes = false;
                         }

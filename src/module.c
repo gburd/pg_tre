@@ -36,7 +36,7 @@ int  pg_tre_max_nfa_states         = 10000;
 int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
-bool pg_tre_tuple_bloom_enable     = false;  /* tier-3 disabled while pending-overlay regression is investigated; see CHANGELOG */
+bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
 
 void
 pg_tre_init_guc(void)
@@ -99,7 +99,7 @@ pg_tre_init_guc(void)
         "Enable per-tuple bloom filters in posting leaves (Phase 5).",
         NULL,
         &pg_tre_tuple_bloom_enable,
-        false, PGC_SIGHUP, 0, NULL, NULL, NULL);
+        true, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     /*
      * Cardinality-aware build (1.2.1+).  Posting trees with fewer
