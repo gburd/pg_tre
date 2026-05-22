@@ -60,6 +60,13 @@ This cycle is split into three logical commits on `main`:
     `.clang-format` + `.clang-format-ignore`,
     `.pre-commit-config.yaml`, `.codecov.yml`,
     `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`.
+  - The `coverage` job in `.github/workflows/ci.yml` runs
+    `make coverage` and uploads `coverage.info` to Codecov
+    via the `codecov/codecov-action`.  Marked
+    `continue-on-error: true` and `informational: true` in
+    `.codecov.yml`'s patch policy until we hit a baseline
+    we want to enforce.  Public-repo uploads work without
+    `CODECOV_TOKEN`; private-repo uploads need the secret.
   - `scripts/bump-version.sh`: mode-aware (dev bump vs.
     release), validates clean working tree, targeted
     regexes that don't mangle legacy upgrade-chain entries.

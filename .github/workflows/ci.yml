@@ -130,6 +130,55 @@ jobs:
                   fi
               done
 
+  coverage:
+    name: coverage upload (informational)
+    runs-on: ubuntu-24.04
+    # Pushes only — PR coverage runs as part of build-and-test.
+    if: github.event_name == 'push'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps + lcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool gettext autopoint m4 \
+            build-essential lcov \
+            postgresql-server-dev-18 postgresql-18
+
+      - name: Build with coverage
+        run: |
+          export PATH=/usr/lib/postgresql/18/bin:$PATH
+          PG_CONFIG=$(which pg_config) make coverage-build
+
+      - name: Start PostgreSQL
+        run: |
+          sudo systemctl start postgresql || sudo service postgresql start
+          sudo -u postgres psql \
+              -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
+          sudo systemctl restart postgresql || sudo service postgresql restart
+          sudo -u postgres createdb "$USER"
+
+      - name: Run tests under coverage
+        run: |
+          export PATH=/usr/lib/postgresql/18/bin:$PATH
+          PG_CONFIG=$(which pg_config) make coverage
+
+      - name: Upload to Codecov
+        # Configuration is in .codecov.yml; the action picks up
+        # coverage.info automatically.  CODECOV_TOKEN secret is
+        # required for non-public uploads; for OSS Codecov
+        # accepts unauthenticated uploads from public repos.
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.info
+          flags: regression
+          fail_ci_if_error: false
+          # token: ${{ secrets.CODECOV_TOKEN }}
+
   publish-docs:
     name: publish docs to GitHub Pages
     runs-on: ubuntu-24.04
