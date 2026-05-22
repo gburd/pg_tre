@@ -6,6 +6,88 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.2] — 2026-05-22 — tier-3 bloom-header fix
+
+Patch release on the 1.2 lineage.  Same on-disk format as
+1.2.1; no re-index required; `ALTER EXTENSION pg_tre UPDATE
+TO '1.2.2'` has no SQL work to do.
+
+### Fixed
+
+- **Tier-3 per-tuple bloom — partial fix.**  Identified and
+  fixed the long-standing struct-vs-bytes mismatch in the
+  scan-side bloom check that has been masquerading as the
+  "chain-rank lookup repair" v1.3 followup since 1.0.0.
+  Build path serializes only the bit array of each per-row
+  bloom into the posting-leaf payload (no header).  Scan
+  path read those bytes into a stack buffer and cast them
+  to `(PgTreBloom *)`, then accessed `b->m_bits` and
+  `b->k` — reading garbage from the bit array as if it
+  were the header.  With random `m_bits` values, the
+  bloom-position calculation `pos = (h1 + i*h2) % m`
+  produced unrelated bits, and the bloom check rejected
+  every legitimate match.
+
+  Fix: `src/am/amscan.c` reserves space for the
+  `PgTreBloom` header at the start of the scratch buffer.
+  The lookup writes bit data **past** the header (into the
+  bit-array region).  After the lookup, set
+  `bloom_view->m_bits` and `bloom_view->k` directly — NOT
+  via `pg_tre_bloom_init()`, which calls
+  `memset(bits, 0, bits_bytes)` and would wipe the bits we
+  just read.
+
+  This makes tier-3 work correctly on posting-tree-resident
+  candidates: verified at 50, 5K, and 100K row scales.
+  Multi-leaf chain walking and per-leaf rank computation
+  were already correct.
+
+- **`pg_tre.tuple_bloom_enable` default kept at `false`** in
+  1.2.2 — a residual pending-overlay regression surfaced
+  during the bloom-header investigation: when candidate
+  TIDs come from the pending list (post-INSERT, pre-flush)
+  and tier-3 is enabled, all such TIDs are rejected by
+  `apply_tuple_bloom_filter`.  Every disjunct's
+  `pg_tre_upper_lookup` returns false for trigrams that
+  are only in the pending list, which should fall through
+  to the conservative-pass branch — but empirically it
+  doesn't.  Root cause not yet identified.  Setting the
+  GUC to `on` for stable / post-VACUUM workloads works
+  correctly; the limitation is fastupdate-active state.
+  Tracked as v1.3 followup.
+
+### Changed
+
+- **`PG_TRE_INLINE_POSTING_MAX` kept at 256 bytes.**  Earlier
+  in the 1.2 cycle we explored bumping the inline threshold
+  to 384 for ~30-50% page-count reduction on sparse-trigram
+  corpora, but two regressions surfaced: `wal_audit.sh`'s
+  post-crash differential check fails at 384 (WAL-redo path
+  interaction with larger inline blobs), and at ≥ 448 the
+  multi-leaf 100K-row test returns 0 rows for
+  `Row 12[0-9][0-9][0-9]` (chain-walker interaction).  Both
+  reverted; tracked as v1.3 followups.  See
+  `doc/specs/posting-page-coalescing.md` for the
+  longer-term structural fix that closes the gap to
+  pg_trgm by packing multiple trigrams per page.
+
+### Verified
+
+- 15/15 regression tests pass two consecutive runs (no
+  flake), with the bloom-header fix in place and the GUC
+  default at false.
+- `wal_audit.sh`: 3/3 tests pass.
+- `replication.sh`: 4/4 tests pass.
+- Build clean with `-Werror`.
+- `scripts/release-check.sh` passes end-to-end.
+- `ALTER EXTENSION pg_tre UPDATE TO '1.2.2'` from 1.0.0,
+  1.1.0, 1.1.1, and 1.2.1 verified working.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.2.1] — 2026-05-21 — testing, hardening, similarity ranking, size tuning
 
 Minor release on the 1.0.0 lineage.  Same on-disk format as

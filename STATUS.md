@@ -1,10 +1,10 @@
 # pg_tre status
 
-Released: **1.2.2-dev** (2026-05).  See `CHANGELOG.md` for full
+Released: **1.2.2** (2026-05).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-1.2.1 is a minor release on the 1.0.0 lineage: same on-disk
+1.2.2 is a patch release on the 1.0.0 lineage: same on-disk
 format, no re-index required.  Headline additions:
 
 - **Similarity ranking** — `tre_distance(text, tre_pattern)`,
@@ -49,7 +49,7 @@ format, no re-index required.  Headline additions:
 plus a multi-leaf right-link `sm_union` reversed-logic fix
 that silently dropped every leaf past the first.
 
-## What ships in 1.2.1
+## What ships in 1.2.2
 
 ### Storage and recovery
 
