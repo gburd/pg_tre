@@ -295,7 +295,7 @@ write_single_leaf(Relation index, uint64 trigram_hash,
         XLogRecPtr recptr;
 
         XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_INSERT);
         PageSetLSN(page, recptr);
     }

@@ -175,7 +175,7 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 .PHONY: localcheck tapcheck tap vendor-clean distclean-full dist \
         format format-check format-diff format-single format-changed \
         coverage coverage-build coverage-clean coverage-report \
-        test-shell test-stress test-wal-audit test-all
+        test-shell test-stress test-wal-audit test-replication test-all
 
 # ------------------------------------------------------------------
 # Code formatting (clang-format with PostgreSQL style)
@@ -337,7 +337,12 @@ test-stress:
 	    ITERATIONS=$${ITERATIONS:-30} \
 	    bash test/scripts/stress.sh
 
-test-shell: test-wal-audit
+test-replication:
+	@echo "==> replication.sh"
+	PG_CONFIG='$(PG_CONFIG)' PATH=$$(dirname $(PG_CONFIG)):$$PATH \
+	    bash test/scripts/replication.sh
+
+test-shell: test-wal-audit test-replication
 	@echo "All shell-based tests completed."
 	@echo "Run 'make test-stress' separately for the long-running test."
 

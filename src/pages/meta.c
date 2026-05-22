@@ -123,7 +123,7 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
         XLogRecPtr recptr;
 
         XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
         PageSetLSN(metapage, recptr);
     }
@@ -172,7 +172,7 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
         XLogRecPtr recptr;
 
         XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
 
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
         PageSetLSN(metapage, recptr);

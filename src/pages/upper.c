@@ -174,7 +174,7 @@ upper_flush_leaf(UpperBulkState *state)
         XLogRecPtr recptr;
 
         XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
 
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
         PageSetLSN(page, recptr);
@@ -316,7 +316,7 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
         XLogRecPtr recptr;
 
         XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
 
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
         PageSetLSN(page, recptr);

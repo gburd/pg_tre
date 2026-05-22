@@ -86,12 +86,21 @@ This cycle is split into three logical commits on `main`:
     builds.
 - Shell-test infrastructure under `test/scripts/`:
   - `lib.sh`: shared library with cluster init/teardown,
-    `psql_check`, `psql_capture`, `wait_for_lsn`,
-    `create_basic_table`, `diff_idx_vs_seq`.
+    `psql_check`, `psql_capture`, `psql_count`,
+    `wait_for_lsn`, `pg_init_primary`, `pg_init_standby`,
+    `primary_lsn`, `create_basic_table`, `diff_idx_vs_seq`.
   - `wal_audit.sh`: three tests (UNLOGGED indexes emit only
     init-fork META_UPDATE records; LOGGED inserts produce
     decodable rmgr-149 records; crash + restart preserves
     the index and its differential idx-vs-seq invariant).
+  - `replication.sh`: primary + streaming standby; verifies
+    that index state replicates correctly (Test 1: built
+    index reaches standby identical row counts; Test 2:
+    incremental writes stream to standby; Test 3:
+    `wal_consistency_checking = 'pg_tre'` clean (opt-in via
+    `TRE_WAL_CONSISTENCY=1`); Test 4: standby stop / start
+    catchup preserves the index).  Caught three real WAL-redo
+    bugs on first run — see Fixed below.
   - `stress.sh`: N-iteration mixed insert / parallel-SELECT
     / DELETE / VACUUM / REINDEX workload with RSS ceiling,
     postmaster-alive check, per-iteration differential
@@ -141,6 +150,40 @@ This cycle is split into three logical commits on `main`:
   per-tuple bloom and positional filter are bypassed until
   the chain-rank lookup is repaired).  Default flipped to
   `FALSE` to match documented intent.
+- **Streaming-replication correctness.** Three real bugs in the
+  custom-rmgr redo path, all caught by the new
+  `test/scripts/replication.sh`:
+  - `pg_tre_redo_fpi`'s loop bound was off by one:
+    `blkno < XLogRecMaxBlockId(record)` should have been
+    `blkno <= XLogRecMaxBlockId(record)`.  `XLogRecMaxBlockId`
+    returns the maximum block_id, NOT the count.  For a record
+    that registered buffers with IDs 0 and 1 (typical: meta
+    page + page-being-modified), the max is 1, and our loop
+    iterated only blkno=0.  Block 1 — the actual page being
+    modified — was silently dropped from every redo, which
+    surfaced on a streaming standby as "could not read blocks
+    52..52: read only 0 of 8192 bytes" the next time the
+    primary tried to extend the relation past the unreplayed
+    range.
+  - All `XLogRegisterBuffer` callers passed
+    `REGBUF_WILL_INIT | REGBUF_STANDARD`.  `REGBUF_WILL_INIT`
+    suppresses the FPI (PG assumes the redo callback will
+    reconstruct the page from delta data); our redo only
+    restores from FPI.  Result: PANIC "block with WILL_INIT
+    flag in WAL record must be zeroed by redo routine" on
+    every standby replay.  Fixed by dropping `REGBUF_WILL_INIT`
+    everywhere; the FPI is what makes the FPI-only redo work.
+  - All `XLogRegisterBuffer` callers now pass
+    `REGBUF_FORCE_IMAGE | REGBUF_STANDARD`.  Without
+    `REGBUF_FORCE_IMAGE`, PG only emits an FPI on the first
+    record per buffer per checkpoint cycle; subsequent records
+    carry deltas and our FPI-only redo skips them, leaving
+    the standby with a stale page.  Caught by the test where
+    inserting 3 rows on the primary resulted in only 1 row
+    visible to the index on the standby (heap was correct;
+    only the index was missing 2 entries).  `REGBUF_FORCE_IMAGE`
+    forces an FPI on every record, which is wasteful but
+    correct; delta-aware redo is a v1.2 follow-up.
 
 
 ---

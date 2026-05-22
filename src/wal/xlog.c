@@ -34,9 +34,13 @@ pg_tre_cleanup(void)
 
 /*
  * Generic redo for records that were logged as full-page images
- * (REGBUF_WILL_INIT + REGBUF_STANDARD).  XLogReadBufferForRedo will
- * reconstitute the page from the backup block; we only need to mark
- * it dirty and release.
+ * (REGBUF_STANDARD).  XLogReadBufferForRedo applies the FPI; we
+ * just need to mark it dirty and release.
+ *
+ * Records the AM emits today are FPI-only — we never set
+ * REGBUF_WILL_INIT, because that would suppress the FPI and our
+ * redo doesn't yet carry deltas.  Tracked as a v1.2 follow-up to
+ * shrink the WAL by emitting deltas and only FPIs as a fallback.
  */
 static void
 pg_tre_redo_fpi(XLogReaderState *record)
@@ -44,10 +48,25 @@ pg_tre_redo_fpi(XLogReaderState *record)
     int     blkno;
     Buffer  buf;
 
-    for (blkno = 0; blkno < XLogRecMaxBlockId(record); blkno++)
+    /*
+     * XLogRecMaxBlockId returns the maximum block_id used in the
+     * record, NOT the count.  For a record that registered buffers
+     * with IDs 0 and 1 (typical: meta page + page-being-modified),
+     * the max is 1 and we need to iterate blkno = 0..1 inclusive.
+     * The previous `blkno < max` form silently dropped the highest-
+     * numbered block on every redo — caught by replication.sh on a
+     * primary/standby pair where the standby rejected the next
+     * write to block 52 because its in-memory state for block 52
+     * hadn't been replayed.
+     */
+    for (blkno = 0; blkno <= XLogRecMaxBlockId(record); blkno++)
     {
-        XLogRedoAction action = XLogReadBufferForRedo(record, blkno, &buf);
+        XLogRedoAction action;
 
+        if (!XLogRecHasBlockRef(record, blkno))
+            continue;
+
+        action = XLogReadBufferForRedo(record, blkno, &buf);
         if (action == BLK_NEEDS_REDO)
         {
             /*

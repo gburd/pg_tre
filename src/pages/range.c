@@ -230,7 +230,7 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
         XLogRecPtr recptr;
 
         XLogBeginInsert();
-        XLogRegisterBuffer(0, rangebuf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+        XLogRegisterBuffer(0, rangebuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_RANGE_UPDATE);
         PageSetLSN(rangepage, recptr);
     }

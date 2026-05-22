@@ -214,10 +214,21 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
         {
             XLogRecPtr recptr;
             XLogBeginInsert();
-            XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
-            XLogRegisterBuffer(1, tailbuf,
-                               REGBUF_STANDARD |
-                               (tail_is_new ? REGBUF_WILL_INIT : 0));
+            XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+            /*
+             * REGBUF_STANDARD makes PG ship a full-page image of
+             * the tail buffer.  We deliberately DO NOT pass
+             * REGBUF_WILL_INIT even when tail_is_new is true,
+             * because WILL_INIT suppresses the FPI (PG assumes the
+             * redo callback will reconstruct the page from delta
+             * data).  pg_tre_redo_fpi only restores from the FPI;
+             * our records do not yet carry deltas.  Until we add
+             * delta-aware redo, the FPI is what makes both crash
+             * recovery and streaming replication work.  Tracked as
+             * a v1.2 follow-up: shrink the WAL by emitting deltas
+             * when the tail page already exists on the standby.
+             */
+            XLogRegisterBuffer(1, tailbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
             recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_INSERT);
             PageSetLSN(tailpage, recptr);
             PageSetLSN(metapage, recptr);
@@ -752,7 +763,7 @@ truncate_pending_list(Relation index)
     {
         XLogRecPtr recptr;
         XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_MERGE_C);
         PageSetLSN(page, recptr);
     }

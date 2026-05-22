@@ -102,6 +102,12 @@ jobs:
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           bash test/scripts/wal_audit.sh
 
+      - name: Run replication.sh
+        run: |
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          bash test/scripts/replication.sh
+
       - name: Check sanitizer reports
         if: matrix.sanitize == 'asan'
         run: |
