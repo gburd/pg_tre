@@ -32,6 +32,7 @@ INSERT 0 200
 CREATE INDEX CONCURRENTLY cic_idx ON cic_t USING tre (body);
 psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: collected 12492 trigram entries from 200 heap tuples
 psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: built 3543 posting trees
+psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: build complete, indexed 200 heap tuples into 3543 trigrams
 CREATE INDEX
 -- The index must be valid post-build.

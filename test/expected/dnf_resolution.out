@@ -35,6 +35,7 @@ INSERT 0 5
 CREATE INDEX dnf_idx ON dnf_t USING tre (body);
 psql:test/sql/dnf_resolution.sql:33: NOTICE:  pg_tre: collected 23 trigram entries from 5 heap tuples
 psql:test/sql/dnf_resolution.sql:33: NOTICE:  pg_tre: built 19 posting trees
+psql:test/sql/dnf_resolution.sql:33: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/dnf_resolution.sql:33: NOTICE:  pg_tre: build complete, indexed 5 heap tuples into 19 trigrams
 CREATE INDEX
 SET enable_seqscan = off;
@@ -113,6 +114,7 @@ INSERT 0 4
 CREATE INDEX dnf_long_idx ON dnf_long USING tre (body);
 psql:test/sql/dnf_resolution.sql:83: NOTICE:  pg_tre: collected 35 trigram entries from 4 heap tuples
 psql:test/sql/dnf_resolution.sql:83: NOTICE:  pg_tre: built 23 posting trees
+psql:test/sql/dnf_resolution.sql:83: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/dnf_resolution.sql:83: NOTICE:  pg_tre: build complete, indexed 4 heap tuples into 23 trigrams
 CREATE INDEX
 SELECT id FROM dnf_long WHERE body %~~ tre_pattern('approximate', 2)

@@ -21,6 +21,7 @@ INSERT 0 3
 CREATE INDEX idx_planner_test ON planner_test USING tre (body);
 psql:test/sql/planner.sql:21: NOTICE:  pg_tre: collected 3468 trigram entries from 103 heap tuples
 psql:test/sql/planner.sql:21: NOTICE:  pg_tre: built 287 posting trees
+psql:test/sql/planner.sql:21: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/planner.sql:21: NOTICE:  pg_tre: build complete, indexed 103 heap tuples into 287 trigrams
 CREATE INDEX
 -- Force ANALYZE to update statistics

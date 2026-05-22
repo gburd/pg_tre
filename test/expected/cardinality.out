@@ -39,6 +39,7 @@ SHOW pg_tre.min_trigram_freq;
 CREATE INDEX card_idx ON card_t USING tre (body);
 psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: collected 3992 trigram entries from 205 heap tuples
 psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: built 241 posting trees
+psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: build complete, indexed 205 heap tuples into 241 trigrams
 CREATE INDEX
 -- Differential: index and seq scan must agree on row sets.
@@ -46,7 +47,7 @@ SET enable_seqscan = off;
 SET
 CREATE TEMP TABLE _idx AS
     SELECT id FROM card_t WHERE body %~~ tre_pattern('frequent', 0);
-SELECT 0
+SELECT 200
 SET enable_seqscan = on;
 SET
 SET enable_indexscan = off;
@@ -63,7 +64,7 @@ SELECT
         AS row_sets_agree;
  counts_agree | row_sets_agree 
 --------------+----------------
- f            | f
+ t            | t
 (1 row)
 
 DROP TABLE _idx;

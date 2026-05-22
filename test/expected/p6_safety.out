@@ -118,7 +118,7 @@ SHOW pg_tre.fastupdate;
 SHOW pg_tre.tuple_bloom_enable;
  pg_tre.tuple_bloom_enable 
 ---------------------------
- off
+ on
 (1 row)
 
 SHOW pg_tre.max_extraction_fanout;

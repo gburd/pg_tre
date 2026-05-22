@@ -23,6 +23,7 @@ INSERT 0 3
 CREATE INDEX idx_auto_small ON planner_auto_small USING tre (body);
 psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: collected 4281 trigram entries from 103 heap tuples
 psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: built 308 posting trees
+psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: build complete, indexed 103 heap tuples into 308 trigrams
 CREATE INDEX
 ANALYZE planner_auto_small;
@@ -84,9 +85,9 @@ EXPLAIN (COSTS ON)
     SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0);
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
- Bitmap Heap Scan on planner_auto_small  (cost=26.03..30.04 rows=1 width=48)
+ Bitmap Heap Scan on planner_auto_small  (cost=48.03..52.04 rows=1 width=48)
    Recheck Cond: (body %~~ 'approximate'::tre_pattern)
-   ->  Bitmap Index Scan on idx_auto_small  (cost=0.00..26.03 rows=1 width=0)
+   ->  Bitmap Index Scan on idx_auto_small  (cost=0.00..48.03 rows=1 width=0)
          Index Cond: (body %~~ 'approximate'::tre_pattern)
 (4 rows)
 
@@ -136,6 +137,7 @@ INSERT 0 3
 CREATE INDEX idx_auto_medium ON planner_auto_medium USING tre (body);
 psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: collected 14369 trigram entries from 303 heap tuples
 psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: built 518 posting trees
+psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: built range tier with 1 ranges
 psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: build complete, indexed 303 heap tuples into 518 trigrams
 CREATE INDEX
 ANALYZE planner_auto_medium;
