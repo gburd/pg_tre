@@ -39,6 +39,35 @@ This cycle is split into five logical commits on `main`:
      and the v1.3 / v2.0 design specs for the deferred
      bloom-size work.
 
+### Fixed
+
+- **Tier-3 per-tuple bloom — partial fix.**  Identified and
+  fixed the long-standing struct-vs-bytes mismatch in the
+  scan-side bloom check: build serialized only the bit
+  array (no header), but scan cast the bytes to
+  `(PgTreBloom *)` and read garbage `m_bits` / `k` from the
+  bit data.  Real fix: read the bloom bits past the header
+  region in the scratch buffer, then write the correct
+  `m_bits` / `k` directly into the header (without calling
+  `pg_tre_bloom_init`, which would re-zero the bit array).
+  This makes tier-3 work correctly for posting-tree-resident
+  candidates on both single-leaf and multi-leaf trees —
+  verified at small (50-row), medium (5K-row), and large
+  (100K-row) scales.
+
+  However, **a separate pending-overlay regression surfaced**
+  in the same investigation: when candidate TIDs come from
+  the pending list (post-INSERT, pre-flush) and tier-3 is
+  enabled, all such TIDs are rejected by `apply_tuple_bloom
+  _filter` even though every disjunct's `pg_tre_upper_lookup`
+  returns false (which should fall through to the
+  conservative pass branch).  Root cause not yet identified.
+  `pg_tre.tuple_bloom_enable` default kept at `false` for
+  1.2.1 to preserve correctness; full re-enablement deferred
+  to v1.3 once the pending-overlay interaction is
+  understood.  The bloom-header fix itself stays in;
+  flipping the GUC to `on` post-flush works correctly.
+
 ### Added
 
 - **`pg_tre.min_trigram_freq` GUC** (default 1, no behavior
@@ -72,16 +101,21 @@ This cycle is split into five logical commits on `main`:
 
 ### Changed
 
-- **`PG_TRE_INLINE_POSTING_MAX` bumped from 256 to 384
-  bytes.**  At 256 only the rarest trigrams stayed inline
-  in the upper-tree leaf entry; at 384 (room for ~48 TIDs
-  after sparsemap RLE) most natural-language trigrams stay
-  inline, cutting the page count for a 10K-row corpus from
-  ~4700 to ~700.  At 512 a real bug surfaces in the
-  inline-data scan path on a multi-leaf 100K-row fixture
-  (returns 0 rows for `Row 12[0-9][0-9][0-9]` instead of
-  1000); 384 is the largest tested value that doesn't
-  trigger it.  Investigated and tracked as a v1.3 followup.
+- **`PG_TRE_INLINE_POSTING_MAX` — attempted bump 256 → 384,
+  reverted.**  Higher inline thresholds let more trigrams stay
+  in the upper-tree leaf entries (one 8 KB page per trigram is
+  the dominant size cost), and 384 promised ~30-50% page-count
+  reduction on sparse-trigram corpora.  Two regressions
+  surfaced in testing: (a) `wal_audit.sh`'s post-crash
+  differential check fails at 384 (index returns 0 for a
+  pattern that seq-scan finds 1000 of); (b) at ≥ 448 the
+  multi-leaf 100K-row test returns 0 rows for
+  `Row 12[0-9][0-9][0-9]`.  The interactions between larger
+  inline blobs, WAL redo, and the chain walker need
+  investigation; reverted to 256 for 1.2.1.  Tracked as a v1.3
+  followup; see `doc/specs/posting-page-coalescing.md` for the
+  longer-term structural fix that closes the gap to pg_trgm
+  by packing multiple trigrams per page.
 - **Forgejo Actions workflow** (`.forgejo/workflows/ci.yml`)
   brought to parity with `.github/workflows/`: `-Werror`
   builds, 3x flake detection, `wal_audit.sh` and

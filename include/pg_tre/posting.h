@@ -36,25 +36,29 @@
  * inline in the upper-tree leaf entry (no separate root page).
  * Value is in bytes of serialized sparsemap.
  *
- * Tuned in 1.2.1 from 256 to 384 bytes after measuring that the
- * dominant cost in pg_tre indexes was structural: one 8 KB
- * posting-tree page per distinct trigram, even for trigrams with
- * a handful of TIDs.  At 256 bytes the threshold caught only the
- * very rarest trigrams; at 384 bytes (room for ~48 TIDs after
- * sparsemap RLE) most natural-language trigrams stay inline,
- * cutting the page count for a 10K-row corpus from ~4700 to
- * ~700.  Inline data lives in the upper-tree leaf, which can
- * still split when its own page fills; the upper-tree split logic
- * already handles the overflow case.
+ * 1.2.1 attempted to bump 256 -> 384 to cut page count for
+ * sparse-trigram corpora (potentially ~30-50% smaller index),
+ * but two regressions surfaced:
  *
- * Trade-off: bigger inline data means bigger upper-tree leaves
- * and slightly slower upper-tree-leaf scans.  At 384 bytes a PG
- * page (8 KB) holds ~20 inline postings worst case before
- * splitting, vs ~30 at 256 bytes.  In practice the upper tree
- * remains shallow because most trigrams are inline; the slight
- * per-leaf cost is dominated by the page-count savings.
+ *   (a) wal_audit.sh's post-crash differential check fails:
+ *       index returns 0 rows on the recovered table for a
+ *       pattern that the seq-scan finds 1000 of.  At 256
+ *       this passes; at 384 it doesn't.  The interaction
+ *       between the larger inline blob and the WAL-redo
+ *       path needs investigation.
+ *
+ *   (b) at >=448 bytes the multi-leaf 100K-row test returns
+ *       0 rows for `Row 12[0-9][0-9][0-9]` (should be
+ *       1000).  Inline-data scan path interaction with the
+ *       multi-leaf chain walker.
+ *
+ * Reverted to 256 for 1.2.1.  Both bugs are tracked as v1.3
+ * followups.  Unlocking this threshold is one of the largest
+ * single-change wins available for index size; see
+ * `doc/specs/posting-page-coalescing.md` for the longer-term
+ * structural fix.
  */
-#define PG_TRE_INLINE_POSTING_MAX 384
+#define PG_TRE_INLINE_POSTING_MAX 256
 
 /* ---- Writer side (owned by Agent A -- Phase 1/2) ---- */
 

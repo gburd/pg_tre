@@ -36,7 +36,7 @@ int  pg_tre_max_nfa_states         = 10000;
 int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
-bool pg_tre_tuple_bloom_enable     = false;
+bool pg_tre_tuple_bloom_enable     = false;  /* tier-3 disabled while pending-overlay regression is investigated; see CHANGELOG */
 
 void
 pg_tre_init_guc(void)

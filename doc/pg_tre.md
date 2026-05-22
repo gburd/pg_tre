@@ -286,7 +286,7 @@ WITH (
   pending_list_limit = 4096,      -- Pending list size in KiB (default: 4096)
   bloom_tuple_bits = 128,         -- Per-tuple bloom size (default: 128)
   range_size_blocks = 128,        -- Blocks per range entry (default: 128)
-  tuple_bloom_enable = false      -- Enable tier-3 blooms (default: false in 1.1.x+)
+  tuple_bloom_enable = false      -- Enable tier-3 blooms (default: false; see note)
 );
 ```
 
@@ -299,15 +299,13 @@ WITH (
 **range_size_blocks:** Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.
 
 **tuple_bloom_enable:** Per-tuple bloom and positional filter
-(tier-3).  **Default: false in 1.1.x and later.**  The chain-rank
-lookup these filters use is broken for multi-leaf posting trees;
-until that's fixed (a v1.3 followup) the GUC bypasses both
-filters.  Recheck remains authoritative for correctness; flipping
-this on without the chain-rank repair will silently lose rows on
-any query whose posting tree spans more than one leaf.  Re-enable
-only if you've verified your workload doesn't trigger multi-leaf
-posting trees (run `EXPLAIN (BUFFERS, ANALYZE)` and look for
-`Index Searches: > 1` per condition).
+(tier-3).  **Default: false** in 1.1.x and 1.2.x.  The 1.2.1
+release fixed a long-standing struct-vs-bytes bug in the scan-
+side bloom check (was masquerading as a "chain-rank lookup"
+issue), but a residual pending-overlay regression keeps the
+default at `false` until v1.3.  Setting `on` works correctly
+for stable workloads (no recent INSERTs / pending list
+flushed); avoid for write-heavy fastupdate workloads.
 
 ### GUCs (Configuration Variables)
 
@@ -337,8 +335,7 @@ SET pg_tre.pending_list_limit = 4096;    -- KiB
 SET pg_tre.range_size_blocks = 128;      -- heap blocks
 SET pg_tre.bloom_tuple_bits = 128;       -- bits
 SET pg_tre.fastupdate = true;
-SET pg_tre.tuple_bloom_enable = false;   -- 1.1.x default; see
-                                          -- the WITH-options note
+SET pg_tre.tuple_bloom_enable = false;   -- 1.2.x default
 ```
 
 Context: `PGC_USERSET` (can set per-session), except `range_size_blocks` and `bloom_tuple_bits` are `PGC_SIGHUP` (require reload).

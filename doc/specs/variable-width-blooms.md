@@ -4,8 +4,13 @@
 
 **Owner:** unassigned.
 
-**Depends on:** the multi-leaf chain-rank repair (v1.3
-prerequisite — see `STATUS.md` followups).
+**Prerequisite:** ~~multi-leaf chain-rank repair~~ —
+struct-vs-bytes bloom-header fix landed in 1.2.1.  Tier-3
+works correctly on posting-tree candidates at all scales.
+A residual pending-overlay regression keeps
+`pg_tre.tuple_bloom_enable` default at `false`; once that's
+resolved, variable-width blooms become an incremental size
+optimization on top of working tier-3.
 
 ## Problem
 

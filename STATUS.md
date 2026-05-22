@@ -13,6 +13,16 @@ format, no re-index required.  Headline additions:
   for BM25 ranking.  Use
   `WHERE body %~~ pattern ORDER BY body <@> pattern ASC LIMIT N`
   to return the N closest matches.
+- **Tier-3 per-tuple bloom — partial fix.**  The
+  struct-vs-bytes mismatch in the scan-side bloom check
+  (root cause of the long-standing "chain-rank lookup"
+  followup) is fixed.  Tier-3 works correctly on
+  posting-tree candidates at all scales.  A separate
+  pending-overlay regression surfaced during the
+  investigation: pending-list TIDs are still incorrectly
+  rejected when tier-3 is on, so the GUC default stays at
+  `false` for 1.2.1.  Setting it to `on` post-VACUUM (when
+  pending is flushed) works correctly.
 - **WAL replay correctness** — three real bugs in our custom
   rmgr's redo path were caught by the new
   `test/scripts/replication.sh` and fixed (loop bound off by
@@ -110,22 +120,28 @@ Pre-tag gate: `scripts/release-check.sh`.
 
 ## v1.3 followups
 
-- Fix the chain-rank lookup so the tier-3 per-tuple bloom
-  and positional filter can be re-enabled for multi-leaf
-  posting trees.  Today these are bypassed via
-  `pg_tre.tuple_bloom_enable=false`; recheck preserves
-  correctness, but enabling them would speed up deep
-  trigram intersections.
+- ~~Fix the chain-rank lookup~~ — **root cause fixed in
+  1.2.1.**  The struct-vs-bytes mismatch in the scan-side
+  bloom check that has been masquerading as a "chain-rank"
+  issue is now fixed; tier-3 works correctly on
+  posting-tree candidates at all scales.  Multi-leaf chain
+  walking and per-leaf rank computation were already
+  correct.  A residual pending-overlay regression remains
+  (pending-list TIDs are rejected when tier-3 is on), so
+  the GUC default stays at `false` until that's resolved.
 - **Inline-data scan-path bug** discovered while tuning
-  `PG_TRE_INLINE_POSTING_MAX` in 1.2.1.  At threshold >= 448
-  bytes, the multi-leaf 100K-row test returns 0 rows for
-  `Row 12[0-9][0-9][0-9]` (should be 1000).  Below 384
-  the test passes; 384 is the largest tested-safe value.
-  The interaction is between larger inline-data blobs and
-  the multi-leaf chain walker; likely the same family of
-  bugs as the chain-rank issue above.  Fix unlocks raising
-  the inline threshold to 1024+ bytes for further size
-  reduction.
+  `PG_TRE_INLINE_POSTING_MAX` in 1.2.1 (and reverted to
+  256 for that release).  Two regressions appear at
+  thresholds > 256:
+  - `wal_audit.sh`'s post-crash differential check fails at
+    384: index returns 0 for a pattern that seq-scan finds
+    1000 of.  WAL-redo path interaction with larger inline
+    blobs.
+  - At ≥ 448 the multi-leaf 100K-row test returns 0 rows
+    for `Row 12[0-9][0-9][0-9]`.  Inline-data scan path
+    interaction with the multi-leaf chain walker.
+  Fix unlocks raising the threshold to 1024+ bytes for
+  significant size reduction on sparse-trigram corpora.
 - Variable-width per-tuple blooms (see
   `doc/specs/variable-width-blooms.md`).  Depends on the
   chain-rank repair landing first.  Yields ~70-80%
