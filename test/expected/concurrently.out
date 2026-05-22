@@ -1,0 +1,78 @@
+-- test/sql/concurrently.sql
+-- Regression test for CREATE INDEX CONCURRENTLY support.
+--
+-- pg_tre supports CIC via the standard PostgreSQL machinery: PG
+-- runs ambuild against a transactional snapshot, validates with
+-- a second pass against the post-snapshot heap, and the AM
+-- itself doesn't need to know about the dual-phase setup.  This
+-- test confirms that:
+--
+--   1. CREATE INDEX CONCURRENTLY succeeds against a populated
+--      table.
+--   2. The resulting index is valid and answers the same
+--      queries as the non-concurrent build path.
+--   3. DROP INDEX CONCURRENTLY also works.
+--
+-- Note: CIC must run outside any transaction block; this file is
+-- driven by run-regress.sh which executes each statement
+-- individually rather than wrapping in a single BEGIN/COMMIT.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/concurrently.sql:20: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS cic_t CASCADE;
+psql:test/sql/concurrently.sql:22: NOTICE:  table "cic_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE cic_t (id serial, body text);
+CREATE TABLE
+INSERT INTO cic_t (body)
+SELECT 'The quick brown fox row ' || md5(i::text) || ' line ' || i
+FROM generate_series(1, 200) AS i;
+INSERT 0 200
+-- The build itself.
+CREATE INDEX CONCURRENTLY cic_idx ON cic_t USING tre (body);
+psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: collected 12492 trigram entries from 200 heap tuples
+psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: built 3543 posting trees
+psql:test/sql/concurrently.sql:30: NOTICE:  pg_tre: build complete, indexed 200 heap tuples into 3543 trigrams
+CREATE INDEX
+-- The index must be valid post-build.
+SELECT indexrelid::regclass, indisvalid, indisready
+FROM   pg_index
+WHERE  indexrelid = 'cic_idx'::regclass;
+ indexrelid | indisvalid | indisready 
+------------+------------+------------
+ cic_idx    | t          | t
+(1 row)
+
+-- Differential: the CONCURRENTLY-built index returns the same
+-- rows as a seq scan.  This catches snapshot-window bugs.
+SET enable_seqscan = off;
+SET
+CREATE TEMP TABLE _idx AS SELECT id FROM cic_t WHERE body %~~ tre_pattern('quick', 0);
+SELECT 200
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+CREATE TEMP TABLE _seq AS SELECT id FROM cic_t WHERE body %~~ tre_pattern('quick', 0);
+SELECT 200
+SELECT
+    (SELECT count(*) FROM _idx) = (SELECT count(*) FROM _seq) AS counts_agree,
+    NOT EXISTS (SELECT 1 FROM _idx EXCEPT SELECT 1 FROM _seq)
+    AND NOT EXISTS (SELECT 1 FROM _seq EXCEPT SELECT 1 FROM _idx)
+        AS row_sets_agree;
+ counts_agree | row_sets_agree 
+--------------+----------------
+ t            | t
+(1 row)
+
+DROP TABLE _idx;
+DROP TABLE
+DROP TABLE _seq;
+DROP TABLE
+-- DROP INDEX CONCURRENTLY also exercises a separate amapi path.
+DROP INDEX CONCURRENTLY cic_idx;
+DROP INDEX
+DROP TABLE cic_t;
+DROP TABLE

@@ -18,11 +18,12 @@
 #define PG_TRE_FORMAT_VERSION 3
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.2.0-dev"
+#define PG_TRE_VERSION_STRING "pg_tre 1.2.1"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;
 extern int  pg_tre_pending_list_limit_kb;
+extern int  pg_tre_min_trigram_freq;
 extern int  pg_tre_range_size_blocks;
 extern int  pg_tre_bloom_tuple_bits;
 extern int  pg_tre_max_extraction_fanout;

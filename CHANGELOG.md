@@ -6,9 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.2.0-dev] — 2026-05-21 — testing, hardening, similarity ranking
+## [1.2.1] — 2026-05-21 — testing, hardening, similarity ranking, size tuning
 
-This cycle is split into three logical commits on `main`:
+Minor release on the 1.0.0 lineage.  Same on-disk format as
+1.1.x; existing indexes work as-is via
+`ALTER EXTENSION pg_tre UPDATE TO '1.2.1'`.
+
+This cycle is split into five logical commits on `main`:
 
   1. Adopt pg_textsearch's release-engineering and CI bar:
      `RELEASING.md`, `CONTRIBUTING.md`, `SECURITY.md`,
@@ -24,6 +28,99 @@ This cycle is split into three logical commits on `main`:
      the UNLOGGED-fork assertion crash and the
      `tuple_bloom_enable` default mismatch.
   3. Similarity / distance helpers and the `<@>` operator.
+  4. `replication.sh` + three real WAL-redo bugs caught and
+     fixed (loop bound off by one, `REGBUF_WILL_INIT`
+     suppressing the FPI we depend on, missing FPI on
+     subsequent records per checkpoint cycle).  The same
+     fixes also tightened single-node crash recovery.
+  5. Size-tuning measurement and follow-up: bloom-overhead
+     reduction phases, `to_tsvector` framing, CIC support
+     verification, Forgejo Actions parity with `.github/`,
+     and the v1.3 / v2.0 design specs for the deferred
+     bloom-size work.
+
+### Added
+
+- **`pg_tre.min_trigram_freq` GUC** (default 1, no behavior
+  change).  Build-time filter that drops posting trees for
+  trigrams appearing in fewer than `min_trigram_freq` rows.
+  Rare trigrams aren't useful candidate filters anyway — the
+  recheck path remains authoritative for correctness, and
+  queries that would have relied on dropped trigrams fall
+  back through the existing lossy-bitmap path.  At
+  `min_trigram_freq=5` on a 100-row fixture: 95 of 120
+  posting trees skipped (~80% page-count reduction in the
+  test).  PGC_SIGHUP; effective on the next CREATE INDEX /
+  REINDEX.
+- New regression test `test/sql/cardinality.sql` covering
+  the GUC-default behavior and asserting the
+  index-vs-seqscan differential remains correct when rare
+  trigrams are dropped.
+- New regression test `test/sql/concurrently.sql` covering
+  `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY`.
+  Verified that the build path under the dual-snapshot CIC
+  protocol returns the same row sets as the non-concurrent
+  build path.
+- README section explicitly framing pg_tre vs pg_textsearch.
+  Different problem domains — BM25 ranked keyword search
+  (tokenized `tsvector` input) vs approximate regex over
+  raw character sequences — with a recipe for the
+  combined-index hybrid pattern.
+- `doc/specs/posting-page-coalescing.md` (v2.0 design) and
+  `doc/specs/variable-width-blooms.md` (v1.3 design) for
+  the deferred bloom-overhead work.
+
+### Changed
+
+- **`PG_TRE_INLINE_POSTING_MAX` bumped from 256 to 384
+  bytes.**  At 256 only the rarest trigrams stayed inline
+  in the upper-tree leaf entry; at 384 (room for ~48 TIDs
+  after sparsemap RLE) most natural-language trigrams stay
+  inline, cutting the page count for a 10K-row corpus from
+  ~4700 to ~700.  At 512 a real bug surfaces in the
+  inline-data scan path on a multi-leaf 100K-row fixture
+  (returns 0 rows for `Row 12[0-9][0-9][0-9]` instead of
+  1000); 384 is the largest tested value that doesn't
+  trigger it.  Investigated and tracked as a v1.3 followup.
+- **Forgejo Actions workflow** (`.forgejo/workflows/ci.yml`)
+  brought to parity with `.github/workflows/`: `-Werror`
+  builds, 3x flake detection, `wal_audit.sh` and
+  `replication.sh` shell test runs, `pgspot` security scan
+  job, `format-check` on changed files, fixed STATUS.md
+  staleness check.  The `publish-pages` job continues to
+  push docs to a `pages` branch, which Codeberg Pages
+  serves at `<user>.codeberg.page/<repo>/`.  Now also
+  publishes `RELEASING.md`, `CONTRIBUTING.md`, and
+  `SECURITY.md`.
+
+### Verified
+
+- **CIC works for pg_tre** today via the standard PG
+  machinery; the AM doesn't need `amcanbuildparallel` for
+  CIC (that flag is for *parallel-worker* index build, a
+  separate axis).  Documented in STATUS.md.  Parallel scan
+  (`amcanparallel`) and parallel build
+  (`amcanbuildparallel`) remain false; tracked as v2.0
+  followups.
+
+### v1.3 followups added by this cycle
+
+- Inline-data scan-path bug at `PG_TRE_INLINE_POSTING_MAX >
+  ~448 bytes` (multi-leaf chain interaction with larger
+  inline blobs).  Once fixed, raise the threshold to 1024+
+  for further size reduction.
+- Multi-leaf chain-rank repair (was already tracked).
+  Variable-width per-tuple blooms (`doc/specs/variable-
+  width-blooms.md`) depend on this.
+
+### v2.0 followups added by this cycle
+
+- Posting-page coalescing (`doc/specs/posting-page-
+  coalescing.md`).  The structural change that closes most
+  of the remaining gap to pg_trgm size: pack 4-20
+  low-cardinality trigrams onto a single page instead of
+  one page per trigram.  Format-version bump.
+
 
 ### Added
 

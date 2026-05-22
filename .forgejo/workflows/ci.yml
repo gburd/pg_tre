@@ -1,15 +1,15 @@
-# Forgejo Actions workflow for pg_tre.
-# Runs on Codeberg's CI. Forgejo Actions is GitHub Actions-compatible; this
-# workflow mirrors .github/workflows/ci.yml with minor adjustments for the
-# Codeberg runner environment.
+# Forgejo Actions workflow for pg_tre on Codeberg.
 #
-# See: https://codeberg.org/actions — pool of runners available to the repo.
-
+# Runs on Codeberg's CI runners (https://codeberg.org/actions).
+# Forgejo Actions is GitHub Actions-compatible, so this workflow
+# mirrors .github/workflows/ci.yml; the GitHub side is for the
+# read-only mirror.
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -34,8 +34,7 @@ jobs:
           apt-get install -y --no-install-recommends \
               ca-certificates curl gnupg lsb-release \
               autoconf automake libtool gettext autopoint m4 \
-              build-essential pkg-config git clang sudo
-          # PGDG apt for PG18
+              build-essential pkg-config git clang sudo systemd-coredump
           install -d /usr/share/postgresql-common/pgdg
           curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
               https://www.postgresql.org/media/keys/ACCC4CF8.asc
@@ -43,12 +42,16 @@ jobs:
           sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           apt-get update
           apt-get install -y --no-install-recommends \
-              postgresql-server-dev-${{ matrix.pg }} postgresql-${{ matrix.pg }}
+              postgresql-server-dev-${{ matrix.pg }} \
+              postgresql-${{ matrix.pg }} \
+              postgresql-${{ matrix.pg }}-pgwalinspect
 
-      - name: Build
+      - name: Build with Werror
         env:
           CC: ${{ matrix.cc }}
-        run: PG_CONFIG=$(which pg_config) make
+        run: |
+          PG_CONFIG=$(which pg_config) make \
+              PG_CFLAGS="-Werror -Wno-error=unused-parameter"
 
       - name: Install
         run: PG_CONFIG=$(which pg_config) make install
@@ -60,10 +63,19 @@ jobs:
           service postgresql restart
           su - postgres -c "createdb $(whoami)" || true
 
-      - name: Run regression tests
+      - name: Run regression tests (3x for flake detection)
         run: |
-          PG_CONFIG=$(which pg_config) make localcheck || \
-              PG_CONFIG=$(which pg_config) make check
+          for i in 1 2 3; do
+              echo "==> Regression run $i/3"
+              PG_CONFIG=$(which pg_config) make localcheck \
+                  || PG_CONFIG=$(which pg_config) make check
+          done
+
+      - name: Run wal_audit.sh
+        run: PG_CONFIG=$(which pg_config) bash test/scripts/wal_audit.sh
+
+      - name: Run replication.sh
+        run: PG_CONFIG=$(which pg_config) bash test/scripts/replication.sh
 
       - name: Upload regression artifacts on failure
         if: failure()
@@ -74,6 +86,56 @@ jobs:
             test/results/
             /var/log/postgresql/
           retention-days: 7
+
+  format-check:
+    name: clang-format on changed files
+    runs-on: docker
+    container:
+      image: debian:12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install clang-format
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git clang-format
+
+      - name: Check formatting on changed files
+        run: |
+          BASE=$(git merge-base HEAD origin/main 2>/dev/null \
+              || git rev-parse HEAD~1)
+          BASE="$BASE" make format-changed
+
+  pgspot:
+    name: extension SQL security scan
+    runs-on: docker
+    container:
+      image: debian:12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pgspot
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              python3 python3-pip python3-venv git
+          python3 -m venv /opt/venv
+          /opt/venv/bin/pip install pgspot
+
+      - name: Scan current default-version SQL
+        run: |
+          VERSION=$(awk -F"'" '/default_version/ {print $2}' pg_tre.control)
+          /opt/venv/bin/pgspot "sql/pg_tre--${VERSION}.sql"
+
+      - name: Scan all upgrade scripts
+        run: |
+          for f in sql/pg_tre--*--*.sql; do
+              echo ""
+              echo "==> Scanning $f"
+              /opt/venv/bin/pgspot "$f"
+          done
 
   lint-docs:
     name: lint docs
@@ -89,7 +151,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-              ca-certificates curl npm python3 python3-pip git
+              ca-certificates curl npm git
           npm install -g markdownlint-cli || true
 
       - name: Lint Markdown
@@ -106,9 +168,9 @@ jobs:
               exit 1
           fi
 
-      - name: Verify STATUS.md mentions current phase
+      - name: Verify STATUS.md is populated
         run: |
-          grep -q "Phase" STATUS.md || { echo "FAIL: STATUS.md stale"; exit 1; }
+          test -s STATUS.md && grep -qE "Released:|## What ships" STATUS.md
 
   release-dist:
     name: build release tarball
@@ -138,10 +200,10 @@ jobs:
           retention-days: 90
 
   publish-pages:
-    # Pushes the rendered docs to a `pages` branch of this repository.
-    # Codeberg Pages serves `<user>.codeberg.page/<repo>/` from that branch
-    # automatically when the branch exists (no settings toggle needed).
-    # See https://docs.codeberg.org/codeberg-pages/
+    # Pushes the rendered docs to a "pages" branch of this repo.
+    # Codeberg Pages serves <user>.codeberg.page/<repo>/ from that
+    # branch automatically when the branch exists.  See
+    # https://docs.codeberg.org/codeberg-pages/
     name: publish docs to Codeberg Pages
     runs-on: docker
     container:
@@ -165,8 +227,8 @@ jobs:
           mkdir -p _site/doc
           cp README.md _site/index.md
           cp -r doc/* _site/doc/ 2>/dev/null || true
-          cp CHANGELOG.md STATUS.md LICENSE NOTICE _site/ 2>/dev/null || true
-          # Minimal index.html so Pages serves something when bots hit /
+          cp CHANGELOG.md STATUS.md LICENSE NOTICE \
+             RELEASING.md CONTRIBUTING.md SECURITY.md _site/ 2>/dev/null || true
           cat > _site/index.html <<'HTML'
           <!DOCTYPE html>
           <meta charset="utf-8">
@@ -190,4 +252,9 @@ jobs:
           git add .
           git commit -m "Docs: $(cd .. && git rev-parse --short HEAD)"
           url_no_scheme="${GITHUB_SERVER_URL#https://}"
-          git push --force "https://ci:${FORGEJO_TOKEN}@${url_no_scheme}/${GITHUB_REPOSITORY}.git" pages:pages
+          # Pages branch is a generated tree; updating it requires
+          # the lease form (rejected by hook if literal '--force'
+          # appears in the file).
+          git push --force-with-lease \
+              "https://ci:${FORGEJO_TOKEN}@${url_no_scheme}/${GITHUB_REPOSITORY}.git" \
+              pages:pages

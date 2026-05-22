@@ -1,4 +1,4 @@
--- pg_tre 1.1.1 -> 1.2.0-dev upgrade.
+-- pg_tre 1.1.1 -> 1.2.1 upgrade.
 --
 -- Adds similarity / distance functions for ranking approximate
 -- matches by edit distance.

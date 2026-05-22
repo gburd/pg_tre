@@ -1,13 +1,34 @@
 # pg_tre Testing Guide
 
-This document describes how to run the pg_tre test suite, which consists of SQL regression tests and TAP (Test Anything Protocol) tests.
+This document describes how to run the pg_tre test suite,
+which consists of SQL regression tests, TAP tests (Test
+Anything Protocol), and shell-based tests for replication
+and stress.
 
 ## Overview
 
-pg_tre has two test suites:
+pg_tre has three test suites:
 
-1. **SQL Regression Tests** (`test/sql/*.sql`) — Functional correctness tests that run SQL queries and compare output against expected results.
-2. **TAP Tests** (`tap/*.pl`) — Integration tests that exercise durability, concurrency, and replication using PostgreSQL::Test::Cluster.
+1. **SQL Regression Tests** (`test/sql/*.sql`) — Functional
+   correctness tests that run SQL queries and compare
+   output against expected results.  Driven by
+   `scripts/run-regress.sh` or `make localcheck`.
+2. **TAP Tests** (`tap/*.pl`) — Integration tests for
+   durability, concurrency, and replication using
+   `PostgreSQL::Test::Cluster`.  Driven by `make tap`.
+3. **Shell Tests** (`test/scripts/*.sh`) — Multi-cluster
+   tests modeled on `pg_textsearch`'s shell-test pattern,
+   sharing infrastructure via `test/scripts/lib.sh`.
+   Currently:
+   - `wal_audit.sh` — verifies WAL records are well-formed
+     and that crash recovery preserves the index.
+   - `replication.sh` — primary + streaming standby
+     differential check across catchup, restart, and
+     incremental writes.
+   - `stress.sh` — N-iteration mixed-workload run with
+     RSS ceiling, postmaster-alive check, and
+     differential idx-vs-seq check at the end of every
+     iteration.
 
 ## Prerequisites
 
@@ -21,10 +42,18 @@ pg_tre has two test suites:
 
 - All regression test prerequisites
 - Perl 5.x with Test::More and Test::Harness
-- PostgreSQL::Test::Cluster module (usually in `$(pg_config --libdir)/perl5`)
+- PostgreSQL::Test::Cluster module (the `make tap` target
+  picks up the right path via `PG_TAP_PERL5LIB`).
 - `prove` command-line test runner
 
-On most PostgreSQL installations, the TAP testing modules are included. If not, install from CPAN or your distribution's package manager.
+### For Shell Tests
+
+- All regression test prerequisites
+- `pg_basebackup`, `pg_walinspect` (for `replication.sh`
+  and `wal_audit.sh`)
+- The shell tests `initdb` their own clusters on private
+  ports under `$TMPDIR` (or `/tmp`); they do not require
+  a running PG instance.
 
 ## Running Regression Tests
 

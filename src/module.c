@@ -28,6 +28,7 @@ PG_MODULE_MAGIC;
 
 int  pg_tre_default_max_cost       = 3;
 int  pg_tre_pending_list_limit_kb  = 4096;   /* 4 MiB */
+int  pg_tre_min_trigram_freq       = 1;      /* 0 disables */
 int  pg_tre_range_size_blocks      = 128;
 int  pg_tre_bloom_tuple_bits       = 128;
 int  pg_tre_max_extraction_fanout  = 4096;
@@ -99,6 +100,32 @@ pg_tre_init_guc(void)
         NULL,
         &pg_tre_tuple_bloom_enable,
         false, PGC_SIGHUP, 0, NULL, NULL, NULL);
+
+    /*
+     * Cardinality-aware build (1.2.1+).  Posting trees with fewer
+     * than this many TIDs are dropped during ambuild.  A trigram
+     * appearing in 1-2 rows out of millions isn't a useful
+     * candidate-narrowing filter — its posting tree is mostly
+     * structural overhead (one 8 KB page per trigram).  Queries
+     * matching only such rare trigrams fall back to other trigrams
+     * in the same conjunct; if every trigram in the conjunct was
+     * dropped, the planner emits a fully-lossy bitmap covering the
+     * heap and the executor recheck filters.  Correctness is
+     * preserved either way.
+     *
+     * Default 1 (drop nothing) preserves prior behavior.  Set to 2
+     * or higher to drop singleton/doubleton trigrams; 16 is a
+     * reasonable starting point for large corpora.  PGC_SIGHUP
+     * because changing it mid-build would corrupt the index;
+     * effective on the next CREATE INDEX / REINDEX.
+     */
+    DefineCustomIntVariable("pg_tre.min_trigram_freq",
+        "Skip building posting trees for trigrams with fewer TIDs.",
+        "Posting trees below this threshold are not persisted, "
+        "trading some recheck work for a smaller index.  0 or 1 "
+        "disables the optimization (default).",
+        &pg_tre_min_trigram_freq,
+        1, 0, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     MarkGUCPrefixReserved("pg_tre");
 }

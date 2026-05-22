@@ -326,6 +326,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     MemoryContext oldcxt;
     PostingAccum *accums;
     int         n_accums;
+    int         n_skipped_trigrams;  /* dropped via min_trigram_freq */
     int         accums_alloced;
     uint64      current_hash;
     PgTrePostingBuilder *current_builder;
@@ -377,6 +378,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     accums_alloced = 1024;
     accums = (PostingAccum *) palloc(accums_alloced * sizeof(PostingAccum));
     n_accums = 0;
+    n_skipped_trigrams = 0;
 
     current_hash = 0;
     current_builder = NULL;
@@ -446,24 +448,47 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                         BlockNumber root;
                         const uint8 *inline_data;
                         Size        inline_bytes;
+                        int         n_tids;
 
-                        root = pg_tre_posting_build_finish(current_builder,
-                                                           &inline_data,
-                                                           &inline_bytes);
-                        pg_tre_posting_build_free(current_builder);
+                        n_tids = pg_tre_posting_build_n_tids(
+                                     current_builder);
 
-                        /* Record the completed posting. */
-                        if (n_accums >= accums_alloced)
+                        /*
+                         * Cardinality-aware build (1.2.1+):
+                         * skip persisting posting trees for
+                         * trigrams that appear in fewer than
+                         * pg_tre.min_trigram_freq rows.  These
+                         * trigrams aren't useful candidate
+                         * filters; recheck handles correctness.
+                         */
+                        if (pg_tre_min_trigram_freq > 1 &&
+                            n_tids < pg_tre_min_trigram_freq)
                         {
-                            accums_alloced *= 2;
-                            accums = (PostingAccum *)
-                                repalloc(accums, accums_alloced * sizeof(PostingAccum));
+                            pg_tre_posting_build_free(current_builder);
+                            n_skipped_trigrams++;
                         }
-                        accums[n_accums].trigram_hash = current_hash;
-                        accums[n_accums].root = root;
-                        accums[n_accums].inline_data = inline_data;
-                        accums[n_accums].inline_bytes = inline_bytes;
-                        n_accums++;
+                        else
+                        {
+                            root = pg_tre_posting_build_finish(
+                                       current_builder,
+                                       &inline_data,
+                                       &inline_bytes);
+                            pg_tre_posting_build_free(current_builder);
+
+                            /* Record the completed posting. */
+                            if (n_accums >= accums_alloced)
+                            {
+                                accums_alloced *= 2;
+                                accums = (PostingAccum *)
+                                    repalloc(accums,
+                                             accums_alloced * sizeof(PostingAccum));
+                            }
+                            accums[n_accums].trigram_hash = current_hash;
+                            accums[n_accums].root = root;
+                            accums[n_accums].inline_data = inline_data;
+                            accums[n_accums].inline_bytes = inline_bytes;
+                            n_accums++;
+                        }
                     }
                 }
 
@@ -566,23 +591,36 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                 BlockNumber root;
                 const uint8 *inline_data;
                 Size        inline_bytes;
+                int         n_tids;
 
-                root = pg_tre_posting_build_finish(current_builder,
-                                                   &inline_data,
-                                                   &inline_bytes);
-                pg_tre_posting_build_free(current_builder);
+                n_tids = pg_tre_posting_build_n_tids(current_builder);
 
-                if (n_accums >= accums_alloced)
+                if (pg_tre_min_trigram_freq > 1 &&
+                    n_tids < pg_tre_min_trigram_freq)
                 {
-                    accums_alloced *= 2;
-                    accums = (PostingAccum *)
-                        repalloc(accums, accums_alloced * sizeof(PostingAccum));
+                    pg_tre_posting_build_free(current_builder);
+                    n_skipped_trigrams++;
                 }
-                accums[n_accums].trigram_hash = current_hash;
-                accums[n_accums].root = root;
-                accums[n_accums].inline_data = inline_data;
-                accums[n_accums].inline_bytes = inline_bytes;
-                n_accums++;
+                else
+                {
+                    root = pg_tre_posting_build_finish(current_builder,
+                                                       &inline_data,
+                                                       &inline_bytes);
+                    pg_tre_posting_build_free(current_builder);
+
+                    if (n_accums >= accums_alloced)
+                    {
+                        accums_alloced *= 2;
+                        accums = (PostingAccum *)
+                            repalloc(accums,
+                                     accums_alloced * sizeof(PostingAccum));
+                    }
+                    accums[n_accums].trigram_hash = current_hash;
+                    accums[n_accums].root = root;
+                    accums[n_accums].inline_data = inline_data;
+                    accums[n_accums].inline_bytes = inline_bytes;
+                    n_accums++;
+                }
             }
         }
 
@@ -590,8 +628,15 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
             pfree(positions_buf);
     }
 
-    ereport(NOTICE,
-            (errmsg("pg_tre: built %d posting trees", n_accums)));
+    if (n_skipped_trigrams > 0)
+        ereport(NOTICE,
+                (errmsg("pg_tre: built %d posting trees "
+                        "(%d trigrams skipped: below pg_tre.min_trigram_freq=%d)",
+                        n_accums, n_skipped_trigrams,
+                        pg_tre_min_trigram_freq)));
+    else
+        ereport(NOTICE,
+                (errmsg("pg_tre: built %d posting trees", n_accums)));
 
     /* Step 6: bulk-load upper tree from the posting list. */
     iter_state.accums = accums;

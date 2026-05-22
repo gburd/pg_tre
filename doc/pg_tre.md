@@ -166,6 +166,41 @@ SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL', 1);
 -- Matches: "PostgreSQL", "PostgeSQL", "PotsgreSQL", etc.
 ```
 
+#### `<@>` (similarity / distance for ranking)
+
+```sql
+text <@> tre_pattern → int
+```
+
+Returns the edit distance of the best alignment of input against
+pattern, or `NULL` if no match exists within the pattern's
+`max_cost`.  Named for its visual cue — an eyeball, looking at how
+close two strings are.
+
+**Not indexable yet** — the operator returns a per-row distance,
+so `ORDER BY ... <@> ...` sorts in the executor after the
+`%~~`-driven candidate retrieval.  Index-side `ORDER BY` is a
+v2.0 followup.
+
+**Idiom:**
+```sql
+SELECT body, body <@> tre_pattern('connection refused', 2) AS dist
+FROM   logs
+WHERE  body %~~ tre_pattern('connection refused', 2)
+ORDER BY dist ASC NULLS LAST
+LIMIT  10;
+```
+
+The `WHERE` clause uses the index to narrow candidates; the
+`ORDER BY` sorts the candidate set by distance.  `NULLS LAST` is
+the default for `ASC` ordering, so rows the executor recheck
+rejected sort to the bottom.
+
+Inspired by `pg_textsearch`'s `<@>` for BM25 ranking and
+`pg_trgm`'s `<->` for trigram distance.  Unlike `pg_textsearch`,
+we don't need to invert the sign: the natural distance is
+already ASC-friendly (smaller = more similar).
+
 ### Functions
 
 #### Legacy UDFs (0.1.0 compatibility)
@@ -191,11 +226,36 @@ tre_amatch_detail(input text, pattern text, max_cost int)
 
 **Note:** These do NOT use the index; they always run TRE's regex engine. Use the `%~~` operator for index scans.
 
+#### Similarity / distance (1.2.0+)
+
+```sql
+tre_distance(input text, pattern text, max_cost int) → int
+tre_distance(input text, pattern tre_pattern)         → int
+  -- Edit distance of the best alignment, NULL if no match
+  -- within the pattern's budget.  Equivalent to
+  -- tre_amatch_cost; renamed to make ranking idioms
+  -- obvious in EXPLAIN plans.  The `<@>` operator is sugar
+  -- over the (text, tre_pattern) form.
+
+tre_similarity(input text, pattern text, max_cost int) → float8
+tre_similarity(input text, pattern tre_pattern)         → float8
+  -- Normalized similarity in [0.0, 1.0]:
+  --   1 - cost / max(len(input), len(pattern))
+  -- Returns 0.0 (NOT NULL) when no match exists, so the
+  -- value is always orderable.  Matches pg_trgm's
+  -- similarity() semantics.
+```
+
+**Note:** Like the legacy UDFs, these always run TRE's regex
+engine.  Use them in conjunction with the `%~~` operator to
+drive the index for narrowing first, then rank the candidate
+set.
+
 #### Introspection
 
 ```sql
 tre_version() → text
-  -- Returns TRE library version (e.g., "TRE 0.9.0")
+  -- Returns TRE library version (e.g., "pg_tre 1.2.0 (TRE 0.9.0)")
 
 tre_parse_debug(pattern text) → text
   -- Returns AST of parsed regex (for debugging extraction)
@@ -226,7 +286,7 @@ WITH (
   pending_list_limit = 4096,      -- Pending list size in KiB (default: 4096)
   bloom_tuple_bits = 128,         -- Per-tuple bloom size (default: 128)
   range_size_blocks = 128,        -- Blocks per range entry (default: 128)
-  tuple_bloom_enable = true       -- Enable tier-3 blooms (default: true)
+  tuple_bloom_enable = false      -- Enable tier-3 blooms (default: false in 1.1.x+)
 );
 ```
 
@@ -238,7 +298,16 @@ WITH (
 
 **range_size_blocks:** Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.
 
-**tuple_bloom_enable:** Disable to save space if tier-3 filtering doesn't help your workload.
+**tuple_bloom_enable:** Per-tuple bloom and positional filter
+(tier-3).  **Default: false in 1.1.x and later.**  The chain-rank
+lookup these filters use is broken for multi-leaf posting trees;
+until that's fixed (a v1.3 followup) the GUC bypasses both
+filters.  Recheck remains authoritative for correctness; flipping
+this on without the chain-rank repair will silently lose rows on
+any query whose posting tree spans more than one leaf.  Re-enable
+only if you've verified your workload doesn't trigger multi-leaf
+posting trees (run `EXPLAIN (BUFFERS, ANALYZE)` and look for
+`Index Searches: > 1` per condition).
 
 ### GUCs (Configuration Variables)
 
@@ -268,7 +337,8 @@ SET pg_tre.pending_list_limit = 4096;    -- KiB
 SET pg_tre.range_size_blocks = 128;      -- heap blocks
 SET pg_tre.bloom_tuple_bits = 128;       -- bits
 SET pg_tre.fastupdate = true;
-SET pg_tre.tuple_bloom_enable = true;
+SET pg_tre.tuple_bloom_enable = false;   -- 1.1.x default; see
+                                          -- the WITH-options note
 ```
 
 Context: `PGC_USERSET` (can set per-session), except `range_size_blocks` and `bloom_tuple_bits` are `PGC_SIGHUP` (require reload).

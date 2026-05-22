@@ -2,7 +2,7 @@
 
 **PostgreSQL 18+ native index access method for approximate regex matching.**
 
-[![Status](https://img.shields.io/badge/status-1.0.0--rc1_candidate-orange)](STATUS.md)
+[![Status](https://img.shields.io/badge/status-1.2.1_released-green)](STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
 
@@ -158,6 +158,59 @@ flowchart LR
   language-agnostic — a feature for identifiers, code, logs, SKUs;
   a non-feature for prose search where you want "running" to match
   "run".
+
+### pg_tre alongside pg_textsearch
+
+[`pg_textsearch`][pgts] (Tiger Data) is a BM25 ranked-text-search
+extension that uses `tsvector`-style tokenized input for
+top-k keyword retrieval. **pg_textsearch and pg_tre solve
+different problems and routinely co-install on the same
+column.**
+
+|  | pg_textsearch | pg_tre |
+|---|---|---|
+| Domain | Ranked keyword search | Approximate regex / edit-distance |
+| Index input | Lexemes (stemmed, stop-worded, normalized) | Raw character sequence |
+| Query | `body <@> 'database system'` | `body %~~ tre_pattern('databse', 1)` |
+| Returns | Top-N by BM25 score | All rows within edit budget |
+
+Why pg_tre **doesn't** support `to_tsvector()` input: stemming
+actively destroys our premise.  `running` → trigrams
+`{run, nin, nni, nin, ing}`; if you stem to `run` first, you
+lose the `ing`/`nni`/`nin` trigrams that let `running`
+match `runing` at edit distance 1.  pg_tre's whole value is in
+the character-level edits, not the token-level matches.
+
+**The complementary pattern**: index the same column twice and
+let the planner pick.
+
+```sql
+CREATE INDEX docs_fts ON documents USING bm25(body)
+    WITH (text_config='english');
+CREATE INDEX docs_tre ON documents USING tre (body);
+
+-- Top-10 by BM25 score over a fuzzy-narrowed candidate set:
+SELECT id, body
+FROM   documents
+WHERE  body %~~ tre_pattern('connection refused', 2)
+ORDER BY body <@> to_bm25query('connection refused', 'docs_fts') ASC
+LIMIT  10;
+```
+
+What pg_tre **does** support that's adjacent:
+
+- **Expression indexes** — `CREATE INDEX ON t USING tre
+  ((lower(body)))` for case-insensitive matching, or
+  `((data->>'message'))` for JSONB extraction.  PG core handles
+  the expression evaluation; the AM just sees the resulting
+  `text`.  No AM changes needed; works today.
+- **Partial indexes** —
+  `CREATE INDEX ... WHERE lang='en'` to scope the index by
+  language, status, tenant, or any other immutable predicate.
+- **Hybrid retrieval with lexical guardrails** — see Example 6
+  below for the agent / RAG use case.
+
+[pgts]: https://github.com/timescale/pg_textsearch
 
 ---
 
@@ -455,10 +508,11 @@ in [`doc/perf.md`](doc/perf.md)):
 - Non-selective queries correctly fall back to seq scan (planner
   cost model is calibrated).
 
-**Current taxes** (all targeted by pre-1.0.0 final work):
-index build is ~3.5× slower and ~12× larger than pg_trgm because
-of the per-tuple bloom payload and uncompressed upper-tree layout.
-Multi-leaf posting trees and payload compression close most of this.
+**Current taxes**: index build is ~3.5× slower and ~12× larger
+than pg_trgm because of the per-tuple bloom payload and
+uncompressed upper-tree layout.  Multi-leaf posting trees
+(landed in 1.0.0) and payload compression (a v2.0 follow-up)
+close most of this.
 
 ---
 
@@ -492,8 +546,11 @@ Packaging templates for Debian (`debian/`), RPM
 
 ## Status and roadmap
 
-See [STATUS.md](STATUS.md) for the live phase tracker. Current
-state is **1.0.0** — production release.
+See [STATUS.md](STATUS.md) for the release-state tracker.
+Current state is **1.2.1** — production release with the
+`<@>` similarity operator, replication-correctness fixes,
+and a full Tier-3 testing apparatus (sanitizer CI, shell
+test scripts for `wal_audit`, `replication`, `stress`).
 
 - **Feature-complete**: build, scan, incremental writes,
   crash recovery (single-node), approximate regex k≤2,
@@ -528,9 +585,15 @@ pre-tag gate lives in `scripts/release-check.sh`.
   and seq scan, with the reproducer in `bench/bench.sql`.
 - **[doc/migration-from-0.1.0.md](doc/migration-from-0.1.0.md)** —
   upgrade guide from the UDF-only 0.1.0.
-- **[doc/release-checklist.md](doc/release-checklist.md)** —
-  1.0.0-rc1 → 1.0.0 final gate.
-- **[CHANGELOG.md](CHANGELOG.md)** — grouped by phase.
+- **[RELEASING.md](RELEASING.md)** — release procedure,
+  catalog-object diff audit, version compatibility matrix,
+  on-disk format constant registry.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — source-code
+  architecture, code-style rules, testing requirements,
+  PR process.
+- **[SECURITY.md](SECURITY.md)** — vulnerability disclosure
+  policy and known sharp edges.
+- **[CHANGELOG.md](CHANGELOG.md)** — release-grouped notes.
 
 ---
 

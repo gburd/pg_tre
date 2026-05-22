@@ -1,124 +1,182 @@
 # pg_tre status
 
-Released: **1.1.1** (2026-05).  Currently in flight: **1.2.0-dev**
-project-infrastructure cycle.  See `CHANGELOG.md` for the full
+Released: **1.2.1** (2026-05).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-1.2.0-dev is a between-release cycle bringing pg_tre's project
-infrastructure up to the bar set by `pg_textsearch`.  No source-
-code behavior changes; everything is in CI workflows, release
-engineering, code-quality tooling, and documentation.  See
-`RELEASING.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-`.github/workflows/{upgrade-tests,pgspot,formatting}.yml`,
-`scripts/bump-version.sh`.  Deferred Tier-3 followups are
-tracked in `.agent/notes/community-readiness-followups.md`.
+1.2.1 is a minor release on the 1.0.0 lineage: same on-disk
+format, no re-index required.  Headline additions:
 
-1.1.1 was a hardening release on the 1.1.0 lineage: vendored
-sparsemap 2.2.0 → 2.3.0 (defensive bounds checks against
-corrupt input), no on-disk format changes, no re-index
-required.
+- **Similarity ranking** — `tre_distance(text, tre_pattern)`,
+  `tre_similarity(text, tre_pattern)`, and the `<@>`
+  ("eyeball") operator.  Inspired by `pg_textsearch`'s `<@>`
+  for BM25 ranking.  Use
+  `WHERE body %~~ pattern ORDER BY body <@> pattern ASC LIMIT N`
+  to return the N closest matches.
+- **WAL replay correctness** — three real bugs in our custom
+  rmgr's redo path were caught by the new
+  `test/scripts/replication.sh` and fixed (loop bound off by
+  one, `REGBUF_WILL_INIT` suppressing the FPI we depend on,
+  missing FPI on subsequent records per checkpoint cycle).
+  Streaming replication and crash recovery are now
+  byte-identical between primary and standby.
+- **Project infrastructure** — overhaul modeled on Tiger
+  Data's `pg_textsearch`: `RELEASING.md`, `CONTRIBUTING.md`,
+  `SECURITY.md`, `.clang-format`, pre-commit hooks,
+  `scripts/bump-version.sh`, GitHub Actions for upgrade
+  testing, security scanning, formatting, sanitizers, and
+  nightly stress under ASAN+UBSAN.
+- **Shell test infrastructure** — `test/scripts/lib.sh` plus
+  `wal_audit.sh`, `replication.sh`, `stress.sh`.  These have
+  already paid for themselves: five real bugs (UNLOGGED-fork
+  assertion, `tuple_bloom_enable` default, three WAL-redo
+  issues) caught on first run.
 
-1.1.0 was a maintenance release on the 1.0.0 lineage: same
-on-disk format, same SQL surface, no re-index required.
-It picked up sparsemap 2.2.0 and fixed the multi-leaf
-right-link `sm_union` reversed-logic bug that silently
-dropped every leaf past the first.
+1.1.1 was a hardening release: vendored sparsemap 2.2.0 →
+2.3.0 (defensive bounds checks against corrupt input).
 
-## What ships in 1.0.0
+1.1.0 was a maintenance release: sparsemap 2.0.0 → 2.2.0
+plus a multi-leaf right-link `sm_union` reversed-logic fix
+that silently dropped every leaf past the first.
+
+## What ships in 1.2.1
 
 ### Storage and recovery
+
 - Custom IndexAmRoutine registered as `USING tre`.
 - On-disk format v3: meta page, upper tree, multi-leaf
   posting trees with Lehman-Yao right-links, pending list,
   range-bloom tier, payload region.
 - Custom rmgr (id 140) with full WAL coverage; crash
-  recovery and streaming replication validated by TAP tests
-  in `tap/`.
+  recovery and streaming replication validated by
+  `test/scripts/replication.sh` (4 tests including catchup
+  across standby restart).
+- All page mutations carry full-page images
+  (`REGBUF_FORCE_IMAGE`).  Wasteful but correct; delta-aware
+  redo is a v2.0 followup.
 
 ### Query path
-- `body %~~ tre_pattern(P, k)` operator drives an indexed
-  bitmap heap scan.
-- Lime LALR(1) regex parser.
-- Russ-Cox-style trigram extraction at k=0; Navarro tiling
-  + universal-Levenshtein expansion at k>0.
-- Three-tier filter funnel: range bloom → trigram postings
-  → per-tuple bloom → TRE recheck.
-- DNF / CNF dispatch in the AM driver.
-- Pending-list overlay so newly-inserted rows are visible
-  to scans before vacuum flushes them to posting trees.
 
-### Operations
-- Planner cost model with selectivity backed by index meta
-  statistics.
-- Per-pattern compile and match timeouts; NFA state cap;
-  trigram-extraction fanout cap.  All exposed as GUCs.
+- `body %~~ tre_pattern(P, k)` operator drives indexed
+  bitmap scans.
+- `tre_amatch*(text, text, k, ...)` UDF family: legacy
+  surface preserved from 0.1.0 plus
+  `tre_amatch_cost`, `tre_amatch_detail`,
+  `tre_amatch_with_costs`.
+- **Similarity ranking** — `tre_distance(text, ...)`,
+  `tre_similarity(text, ...)`, and the `<@>` operator.
+- Lossy fallback when extraction can't anchor: emits a
+  TIDBitmap covering the heap, lets recheck filter.
+  Correctness preserved either way.
+
+### Configuration
+
+- GUCs: `pg_tre.default_max_cost`, `pg_tre.pending_list_limit`,
+  `pg_tre.range_size_blocks`, `pg_tre.bloom_tuple_bits`,
+  `pg_tre.max_extraction_fanout`, `pg_tre.max_nfa_states`,
+  `pg_tre.compile_timeout_ms`, `pg_tre.match_timeout_ms`,
+  `pg_tre.fastupdate`, `pg_tre.tuple_bloom_enable`.
+- `pg_tre.tuple_bloom_enable = false` by default: the tier-3
+  per-tuple bloom and positional filter are gated until the
+  chain-rank lookup is repaired (v1.3 followup).  Recheck
+  remains authoritative for correctness.
 - Reloptions: `bloom_tuple_bits`, `range_size_blocks`,
   `fastupdate`, `tuple_bloom_enable`, `pending_list_limit`.
-- Legacy `tre_amatch*` UDFs from 0.1.0 preserved.
 
-### Verification
-- 12 differential regression tests (every k, every pattern
-  shape: `seq-scan via tre_amatch == index-scan via %~~`).
-- Three TAP tests under `tap/` for concurrency, streaming
-  replication, and crash recovery.
-- libFuzzer harness under `fuzz/` for the regex parser.
+### Testing
 
-### Packaging and CI
-- `META.json` for PGXN.
-- `debian/`, `packaging/pg_tre.spec` for distro packages.
-- `doc/Dockerfile` and `doc/homebrew-formula.rb` templates.
-- `make dist` for source tarballs.
-- GitHub Actions and Forgejo Actions (Codeberg) CI.
-- Dependabot (GitHub) and Renovate (Codeberg) for
-  dependency updates.
+- 13 SQL regression tests under `test/sql/`.
+- 3 TAP tests under `tap/` (concurrency, replication,
+  crash recovery).
+- 3 shell tests under `test/scripts/` (`wal_audit.sh`,
+  `replication.sh`, `stress.sh`) plus a shared library
+  (`lib.sh`).
+- 6 GitHub Actions workflows: `ci.yml`, `formatting.yml`,
+  `pgspot.yml`, `upgrade-tests.yml`,
+  `sanitizer-build-and-test.yml`, `nightly-stress.yml`.
+- Codecov upload wired in `ci.yml` (informational).
 
-## v1.2 followups
-
-These are real engineering deliverables, not bugs in 1.1.0.
-
-- Tier-3 per-tuple bloom and positional filter across
-  multi-leaf chains.  The payload offset for both filters is
-  computed from a per-leaf rank that does not accumulate
-  across right-link chains; until that lookup is repaired,
-  `pg_tre.tuple_bloom_enable` bypasses both filters.
-  Executor recheck stays authoritative for correctness; the
-  filters are CPU optimizations.
-- Migrate the remaining `sm_create + sm_add` build-path
-  loops to `sm_add_grow` and the in-place set-op variants
-  (`sm_union_inplace` etc.) added in sparsemap 2.0/2.2.
-- PostgreSQL palloc allocator hook.  Sparsemap 2.2.0 added
-  `sm_set_allocator` / `sm_create_with_allocator`; routing
-  every sparsemap allocation through palloc + memory
-  contexts would let pg_tre delete its explicit `sm_free`
-  call-sites and let context teardown handle lifetime.
-  The threading question (build-time vs query-time vs DSM)
-  needs design work first.
-- Parallel index scan (`amcanparallel = true`).  Bitmap heap
-  scans built from a pg_tre index already parallelize on
-  the heap side; AM-side parallelism is the gap.
-- DNF positional filter.  Per-tuple position checking
-  applies to CNF (k=0) only today; the tiled k≥1 path skips
-  it, since tile alternative position windows are widened
-  beyond what per-TID filtering can cheaply exploit.
-  Recheck preserves correctness; this is a CPU optimization.
-- Per-index reloptions for the SIGHUP-only GUCs
-  (`range_size_blocks`, `bloom_tuple_bits`).
-- 1M-row real-corpus benchmark execution + `doc/perf.md`
-  refresh.
-- libFuzzer harness fidelity: replace stub structs in
-  `fuzz/memutils_stub.c` with real pg_tre header includes
-  so the campaign runs without false ASAN reports against
-  the harness itself.
-- ≥30-day external beta on a non-trivial workload.
-
-## Build and test
+### Build and verify
 
 ```
 PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config
 make           PG_CONFIG=$PG_CONFIG
 make install   PG_CONFIG=$PG_CONFIG
 PG_CONFIG=$PG_CONFIG bash scripts/run-regress.sh
+PG_CONFIG=$PG_CONFIG bash scripts/release-check.sh
 ```
 
 Pre-tag gate: `scripts/release-check.sh`.
+
+## v1.3 followups
+
+- Fix the chain-rank lookup so the tier-3 per-tuple bloom
+  and positional filter can be re-enabled for multi-leaf
+  posting trees.  Today these are bypassed via
+  `pg_tre.tuple_bloom_enable=false`; recheck preserves
+  correctness, but enabling them would speed up deep
+  trigram intersections.
+- **Inline-data scan-path bug** discovered while tuning
+  `PG_TRE_INLINE_POSTING_MAX` in 1.2.1.  At threshold >= 448
+  bytes, the multi-leaf 100K-row test returns 0 rows for
+  `Row 12[0-9][0-9][0-9]` (should be 1000).  Below 384
+  the test passes; 384 is the largest tested-safe value.
+  The interaction is between larger inline-data blobs and
+  the multi-leaf chain walker; likely the same family of
+  bugs as the chain-rank issue above.  Fix unlocks raising
+  the inline threshold to 1024+ bytes for further size
+  reduction.
+- Variable-width per-tuple blooms (see
+  `doc/specs/variable-width-blooms.md`).  Depends on the
+  chain-rank repair landing first.  Yields ~70-80%
+  per-tuple-bloom payload reduction on short-text corpora.
+- Delta-aware WAL redo so we can drop `REGBUF_FORCE_IMAGE`
+  and only ship FPIs as a fallback.  Today every WAL record
+  carries a full-page image of every modified buffer, which
+  is correct but bigger than necessary.
+- `wal_consistency_checking = 'pg_tre'` clean.  Currently
+  the redo callback's post-state diverges from the primary's
+  FPI on at least one byte (likely a hint bit or
+  uninitialized padding).  Gated behind
+  `TRE_WAL_CONSISTENCY=1` in `replication.sh`; fixing
+  byte-identity is part of the delta-aware-redo work.
+- 1M-row real-corpus benchmark execution + `doc/perf.md`
+  refresh.
+- `libFuzzer` harness fidelity: replace stub structs in
+  `fuzz/memutils_stub.c` with real pg_tre header includes.
+
+## v2.0 followups
+
+- Coverity scan integration (deferred from this cycle).
+- PG memory-context ASAN instrumentation patch so the
+  sanitizer CI catches use-after-free across `MemoryContext`
+  boundaries.
+- Index-side `ORDER BY` for the `<@>` operator (today the
+  executor sorts after recheck; index-side requires
+  structural amapi extensions \u2014 `amorder_by` callback,
+  top-N early termination).
+- **Posting-page coalescing** (see
+  `doc/specs/posting-page-coalescing.md`).  The structural
+  change that closes most of the size gap to pg_trgm: pack
+  4-20 low-cardinality trigrams onto a single page instead
+  of one page per trigram.  Format-version bump.  Estimated
+  10x page-count reduction on sparse-trigram corpora.
+- Parallel scan (`amcanparallel = true`) and parallel
+  worker builds (`amcanbuildparallel = true`).  Both flags
+  are false today; `CREATE INDEX CONCURRENTLY` works
+  through standard PG machinery and does not require
+  `amcanbuildparallel`.
+- Multi-leaf chain-rank repair so tier-3 / positional
+  filters work across right-link chains.
+- Whole-tree `clang-format` reformat (deferred to keep
+  git-blame useful for legacy code).
+- PG17 support in CI matrix (codebase currently uses
+  PG18-only APIs that need #if-version guards before PG17
+  builds).
+- Release artifact builds: Linux / macOS \u00d7 amd64 / arm64
+  binaries via `release.yml` and `package-release.yml`.
+- Replication scenarios beyond `replication.sh`:
+  `replication_failover.sh`, `replication_concurrency.sh`,
+  `replication_cascading.sh`, `replication_compat.sh`.
+- `gh-pages` benchmark dashboard with PR-comment regression
+  alerts.

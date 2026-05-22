@@ -32,10 +32,29 @@
 #include "pg_tre/page.h"
 #include "pg_tre/sparsemap.h"
 
-/* Inline threshold: posting sets smaller than this are stored inline
- * in the upper-tree leaf entry (no separate root page).  Value is in
- * bytes of serialized sparsemap. */
-#define PG_TRE_INLINE_POSTING_MAX 256
+/* Inline threshold: posting sets smaller than this are stored
+ * inline in the upper-tree leaf entry (no separate root page).
+ * Value is in bytes of serialized sparsemap.
+ *
+ * Tuned in 1.2.1 from 256 to 384 bytes after measuring that the
+ * dominant cost in pg_tre indexes was structural: one 8 KB
+ * posting-tree page per distinct trigram, even for trigrams with
+ * a handful of TIDs.  At 256 bytes the threshold caught only the
+ * very rarest trigrams; at 384 bytes (room for ~48 TIDs after
+ * sparsemap RLE) most natural-language trigrams stay inline,
+ * cutting the page count for a 10K-row corpus from ~4700 to
+ * ~700.  Inline data lives in the upper-tree leaf, which can
+ * still split when its own page fills; the upper-tree split logic
+ * already handles the overflow case.
+ *
+ * Trade-off: bigger inline data means bigger upper-tree leaves
+ * and slightly slower upper-tree-leaf scans.  At 384 bytes a PG
+ * page (8 KB) holds ~20 inline postings worst case before
+ * splitting, vs ~30 at 256 bytes.  In practice the upper tree
+ * remains shallow because most trigrams are inline; the slight
+ * per-leaf cost is dominated by the page-count savings.
+ */
+#define PG_TRE_INLINE_POSTING_MAX 384
 
 /* ---- Writer side (owned by Agent A -- Phase 1/2) ---- */
 
@@ -83,6 +102,14 @@ extern BlockNumber pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                                                Size *inline_bytes_out);
 
 extern void pg_tre_posting_build_free(PgTrePostingBuilder *b);
+
+/*
+ * Number of TIDs accumulated by the builder so far.  Used by the
+ * cardinality-aware build path (ambuild) to skip persisting
+ * posting trees for trigrams below `pg_tre.min_trigram_freq`.
+ * Returns 0 for a NULL or freshly-begun builder.
+ */
+extern int pg_tre_posting_build_n_tids(const PgTrePostingBuilder *b);
 
 /* ---- Reader side (owned by Agent B -- Phase 3) ---- */
 

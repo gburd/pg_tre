@@ -655,6 +655,14 @@ pg_tre_posting_build_free(PgTrePostingBuilder *b)
     pfree(b);
 }
 
+int
+pg_tre_posting_build_n_tids(const PgTrePostingBuilder *b)
+{
+    if (b == NULL)
+        return 0;
+    return b->n_tids;
+}
+
 /* ================================================================
  * Reader
  * ================================================================ */
