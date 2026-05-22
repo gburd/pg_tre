@@ -4,7 +4,7 @@
 %global pgname postgresql%{pgmajor}
 
 Name:           pg_tre
-Version:        1.2.1
+Version:        1.2.2-dev
 Release:        1%{?dist}
 Summary:        PostgreSQL approximate-regex index access method
 
@@ -44,15 +44,15 @@ export PG_CONFIG=/usr/pgsql-%{pgmajor}/bin/pg_config
 %doc README.md doc/pg_tre.md doc/perf.md
 /usr/pgsql-%{pgmajor}/lib/pg_tre.so
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre.control
-/usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.2.1.sql
-/usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.1.0--1.2.1.sql
+/usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.2.2-dev.sql
+/usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.1.0--1.2.2-dev.sql
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.1.0.sql
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.0.0--1.1.0.sql
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre--1.0.0.sql
 /usr/pgsql-%{pgmajor}/share/extension/pg_tre--0.1.0--1.0.0.sql
 
 %changelog
-* Thu May 14 2026 Greg Burd <greg@burd.me> - 1.2.1-1
+* Thu May 14 2026 Greg Burd <greg@burd.me> - 1.2.2-dev-1
 - Vendor sparsemap 2.3.0 (hardening-only).
 - No on-disk format change; no re-index required.
 
