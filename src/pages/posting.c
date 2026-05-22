@@ -383,17 +383,19 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
 
     /*
      * Phase 4.1: convert the collected uint64 array of TIDs to a canonical
-     * sparsemap serialization.  We allocate a fresh sparsemap of generous
-     * capacity (16 bytes per TID + overhead; sparsemap RLE will compress
-     * further), add each TID, then copy the resulting m_data bytes out
-     * into a palloc'd buffer.
+     * sparsemap serialization.  We allocate a fresh sparsemap with a
+     * generous initial capacity (16 bytes per TID + 1 KiB overhead;
+     * sparsemap RLE will compress further) and use sm_add_grow() so the
+     * buffer doubles geometrically on ENOSPC.
      *
-     * This path avoids sparsemap's dynamic-resize bug entirely by sizing
-     * the destination correctly from the start.  We still need the raw
-     * serialization (via an m_data struct-offset cast) because sparsemap
-     * exposes no direct byte-pointer accessor; the documented struct
-     * layout { size_t capacity; size_t used; uint8 *data; } makes index
-     * [2] on a uint8** cast reach m_data reliably.
+     * Why grow rather than pre-size: sparsemap's per-chunk overhead is
+     * data-dependent (very sparse / scattered TID streams can incur a
+     * fresh chunk header for every TID), so any static "bytes per TID"
+     * estimate is wrong on some inputs.  On ~165k-row tables with a
+     * regex-trigram-heavy column distribution we reproducibly hit
+     * SM_IDX_MAX with the previous static 16 B/TID estimate; the
+     * geometric grow eliminates this class of failure.  The serialized
+     * on-disk bytes are unchanged — only the in-memory cap differs.
      */
     {
         size_t cap = (size_t) b->n_tids * 16 + 1024;
@@ -404,10 +406,31 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                 errmsg("pg_tre: failed to allocate sparsemap for serialization")));
         for (k = 0; k < b->n_tids; k++)
         {
-            if (sm_add(fresh, b->tids[k]) == SM_IDX_MAX)
-                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                    errmsg("pg_tre: sm_add overflow for n_tids=%d cap=%zu",
-                           b->n_tids, cap)));
+            int retries = 0;
+            /* Make this loop cancellable; per-TID iterations are cheap
+             * but n_tids can reach the millions on wide tables. */
+            CHECK_FOR_INTERRUPTS();
+            while (sm_add_grow(&fresh, b->tids[k]) == SM_IDX_MAX)
+            {
+                /*
+                 * sm_add_grow already doubled the buffer once and
+                 * retried.  If the retry still ENOSPCs (or the
+                 * underlying allocation failed), call sm_add_grow
+                 * again — each iteration doubles the buffer.  The
+                 * 16-iteration cap (~65000× the initial size) is a
+                 * safety bound: a real bug rather than a sparse-TID
+                 * input would hit it.
+                 */
+                if (++retries > 16)
+                {
+                    size_t final_cap = sm_get_capacity(fresh);
+                    sm_free(fresh);
+                    ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                        errmsg("pg_tre: sm_add_grow exhausted retries for tid[%d] (n_tids=%d, cap=%zu)",
+                               k, b->n_tids, final_cap),
+                        errhint("File a bug with the table size and column statistics.")));
+                }
+            }
         }
         sz = sm_get_size(fresh);
         {
@@ -423,7 +446,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                 copy = (uint8 *) palloc0(16);
             }
         }
-        free(fresh);
+        sm_free(fresh);
         bytes = copy;
     }
 
@@ -509,7 +532,10 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                 if (tid_idx + tids_in_leaf > n_tids)
                     tids_in_leaf = n_tids - tid_idx;
 
-                /* Build sparsemap for this slice */
+                /* Build sparsemap for this slice; grow geometrically on
+                 * ENOSPC (sparse-TID inputs blow past the 16 B/TID
+                 * estimate).  See pg_tre_posting_build_finish for the
+                 * full rationale. */
                 size_t cap = (size_t)tids_in_leaf * 16 + 1024;
                 sparsemap_t *slice_smap = sm_create(cap);
                 uint8 *slice_bytes;
@@ -522,16 +548,28 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
 
                 for (k = 0; k < tids_in_leaf; k++)
                 {
-                    if (sm_add(slice_smap, b->tids[tid_idx + k]) == SM_IDX_MAX)
-                        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                            errmsg("pg_tre: sm_add overflow in multi-leaf")));
+                    int retries = 0;
+                    /* Cancellable; same rationale as the build_finish
+                     * loop above. */
+                    CHECK_FOR_INTERRUPTS();
+                    while (sm_add_grow(&slice_smap, b->tids[tid_idx + k]) == SM_IDX_MAX)
+                    {
+                        if (++retries > 16)
+                        {
+                            size_t final_cap = sm_get_capacity(slice_smap);
+                            sm_free(slice_smap);
+                            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                                errmsg("pg_tre: multi-leaf slice sm_add_grow exhausted retries (k=%d, tids_in_leaf=%d, cap=%zu)",
+                                       k, tids_in_leaf, final_cap)));
+                        }
+                    }
                 }
 
                 slice_sz = sm_get_size(slice_smap);
                 slice_bytes = (uint8 *) palloc(slice_sz + 16);
                 memcpy(slice_bytes, sm_get_data(slice_smap), slice_sz);
                 memset(slice_bytes + slice_sz, 0, 16);
-                free(slice_smap);
+                sm_free(slice_smap);
 
                 /* Build payload slice for this range */
                 uint8 *slice_payload = NULL;

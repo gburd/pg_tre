@@ -474,10 +474,11 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         /*
          * Convert our collected uint64 TID array to a malloc-backed
-         * sparsemap sized for the exact cardinality we observed.
-         * Over-allocate generously to avoid any dynamic-resize path:
-         * worst case a sparsemap for N TIDs needs N*8 bytes plus
-         * overhead.  2*N*8 + 1024 is more than enough.
+         * sparsemap.  We start with a generous initial capacity
+         * (16 B/TID + 1 KiB overhead) and use sm_add_grow() so the
+         * buffer doubles geometrically on ENOSPC — sparse / scattered
+         * TID streams can incur a fresh chunk header per TID, blowing
+         * past any static estimate.
          */
         {
             size_t cap = (size_t) e->n_tids * 16 + 1024;
@@ -487,9 +488,18 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
                     errmsg("pg_tre: merge accumulator allocation failed")));
             for (k = 0; k < e->n_tids; k++)
             {
-                if (sm_add(fresh_acc, e->tids[k]) == SM_IDX_MAX)
-                    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                        errmsg("pg_tre: merge accumulator unexpectedly full")));
+                int retries = 0;
+                while (sm_add_grow(&fresh_acc, e->tids[k]) == SM_IDX_MAX)
+                {
+                    if (++retries > 16)
+                    {
+                        size_t final_cap = sm_get_capacity(fresh_acc);
+                        sm_free(fresh_acc);
+                        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                            errmsg("pg_tre: merge accumulator sm_add_grow exhausted retries (k=%d, n_tids=%d, cap=%zu)",
+                                   k, e->n_tids, final_cap)));
+                    }
+                }
             }
             merged = fresh_acc;
         }
