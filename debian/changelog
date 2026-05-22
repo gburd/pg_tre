@@ -1,4 +1,4 @@
-pg_tre (1.2.3-1) unstable; urgency=medium
+pg_tre (1.2.4-dev-1) unstable; urgency=medium
 
   * Vendor sparsemap 2.3.0 (drop-in compatible upgrade from 2.2.0).
     Hardening-only release: bounds clamping in __sm_chunk_get_position

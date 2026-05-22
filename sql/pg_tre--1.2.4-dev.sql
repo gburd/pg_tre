@@ -164,7 +164,7 @@ CREATE OPERATOR CLASS tre_text_ops
     STORAGE text;
 
 -- ---------------------------------------------------------------
--- 1.2.3 additions: similarity / distance ranking helpers.
+-- 1.2.4-dev additions: similarity / distance ranking helpers.
 -- ---------------------------------------------------------------
 
 CREATE FUNCTION tre_similarity(text, text, int4)
