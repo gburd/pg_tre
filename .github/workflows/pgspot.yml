@@ -1,0 +1,45 @@
+name: pgspot Security Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sql/**'
+      - 'pg_tre.control'
+      - '.github/workflows/pgspot.yml'
+  pull_request:
+    paths:
+      - 'sql/**'
+      - 'pg_tre.control'
+      - '.github/workflows/pgspot.yml'
+
+jobs:
+  pgspot:
+    name: Check Extension SQL
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pgspot
+        run: pip install pgspot
+
+      - name: Scan current default-version SQL
+        run: |
+          VERSION=$(awk -F"'" '/default_version/ {print $2}' pg_tre.control)
+          echo "Scanning sql/pg_tre--${VERSION}.sql"
+          pgspot "sql/pg_tre--${VERSION}.sql"
+
+      - name: Scan all upgrade scripts
+        run: |
+          for f in sql/pg_tre--*--*.sql; do
+              echo ""
+              echo "==> Scanning $f"
+              pgspot "$f"
+          done

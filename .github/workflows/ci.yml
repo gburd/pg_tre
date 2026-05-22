@@ -42,7 +42,13 @@ jobs:
       - name: Build
         env:
           CC: ${{ matrix.cc }}
-        run: PG_CONFIG=$(which pg_config) make
+        # -Werror via PG_CFLAGS, not CFLAGS, because pgxs overrides CFLAGS.
+        # We're already at zero warnings; this enforcement keeps it that way.
+        # The same -Wno-* knobs are needed because PG headers and pgxs's
+        # default flags trip GCC false positives that we don't want to fix.
+        run: |
+          PG_CONFIG=$(which pg_config) make \
+              PG_CFLAGS="-Werror -Wno-error=unused-parameter"
 
       - name: Install
         run: sudo PG_CONFIG=$(which pg_config) make install
@@ -57,10 +63,13 @@ jobs:
               sudo service postgresql restart
           sudo -u postgres createdb "$USER"
 
-      - name: Run regression tests
+      - name: Run regression tests (3x for flake detection)
         run: |
-          PG_CONFIG=$(which pg_config) make localcheck || \
-              PG_CONFIG=$(which pg_config) make check
+          for i in 1 2 3; do
+              echo "==> Regression run $i/3"
+              PG_CONFIG=$(which pg_config) make localcheck \
+                  || PG_CONFIG=$(which pg_config) make check
+          done
 
       - name: Upload regression artifacts on failure
         if: failure()
@@ -103,7 +112,7 @@ jobs:
 
       - name: Verify STATUS.md is populated
         run: |
-          test -s STATUS.md && grep -q "Phase" STATUS.md
+          test -s STATUS.md && grep -qE "Released:|## What ships" STATUS.md
 
       - name: Check all README doc links resolve
         run: |

@@ -1,0 +1,169 @@
+name: Upgrade Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Target version to test upgrades to (leave empty for current branch)'
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'sql/**'
+      - 'pg_tre.control'
+      - 'include/pg_tre/page.h'
+      - 'include/pg_tre/xlog.h'
+      - '.github/workflows/upgrade-tests.yml'
+  schedule:
+    # Weekly on Sundays at 02:00 UTC.
+    - cron: '0 2 * * 0'
+
+jobs:
+  test-upgrades:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ['18']
+        # Add the previous release here whenever you cut a new one.
+        # See RELEASING.md.
+        old_version: ['1.0.0', '1.1.0', '1.1.1']
+        # When a release breaks on-disk format compatibility, list
+        # the (old_version, pg_version) pairs to skip here.
+        exclude: []
+
+    steps:
+      - name: Checkout current code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential autoconf automake libtool gettext bison flex \
+            wget ca-certificates gnupg
+
+      - name: Install PostgreSQL ${{ matrix.pg_version }}
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg_version }} \
+            postgresql-server-dev-${{ matrix.pg_version }}
+          sudo systemctl stop postgresql
+
+      - name: Download old release v${{ matrix.old_version }}
+        run: |
+          # Codeberg auto-generates a tarball from the tag.
+          DOWNLOAD_URL="https://codeberg.org/gregburd/pg_tre/archive/v${{ matrix.old_version }}.tar.gz"
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -fsSL -o pg_tre-old.tar.gz "$DOWNLOAD_URL" || {
+              echo "::error::Failed to download v${{ matrix.old_version }}"
+              exit 1
+          }
+          mkdir -p pg_tre-${{ matrix.old_version }}
+          tar -xzf pg_tre-old.tar.gz -C pg_tre-${{ matrix.old_version }} \
+              --strip-components=1
+          ls -la pg_tre-${{ matrix.old_version }}
+
+      - name: Build and install old version v${{ matrix.old_version }}
+        run: |
+          cd pg_tre-${{ matrix.old_version }}
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+          export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
+          # Initialize submodules if the tarball doesn't include them.
+          if [ ! -f vendor/tre/configure.ac ]; then
+              echo "Tarball missing TRE submodule; aborting."
+              exit 1
+          fi
+          make
+          sudo env "PATH=$PATH" make install
+
+      - name: Start PostgreSQL with old binary, create test data
+        run: |
+          export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
+          export PGDATA=/tmp/pgdata_upgrade
+          initdb -D "$PGDATA" --auth-local=trust --auth-host=trust
+          {
+              echo "shared_preload_libraries = 'pg_tre'"
+              echo "shared_buffers = 256MB"
+              echo "port = 5432"
+              echo "unix_socket_directories = '/tmp'"
+          } >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" start -w -l "$PGDATA/logfile"
+          createdb -h /tmp upgrade_test
+          # Install the old extension version and create test data.
+          psql -h /tmp -d upgrade_test -X <<'SQL'
+          CREATE EXTENSION pg_tre VERSION '${{ matrix.old_version }}';
+          SELECT extversion FROM pg_extension WHERE extname = 'pg_tre';
+          CREATE TABLE t (id serial PRIMARY KEY, body text);
+          INSERT INTO t (body)
+          SELECT 'The quick brown fox over the lazy dog row ' || i
+          FROM generate_series(1, 1000) AS i;
+          CREATE INDEX t_idx ON t USING tre (body);
+          -- Capture the seq-scan baseline so we can verify the
+          -- upgrade did not change result semantics.
+          SET enable_seqscan = off;
+          SELECT count(*) FROM t WHERE body %~~ tre_pattern('the', 0);
+          SQL
+          pg_ctl -D "$PGDATA" stop -w -m fast
+
+      - name: Build and install current version
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+          export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
+          make clean
+          make
+          sudo env "PATH=$PATH" make install
+
+      - name: Restart PG with new binary, run ALTER EXTENSION UPDATE
+        run: |
+          export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
+          export PGDATA=/tmp/pgdata_upgrade
+          pg_ctl -D "$PGDATA" start -w -l "$PGDATA/logfile"
+          # Find the target version from the control file.
+          NEW_VERSION=$(awk -F"'" '/default_version/ {print $2}' \
+              pg_tre.control)
+          echo "Upgrading to: $NEW_VERSION"
+          psql -h /tmp -d upgrade_test -X <<SQL
+          ALTER EXTENSION pg_tre UPDATE TO '$NEW_VERSION';
+          SELECT extversion FROM pg_extension WHERE extname = 'pg_tre';
+          SELECT tre_version();
+          -- Verify the AM still works on the index built under the
+          -- old version.
+          SET enable_seqscan = off;
+          SELECT count(*) FROM t WHERE body %~~ tre_pattern('the', 0);
+          -- Differential: index scan must agree with seq-scan after
+          -- the upgrade.
+          CREATE TEMP TABLE idx_ids AS
+              SELECT id FROM t WHERE body %~~ tre_pattern('the', 0);
+          SET enable_seqscan = on;
+          SET enable_indexscan = off;
+          SET enable_bitmapscan = off;
+          CREATE TEMP TABLE seq_ids AS
+              SELECT id FROM t WHERE body %~~ tre_pattern('the', 0);
+          SELECT
+              (SELECT count(*) FROM idx_ids) =
+                  (SELECT count(*) FROM seq_ids) AS counts_agree,
+              NOT EXISTS (SELECT 1 FROM idx_ids
+                          EXCEPT SELECT 1 FROM seq_ids)
+              AND NOT EXISTS (SELECT 1 FROM seq_ids
+                              EXCEPT SELECT 1 FROM idx_ids)
+                  AS row_sets_agree;
+          SQL
+          pg_ctl -D "$PGDATA" stop -w -m fast
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          if [ -f /tmp/pgdata_upgrade/logfile ]; then
+              echo "::group::PostgreSQL log"
+              tail -200 /tmp/pgdata_upgrade/logfile
+              echo "::endgroup::"
+          fi
+          ls -la /usr/lib/postgresql/${{ matrix.pg_version }}/share/extension/pg_tre* || true

@@ -60,3 +60,9 @@ build/
 config/
 bench/results/
 .new-sparsemap/
+
+# Coverage
+coverage-html/
+coverage.info
+*.gcda
+*.gcno

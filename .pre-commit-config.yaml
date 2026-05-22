@@ -1,0 +1,36 @@
+repos:
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.8
+    hooks:
+      - id: clang-format
+        types: [c]
+        files: ^(src|include)/.*\.(c|h)$
+        # Skip vendored files (see .clang-format-ignore)
+        exclude: |
+          (?x)^(
+            src/util/sparsemap\.c
+          | include/pg_tre/sparsemap\.h
+          | include/pg_tre/popcount\.h
+          | src/query/tre_grammar\.c
+          | src/query/tre_grammar\.h
+          )$
+        args: [--style=file]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: (\.patch$|test/expected/.*\.out$|test/sql/.*\.sql$)
+      - id: end-of-file-fixer
+        exclude: (\.patch$|test/expected/.*\.out$)
+      - id: check-yaml
+      - id: check-added-large-files
+        # 500 KB cap. The fuzz corpus and bench corpus are intentionally
+        # bigger; if you're adding something else big, that's a smell.
+        args: ['--maxkb=500']
+        exclude: |
+          (?x)^(
+            fuzz/corpus/.*
+          | bench/corpus\.csv
+          | images/.*
+          )$

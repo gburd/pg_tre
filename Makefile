@@ -99,6 +99,24 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 # ------------------------------------------------------------------
+# TAP test environment
+# ------------------------------------------------------------------
+# PG_REGRESS:           pg_regress binary path; defaults to the one
+#                       shipped with the install pointed at by
+#                       PG_CONFIG.
+# PG_TAP_PERL5LIB:      where PostgreSQL/Test/Cluster.pm lives.  On a
+#                       PGDG-style install it's `--includedir-server
+#                       /../src/test/perl`; on the pgrx layout it's
+#                       `~/.pgrx/<VER>/src/test/perl`.  Override on
+#                       the command line for non-standard layouts.
+# PG_TAP_TMPDIR:        scratch directory for TAP tmp_check trees.
+# NO_NIX_SHELL=1:       skip the nix-shell wrapper if your perl
+#                       already has IPC::Run installed.
+PG_REGRESS ?= $(shell $(PG_CONFIG) --pkglibdir 2>/dev/null)/pgxs/src/test/regress/pg_regress
+PG_TAP_PERL5LIB ?= $(shell dirname $$(dirname $$($(PG_CONFIG) --pkglibdir 2>/dev/null)))/src/test/perl
+PG_TAP_TMPDIR ?= /tmp/pg_tre_tap_tmp
+
+# ------------------------------------------------------------------
 # PG version guard: require >= 18.
 # ------------------------------------------------------------------
 PG_VERSION_RAW := $(shell $(PG_CONFIG) --version 2>/dev/null)
@@ -153,7 +171,126 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # ------------------------------------------------------------------
 # Convenience targets
 # ------------------------------------------------------------------
-.PHONY: localcheck tapcheck tap vendor-clean distclean-full dist
+.PHONY: localcheck tapcheck tap vendor-clean distclean-full dist \
+        format format-check format-diff format-single format-changed \
+        coverage coverage-build coverage-clean coverage-report
+
+# ------------------------------------------------------------------
+# Code formatting (clang-format with PostgreSQL style)
+# ------------------------------------------------------------------
+# .clang-format and .clang-format-ignore at the repo root configure
+# the style and the exclusion list.  CI runs `make format-check` on
+# every PR via .github/workflows/formatting.yml.
+FMT_FILES := $(shell find src include -name '*.c' -o -name '*.h' 2>/dev/null \
+    | grep -vE 'src/util/sparsemap\.c|include/pg_tre/sparsemap\.h|include/pg_tre/popcount\.h|src/query/tre_grammar\.[ch]')
+
+format:
+	@echo "==> Formatting C code with clang-format"
+	@command -v clang-format >/dev/null 2>&1 || { \
+	    echo "clang-format not found; install via your package manager."; \
+	    exit 1; \
+	}
+	@clang-format -i --style=file $(FMT_FILES)
+	@echo "    formatted $(words $(FMT_FILES)) files"
+
+format-check:
+	@echo "==> Checking C code formatting"
+	@command -v clang-format >/dev/null 2>&1 || { \
+	    echo "clang-format not found; install via your package manager."; \
+	    exit 1; \
+	}
+	@clang-format --dry-run --Werror --style=file $(FMT_FILES) || { \
+	    echo ""; \
+	    echo "Formatting check failed.  Run 'make format' to fix."; \
+	    exit 1; \
+	}
+	@echo "    OK ($(words $(FMT_FILES)) files clean)"
+
+format-diff:
+	@for f in $(FMT_FILES); do \
+	    diff -u $$f <(clang-format --style=file $$f) || true; \
+	done
+
+# Check formatting only on files modified vs main.  Useful for PR
+# reviewers and the formatting.yml CI workflow during the
+# transition period before the existing tree has been reformatted
+# in one go.  When BASE is unset, falls back to staged changes.
+format-changed:
+	@command -v clang-format >/dev/null 2>&1 || { \
+	    echo "clang-format not found."; exit 1; \
+	}
+	@base=$${BASE:-origin/main}; \
+	files=$$(git diff --name-only $$base...HEAD -- 'src/*.c' 'src/*.h' \
+	    'src/**/*.c' 'src/**/*.h' 'include/**/*.h' 2>/dev/null \
+	    | grep -vE 'src/util/sparsemap\.c|include/pg_tre/sparsemap\.h|include/pg_tre/popcount\.h|src/query/tre_grammar\.[ch]'); \
+	if [ -z "$$files" ]; then \
+	    echo "No C files changed vs $$base."; \
+	    exit 0; \
+	fi; \
+	echo "==> Checking formatting on changed files:"; \
+	echo "$$files" | sed 's/^/    /'; \
+	clang-format --dry-run --Werror --style=file $$files
+
+format-single:
+	@if [ -z "$(FILE)" ]; then \
+	    echo "Usage: make format-single FILE=path/to/file.c"; \
+	    exit 1; \
+	fi
+	@clang-format -i --style=file $(FILE)
+	@echo "$(FILE) formatted"
+
+# ------------------------------------------------------------------
+# Code coverage (Linux only — requires lcov: apt install lcov)
+# ------------------------------------------------------------------
+COVERAGE_DIR  = coverage-html
+COVERAGE_INFO = coverage.info
+
+coverage-clean:
+	@echo "==> Cleaning coverage data"
+	@find . -name '*.gcda' -delete 2>/dev/null || true
+	@find . -name '*.gcno' -delete 2>/dev/null || true
+	@if [ -d $(COVERAGE_DIR) ]; then find $(COVERAGE_DIR) -mindepth 1 -delete && rmdir $(COVERAGE_DIR); fi
+	@if [ -f $(COVERAGE_INFO) ]; then mv $(COVERAGE_INFO) /tmp/old-cov-$$$$.info; fi
+
+coverage-build: coverage-clean
+	@command -v lcov >/dev/null 2>&1 || { \
+	    echo "lcov not found; install via your package manager."; \
+	    exit 1; \
+	}
+	@echo "==> Building with coverage instrumentation"
+	$(MAKE) clean
+	$(MAKE) PG_CFLAGS="--coverage -O0 -g" SHLIB_LINK="--coverage"
+	$(MAKE) install
+
+coverage: coverage-build
+	@echo "==> Running tests under coverage"
+	@lcov --zerocounters --directory . 2>/dev/null || true
+	-bash scripts/run-regress.sh
+	@echo "==> Capturing coverage data"
+	@lcov --capture --directory . --output-file $(COVERAGE_INFO) \
+	    --base-directory $(shell pwd) --no-external --rc branch_coverage=1 \
+	    --ignore-errors mismatch 2>/dev/null || \
+	  lcov --capture --directory . --output-file $(COVERAGE_INFO) \
+	    --base-directory $(shell pwd) --no-external
+	@lcov --remove $(COVERAGE_INFO) \
+	    '*/test/*' '*/bench/*' '*/fuzz/*' '*/vendor/*' \
+	    '*/util/sparsemap.c' '*/query/tre_grammar.c' \
+	    --output-file $(COVERAGE_INFO) --rc branch_coverage=1 \
+	    --ignore-errors unused 2>/dev/null || true
+	@echo "==> Generating HTML report"
+	@genhtml $(COVERAGE_INFO) --output-directory $(COVERAGE_DIR) \
+	    --title "pg_tre Coverage" --legend --show-details \
+	    --rc branch_coverage=1
+	@echo ""
+	@echo "    Coverage report: $(COVERAGE_DIR)/index.html"
+	@lcov --summary $(COVERAGE_INFO) --rc branch_coverage=1
+
+coverage-report:
+	@if [ ! -f $(COVERAGE_INFO) ]; then \
+	    echo "No coverage data.  Run 'make coverage' first."; \
+	    exit 1; \
+	fi
+	@lcov --summary $(COVERAGE_INFO) --rc branch_coverage=1
 
 # ------------------------------------------------------------------
 # Release tarball
@@ -199,13 +336,29 @@ tapcheck:
 # TAP tests for v1.0.0-final blockers: concurrency, replication, crash recovery.
 # These are the production-ready tests that gate the v1.0.0 release.
 tap:
-	@echo "Running v1.0.0-final blocker TAP tests..."
+	@echo "Running TAP tests (concurrency, replication, crash_recovery)..."
 	@if ! command -v prove >/dev/null 2>&1; then \
 		echo "ERROR: prove not found. Install Test::More and Test::Harness."; \
 		exit 1; \
 	fi
-	PG_CONFIG='$(PG_CONFIG)' PERL5LIB='$(shell $(PG_CONFIG) --libdir)/perl5' \
-		prove -v tap/*.pl
+	@if ! command -v nix-shell >/dev/null 2>&1 || [ -n "$(NO_NIX_SHELL)" ]; then \
+	    PG_CONFIG='$(PG_CONFIG)' \
+	    PERL5LIB='$(PG_TAP_PERL5LIB)' \
+	    PG_REGRESS='$(PG_REGRESS)' \
+	    TMPDIR='$(PG_TAP_TMPDIR)' \
+	    PATH=$$(dirname $(PG_CONFIG)):$$PATH \
+	        prove -v tap/*.pl; \
+	else \
+	    PG_BIN_DIR=$$(dirname $(PG_CONFIG)); \
+	    nix-shell -p '(perl.withPackages (p: [ p.IPCRun ]))' --run " \
+	        export PG_CONFIG='$(PG_CONFIG)'; \
+	        export PERL5LIB='$(PG_TAP_PERL5LIB)'; \
+	        export PG_REGRESS='$(PG_REGRESS)'; \
+	        export TMPDIR='$(PG_TAP_TMPDIR)'; \
+	        export PATH=$$PG_BIN_DIR:\$$PATH; \
+	        mkdir -p \\\"\$$TMPDIR\\\"; \
+	        prove -v tap/*.pl"; \
+	fi
 
 vendor-clean:
 	-$(MAKE) -C $(TRE_DIR) distclean 2>/dev/null || true

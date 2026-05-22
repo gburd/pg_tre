@@ -1,0 +1,57 @@
+# PostgreSQL-style C formatting for pg_tre.
+# 79-char line limit, tabs, Allman braces, alignment tuned for PG.
+BasedOnStyle: LLVM
+
+# Basic formatting
+ColumnLimit: 79
+IndentWidth: 4
+TabWidth: 4
+UseTab: Always
+ContinuationIndentWidth: 8
+
+# Function formatting (key for PostgreSQL style)
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowAllArgumentsOnNextLine: true
+AlwaysBreakAfterReturnType: AllDefinitions
+BinPackArguments: false
+BinPackParameters: false
+IndentWrappedFunctionNames: false
+
+# Alignment
+AlignAfterOpenBracket: AlwaysBreak
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignOperands: AlignAfterOperator
+AlignTrailingComments: true
+
+# Braces (PostgreSQL style: opening brace on new line)
+BreakBeforeBraces: Allman
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Comments and strings
+ReflowComments: true
+BreakStringLiterals: true
+
+# Pointer style
+PointerAlignment: Right
+
+# Don't sort #include lines automatically — we order them by
+# convention (postgres.h, stdlib, project) and clang-format's
+# sort would shuffle that.
+SortIncludes: false

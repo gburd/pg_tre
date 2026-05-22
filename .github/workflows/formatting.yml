@@ -1,0 +1,57 @@
+name: Formatting
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - '.clang-format'
+      - '.clang-format-ignore'
+      - '.github/workflows/formatting.yml'
+      - 'Makefile'
+
+jobs:
+  format-check-changed:
+    name: clang-format on changed files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history for `git diff origin/main...HEAD`
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Check formatting on changed files
+        run: |
+          git fetch origin main --depth=50 || true
+          BASE=$(git merge-base HEAD origin/main 2>/dev/null \
+              || git rev-parse HEAD~1)
+          echo "Comparing against $BASE"
+          BASE="$BASE" make format-changed
+
+  # Whole-tree check kept informational while the existing tree is
+  # being progressively brought into compliance.  Promote to a hard
+  # gate when a one-shot reformat commit lands and `make format-check`
+  # comes back clean.
+  format-check-tree:
+    name: clang-format full tree (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Run make format-check
+        run: |
+          make format-check || {
+              echo "::warning::Tree-wide formatting check failed."
+              echo "Run 'make format' locally to see the diff."
+              exit 1
+          }
