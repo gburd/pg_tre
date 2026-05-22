@@ -1,0 +1,181 @@
+-- test/sql/similarity.sql
+-- Regression test for tre_similarity, tre_distance, and the <@>
+-- operator added in 1.2.0-dev.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/similarity.sql:5: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+-- ----------------------------------------------------------------
+-- Basic distance / similarity on text input (no index involved).
+-- ----------------------------------------------------------------
+-- Exact match: distance 0, similarity 1.
+SELECT tre_distance('fox', 'fox', 2);
+ tre_distance 
+--------------
+            0
+(1 row)
+
+SELECT tre_similarity('fox', 'fox', 2);
+ tre_similarity 
+----------------
+              1
+(1 row)
+
+-- One substitution: distance 1.
+SELECT tre_distance('fix', 'fox', 2);
+ tre_distance 
+--------------
+            1
+(1 row)
+
+SELECT tre_distance('fix'::text, tre_pattern('fox', 2));
+ tre_distance 
+--------------
+            1
+(1 row)
+
+-- One deletion + one insertion against pattern of length 3 in
+-- input of length 5: distance = 2.
+SELECT tre_distance('boxtr', 'fox', 2);
+ tre_distance 
+--------------
+            1
+(1 row)
+
+-- No match within budget: NULL.
+--
+-- Note: 'xyzzy' against 'fox' with k=2 actually MATCHES because TRE
+-- finds the substring 'x' inside 'xyzzy' and reaches it from 'fox'
+-- via two deletions (delete 'f', delete 'o', keep 'x'), cost=2.
+-- TRE's approximate match looks for any substring; it doesn't
+-- require the whole input to match the whole pattern.
+SELECT tre_distance('zzz', 'fox', 2);  -- truly no shared chars
+ tre_distance 
+--------------
+             
+(1 row)
+
+SELECT tre_distance('zzz'::text, tre_pattern('fox', 2));
+ tre_distance 
+--------------
+             
+(1 row)
+
+-- 'foxtrot' (len=7), 'fox' (len=3), max=7, cost=0 (exact-substring
+-- match), so similarity = 1 - 0/7 = 1.0.
+SELECT tre_similarity('foxtrot'::text, 'fox'::text, 2);
+ tre_similarity 
+----------------
+              1
+(1 row)
+
+-- 'faxtrat' against 'fox' with k=2: best alignment is one
+-- substitution (a->o); cost=1, max_len=7, sim=1-1/7=0.857...
+SELECT round(tre_similarity('faxtrat'::text, 'fox'::text, 2)::numeric, 3);
+ round 
+-------
+ 0.857
+(1 row)
+
+-- A truly-disjoint input returns sim=0.0 within k=0.
+SELECT tre_similarity('zzz'::text, 'fox'::text, 0);
+ tre_similarity 
+----------------
+              0
+(1 row)
+
+-- ----------------------------------------------------------------
+-- The <@> operator: ORDER BY distance against an indexed table.
+-- ----------------------------------------------------------------
+DROP TABLE IF EXISTS sim_t CASCADE;
+psql:test/sql/similarity.sql:48: NOTICE:  table "sim_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE sim_t (id serial, body text);
+CREATE TABLE
+INSERT INTO sim_t (body) VALUES
+    ('the quick brown fox'),     -- exact-substring 'fox', dist 0
+    ('the quick brwn fx'),       -- 'fx' is 1 deletion from 'fox'
+    ('the quick brown fix'),     -- 'fix' is 1 substitution from 'fox'
+    ('a slow gray cat'),         -- only matches via partial 'o'
+    ('foxtrot here'),            -- exact substring 'fox', dist 0
+    ('boxtrot here'),            -- 1 sub
+    ('zzz nothing here');        -- no shared trigram
+INSERT 0 7
+CREATE INDEX sim_idx ON sim_t USING tre (body);
+psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: collected 96 trigram entries from 7 heap tuples
+psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: built 56 posting trees
+psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: build complete, indexed 7 heap tuples into 56 trigrams
+CREATE INDEX
+-- ORDER BY <@> ASC NULLS LAST returns closest matches first.  We
+-- sort by id as a tiebreaker for determinism.
+SET enable_seqscan = off;
+SET
+SELECT body, body <@> tre_pattern('fox', 2) AS dist
+FROM sim_t
+WHERE body %~~ tre_pattern('fox', 2)
+ORDER BY dist ASC NULLS LAST, id ASC;
+        body         | dist 
+---------------------+------
+ the quick brown fox |    0
+ foxtrot here        |    0
+ the quick brwn fx   |    1
+ the quick brown fix |    1
+ boxtrot here        |    1
+ a slow gray cat     |    2
+ zzz nothing here    |    2
+(7 rows)
+
+-- Without the index (force seq scan): same result.
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT body, body <@> tre_pattern('fox', 2) AS dist
+FROM sim_t
+WHERE body <@> tre_pattern('fox', 2) IS NOT NULL
+ORDER BY dist ASC NULLS LAST, id ASC;
+        body         | dist 
+---------------------+------
+ the quick brown fox |    0
+ foxtrot here        |    0
+ the quick brwn fx   |    1
+ the quick brown fix |    1
+ boxtrot here        |    1
+ a slow gray cat     |    2
+ zzz nothing here    |    2
+(7 rows)
+
+-- Using <@> in WHERE clause works (filters NULL = no-match).
+SELECT count(*) FROM sim_t
+WHERE body <@> tre_pattern('fox', 2) IS NOT NULL;
+ count 
+-------
+     7
+(1 row)
+
+-- The <@> result is consistent with tre_distance().
+SELECT
+    body,
+    body <@> tre_pattern('fox', 2) = tre_distance(body, tre_pattern('fox', 2))
+        AS consistent
+FROM sim_t
+ORDER BY id;
+        body         | consistent 
+---------------------+------------
+ the quick brown fox | t
+ the quick brwn fx   | t
+ the quick brown fix | t
+ a slow gray cat     | t
+ foxtrot here        | t
+ boxtrot here        | t
+ zzz nothing here    | t
+(7 rows)
+
+-- Cleanup.
+SET enable_indexscan = on;
+SET
+SET enable_bitmapscan = on;
+SET
+DROP TABLE sim_t CASCADE;
+DROP TABLE

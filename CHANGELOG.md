@@ -6,6 +6,117 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.0-dev] — 2026-05-21 — testing, hardening, similarity ranking
+
+This cycle is split into three logical commits on `main`:
+
+  1. Adopt pg_textsearch's release-engineering and CI bar:
+     `RELEASING.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+     `.clang-format`, `.pre-commit-config.yaml`,
+     `scripts/bump-version.sh`, GH Actions workflows
+     (`upgrade-tests`, `pgspot`, `formatting`,
+     `sanitizer-build-and-test`, `nightly-stress`),
+     and Makefile targets for format / coverage / shell
+     tests.
+  2. Shell-test infrastructure (`test/scripts/lib.sh`,
+     `wal_audit.sh`, `stress.sh`, `test/lsan.supp`).  These
+     caught two real bugs that landed in the same commit:
+     the UNLOGGED-fork assertion crash and the
+     `tuple_bloom_enable` default mismatch.
+  3. Similarity / distance helpers and the `<@>` operator.
+
+### Added
+
+- Similarity / distance ranking helpers for approximate-match
+  result sets:
+  - `tre_distance(text, text, int)` and
+    `tre_distance(text, tre_pattern)` return the edit
+    distance (insertions + deletions + substitutions, each
+    weighted 1) of the best alignment, or NULL if no match
+    exists within `max_cost`.  Equivalent to the existing
+    `tre_amatch_cost` but renamed to make ranking idioms
+    obvious in EXPLAIN plans.
+  - `tre_similarity(text, text, int)` and
+    `tre_similarity(text, tre_pattern)` return
+    `1 - cost / max(len(input), len(pattern))` in `[0.0,
+    1.0]`, with `0.0` (not NULL) for inputs that don't match
+    within `max_cost`.  Matches `pg_trgm`'s `similarity()`
+    semantics.
+  - The `<@>` operator (`text <@> tre_pattern`) is the
+    ergonomic spelling for ranking: returns the integer
+    distance, NULL if no match.  Inspired by
+    `pg_textsearch`'s `<@>` for BM25 and `pg_trgm`'s `<->`
+    for trigram distance.
+  - Idiom: `WHERE body %~~ pattern ORDER BY body <@> pattern
+    ASC NULLS LAST LIMIT N` — the index narrows candidates,
+    the executor sorts the top-N in memory.  Index-side
+    `ORDER BY` support is `v2.0` work; today the sort is
+    done by the executor after recheck.
+  - New regression test `test/sql/similarity.sql`.
+- Project-infrastructure overhaul modeled on Tiger Data's
+  `pg_textsearch` (PostgreSQL License).  See the dedicated
+  release commits for the full list:
+  - `RELEASING.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+    `.clang-format` + `.clang-format-ignore`,
+    `.pre-commit-config.yaml`, `.codecov.yml`,
+    `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`.
+  - `scripts/bump-version.sh`: mode-aware (dev bump vs.
+    release), validates clean working tree, targeted
+    regexes that don't mangle legacy upgrade-chain entries.
+  - `Makefile` targets: `format`, `format-check`,
+    `format-changed`, `format-diff`, `format-single`,
+    `coverage`, `coverage-build`, `coverage-clean`,
+    `coverage-report`, `test-wal-audit`, `test-stress`,
+    `test-shell`, `test-all`.
+  - `.github/workflows/upgrade-tests.yml`: ALTER EXTENSION
+    UPDATE matrix against every shipped release, on PR +
+    weekly.
+  - `.github/workflows/pgspot.yml`: extension SQL security
+    scan on every push and PR.
+  - `.github/workflows/formatting.yml`: clang-format check
+    on changed files (gating) plus tree-wide check
+    (informational until a one-shot reformat lands).
+  - `.github/workflows/sanitizer-build-and-test.yml`: ASAN +
+    UBSAN against PG18.3 + regression suite on every push to
+    main.  Without the PG memory-context instrumentation
+    patch (deferred): catches direct UAF, OOB, double-free,
+    and undefined behavior.
+  - `.github/workflows/nightly-stress.yml`: runs `stress.sh`
+    + `wal_audit.sh` nightly under both plain and ASAN+UBSAN
+    builds.
+- Shell-test infrastructure under `test/scripts/`:
+  - `lib.sh`: shared library with cluster init/teardown,
+    `psql_check`, `psql_capture`, `wait_for_lsn`,
+    `create_basic_table`, `diff_idx_vs_seq`.
+  - `wal_audit.sh`: three tests (UNLOGGED indexes emit only
+    init-fork META_UPDATE records; LOGGED inserts produce
+    decodable rmgr-149 records; crash + restart preserves
+    the index and its differential idx-vs-seq invariant).
+  - `stress.sh`: N-iteration mixed insert / parallel-SELECT
+    / DELETE / VACUUM / REINDEX workload with RSS ceiling,
+    postmaster-alive check, per-iteration differential
+    check, and a clean shutdown + restart at the end.
+- `test/lsan.supp`: leak suppressions for known-benign
+  cases.
+
+### Changed
+
+- `.github/workflows/ci.yml`: builds enforce `-Werror`; the
+  regression suite runs three times per matrix cell to
+  surface flakes.
+- `scripts/release-check.sh`: runs the regression suite via
+  `scripts/run-regress.sh` against the active pgrx cluster
+  instead of the broken `make localcheck` path; TAP tests
+  default-skipped (set `RELEASE_CHECK_TAP=1` to run; takes
+  ~6 min); fixed the STATUS.md staleness check.
+- `Makefile`: `make tap` target now uses `PG_REGRESS`,
+  `PG_TAP_PERL5LIB`, `PG_TAP_TMPDIR` overrides for the pgrx
+  layout, with optional nix-shell wrapper for IPC::Run.
+- `pg_tre_extend` retained as a thin wrapper over the new
+  `pg_tre_extend_fork`; existing callers unaffected.
+- `pg_tre_build_empty` retained as a thin wrapper over the
+  new `pg_tre_build_empty_fork`; existing callers unaffected.
+
 ### Fixed
 
 - `pg_tre_ambuildempty` previously called `pg_tre_build_empty`,
@@ -22,117 +133,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   init fork (the init fork is the WAL-logged template that
   gets copied to the main fork during crash recovery, so it
   must be replayable even on UNLOGGED indexes where
-  `RelationNeedsWAL` returns false).  After the WAL log we
-  call `smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM)`
-  so the template is durable before the surrounding CREATE
-  INDEX commits.  Caught by the new
+  `RelationNeedsWAL` returns false).  Caught by the new
   `test/scripts/wal_audit.sh`.
 - `pg_tre.tuple_bloom_enable` defaulted to `TRUE` in
   `src/module.c` but was documented and tested as defaulting
   to `FALSE` (per the v1.1 followups in `STATUS.md`, the
   per-tuple bloom and positional filter are bypassed until
-  the chain-rank lookup is repaired).  The regression cluster
-  in this development environment has shipped with
-  `pg_tre.tuple_bloom_enable = 'off'` in
-  `postgresql.auto.conf` since 1.0.0; a fresh cluster without
-  that override would silently apply the broken filter and
-  return zero rows for every multi-leaf-trigram query.
-  Default flipped to `FALSE` to match the documented intent.
+  the chain-rank lookup is repaired).  Default flipped to
+  `FALSE` to match documented intent.
 
-### Added
-
-- Continued from the project-infrastructure overhaul above.
-- `.github/workflows/sanitizer-build-and-test.yml` runs
-  ASAN + UBSAN against PG 18.3 with the regression suite on
-  every push to main.  Without the PG memory-context
-  instrumentation patch (deferred to a follow-up
-  cycle): catches direct UAF, OOB read/write, double-free,
-  and undefined behavior; does not catch context-internal
-  reuse issues.
-- `.github/workflows/nightly-stress.yml` runs `stress.sh` +
-  `wal_audit.sh` nightly under both plain and ASAN+UBSAN
-  builds.
-- `test/scripts/lib.sh` is a shared shell-test library
-  modeled on pg_textsearch's `replication_lib.sh`: cluster
-  init/teardown with `shared_preload_libraries='pg_tre'`,
-  `psql_check`, `psql_capture`, `wait_for_lsn`,
-  `create_basic_table`, `diff_idx_vs_seq`, and a per-test
-  scratch dir under `$TMPDIR`.  Existing TAP tests under
-  `tap/` keep working; new shell tests build on `lib.sh`.
-- `test/scripts/wal_audit.sh` verifies (a) UNLOGGED indexes
-  emit only init-fork META_UPDATE records (no main-fork pg_tre
-  WAL), (b) LOGGED inserts produce decodable rmgr-149 records
-  with a correct identify callback, (c) crash + restart
-  preserves the index and the differential idx-vs-seq check
-  passes after recovery.
-- `test/scripts/stress.sh` runs N iterations (default 30) of
-  a mixed insert / parallel-SELECT / DELETE / VACUUM /
-  REINDEX workload, gates on a configurable RSS ceiling and a
-  postmaster-still-alive check, and runs a differential
-  idx-vs-seq check at the end of each iteration plus once
-  more after a clean shutdown + restart at the end.
-- `test/lsan.supp` lists known-benign leaks (PG catalog
-  caches, plan caches, our backend-lifetime pattern cache).
-- `Makefile` targets: `test-wal-audit`, `test-stress`,
-  `test-shell`, `test-all`.
-
-### Changed
-
-- `pg_tre_extend` retained as a thin wrapper over the new
-  `pg_tre_extend_fork`; existing callers unaffected.
-- `pg_tre_build_empty` retained as a thin wrapper over the
-  new `pg_tre_build_empty_fork`; existing callers unaffected.
-
----
-
-## [1.2.0-dev] - 2026-05-21 — project-infrastructure overhaul
-
-### Added
-
-- Project-infrastructure overhaul modeled on Tiger Data's
-  `pg_textsearch` (`https://github.com/timescale/pg_textsearch`,
-  PostgreSQL License).
-  - `RELEASING.md` codifies the release procedure: catalog-object
-    diff audit, version compatibility matrix, on-disk format
-    constant registry, automated workflows table.
-  - `CONTRIBUTING.md` codifies code style, layered source
-    architecture, include-path conventions, testing
-    requirements, differential-test pattern, and PR process.
-  - `SECURITY.md` codifies the disclosure email and SLA.
-  - `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`.
-- `.clang-format` with PostgreSQL conventions (79-col, tabs,
-  Allman braces) plus `.clang-format-ignore` for vendored and
-  generated files.
-- `.pre-commit-config.yaml` (clang-format on `src/`/`include/`,
-  trailing-whitespace, EOF-fixer, check-yaml, large-file guard).
-- `.codecov.yml` (configuration-only; no upload step yet).
-- Makefile targets: `format`, `format-check`, `format-diff`,
-  `format-single FILE=...`, `format-changed`, `coverage`,
-  `coverage-build`, `coverage-clean`, `coverage-report`.
-- `scripts/bump-version.sh` — mode-aware (dev bump vs. release)
-  version bumping with targeted regexes that don't mangle
-  legacy upgrade-chain entries.
-- `.github/workflows/upgrade-tests.yml` — ALTER EXTENSION
-  UPDATE matrix against every shipped release, on PR + weekly.
-- `.github/workflows/pgspot.yml` — extension SQL security
-  scan on every push and PR.
-- `.github/workflows/formatting.yml` — `clang-format` check
-  on changed files (gating) plus tree-wide check
-  (informational until a one-shot reformat lands).
-
-### Changed
-
-- `.github/workflows/ci.yml`: builds enforce `-Werror`; the
-  regression suite runs three times per matrix cell to surface
-  flakes.
-- `scripts/release-check.sh`: runs the regression suite via
-  `scripts/run-regress.sh` against the active pgrx cluster
-  instead of the broken `make localcheck` path; TAP tests
-  default-skipped (set `RELEASE_CHECK_TAP=1` to run; takes
-  ~6 min); fixed the STATUS.md staleness check.
-- `Makefile`: `make tap` target now uses `PG_REGRESS`,
-  `PG_TAP_PERL5LIB`, `PG_TAP_TMPDIR` overrides for the pgrx
-  layout, with optional nix-shell wrapper for IPC::Run.
 
 ---
 

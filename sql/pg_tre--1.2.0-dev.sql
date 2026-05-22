@@ -162,3 +162,60 @@ CREATE OPERATOR CLASS tre_text_ops
     DEFAULT FOR TYPE text USING tre AS
     OPERATOR 1 %~~ (text, tre_pattern),
     STORAGE text;
+
+-- ---------------------------------------------------------------
+-- 1.2.0-dev additions: similarity / distance ranking helpers.
+-- ---------------------------------------------------------------
+
+CREATE FUNCTION tre_similarity(text, text, int4)
+    RETURNS float8
+    AS 'MODULE_PATHNAME', 'pg_tre_similarity'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION tre_similarity(text, text, int4) IS
+    'Approximate-match similarity score in [0.0, 1.0]. '
+    'Returns 1 - cost/max(len(input), len(pattern)) if the input '
+    'matches the pattern within max_cost edits, else 0.0.';
+
+CREATE FUNCTION tre_similarity(text, tre_pattern)
+    RETURNS float8
+    AS 'MODULE_PATHNAME', 'pg_tre_similarity_pattern'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION tre_similarity(text, tre_pattern) IS
+    'Approximate-match similarity against a strongly-typed pattern. '
+    'See tre_similarity(text, text, int4) for semantics.';
+
+CREATE FUNCTION tre_distance(text, text, int4)
+    RETURNS int4
+    AS 'MODULE_PATHNAME', 'pg_tre_distance'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION tre_distance(text, text, int4) IS
+    'Approximate-match edit distance (insertions + deletions + '
+    'substitutions, each weighted 1).  NULL if the input does not '
+    'match the pattern within max_cost edits.';
+
+CREATE FUNCTION tre_distance(text, tre_pattern)
+    RETURNS int4
+    AS 'MODULE_PATHNAME', 'pg_tre_distance_pattern'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION tre_distance(text, tre_pattern) IS
+    'Approximate-match edit distance against a strongly-typed pattern. '
+    'See tre_distance(text, text, int4) for semantics.';
+
+CREATE OPERATOR <@> (
+    LEFTARG    = text,
+    RIGHTARG   = tre_pattern,
+    PROCEDURE  = tre_distance
+    -- No commutator: tre_pattern is non-commutative (left side
+    -- is the input, right side is the pattern).
+);
+
+COMMENT ON OPERATOR <@> (text, tre_pattern) IS
+    'Approximate-match edit distance.  Returns the integer cost '
+    'of the best alignment of input against pattern, or NULL if '
+    'no match exists within the pattern''s max_cost.  Use ORDER '
+    'BY (text <@> pattern) ASC LIMIT N to rank candidates by '
+    'similarity.';

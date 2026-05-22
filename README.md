@@ -380,6 +380,64 @@ was missing from the stack.
 
 ---
 
+## Ranking by similarity
+
+`pg_tre` exposes the underlying TRE library's edit-distance cost
+as a first-class result so you can rank candidates by similarity:
+
+```sql
+SELECT body,
+       body <@> tre_pattern('connection refused', 2) AS dist
+FROM logs
+WHERE  body %~~ tre_pattern('connection refused', 2)
+ORDER BY dist ASC NULLS LAST
+LIMIT 10;
+```
+
+The `WHERE` clause uses the index to narrow the candidate set;
+the `ORDER BY` sorts those candidates in memory by edit
+distance.  `NULLS LAST` is the default for `ASC` ordering, so
+rows the executor recheck rejected (returning `NULL` from
+`<@>`) sort to the bottom — your `LIMIT 10` returns the ten
+closest matches.
+
+### Functions
+
+| Function | Returns | Description |
+|---|---|---|
+| `text <@> tre_pattern` | `int` | Edit distance of the best alignment, or `NULL` if no match within the pattern's `max_cost`. |
+| `tre_distance(text, text, int)` | `int` | Same as `<@>` but with explicit `max_cost`. |
+| `tre_distance(text, tre_pattern)` | `int` | Same as `<@>` (function-call form). |
+| `tre_similarity(text, text, int)` | `float8` | `1 - cost / max(len(input), len(pattern))`, in `[0.0, 1.0]`.  Returns `0.0` (not NULL) if no match within `max_cost`. |
+| `tre_similarity(text, tre_pattern)` | `float8` | Same against a strongly-typed pattern. |
+
+`<@>` is named for its visual cue — an eyeball, looking at how
+close two strings are.  The natural integer distance is
+ASC-friendly: smaller means more similar, so a plain
+`ORDER BY ... <@> ... ASC LIMIT N` returns the closest matches
+first with no sign-inversion gymnastics.  This convention is
+inspired by [pg_textsearch][pgts]'s use of `<@>` for BM25 ranking
+and [pg_trgm]'s `<->` for trigram distance.
+
+### Index-side ORDER BY support is v2.0 work
+
+Today the index narrows candidates via `%~~`; the
+`ORDER BY ... <@> ... LIMIT N` sort happens in the executor
+after recheck.  This is fine for selective queries but loses
+the top-`N` early-termination optimization on broad queries.
+
+Wiring `<@>` into the index access method as an order-by
+operator (so the AM can stream results in distance order and
+stop after N rows) requires a structural extension to
+`amapi`'s sort support and is planned for `v2.0`.  Until then,
+use a selective `WHERE` predicate to keep the candidate set
+small.
+
+[pgts]: https://github.com/timescale/pg_textsearch
+[pg_trgm]: https://www.postgresql.org/docs/current/pgtrgm.html
+
+---
+
 ## Performance
 
 Measured on a 10 000-row fixture, PG 18.3, warm cache (full numbers

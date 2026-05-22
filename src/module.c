@@ -17,6 +17,7 @@
 #include "utils/guc.h"
 
 #include "pg_tre/pg_tre.h"
+#include "pg_tre/amapi.h"
 #include "pg_tre/tre_match.h"
 #include "pg_tre/pattern_cache.h"
 #include "pg_tre/xlog.h"
@@ -289,6 +290,164 @@ pg_tre_amatch_detail(PG_FUNCTION_ARGS)
     }
 
     return (Datum) 0;
+}
+
+/*
+ * Similarity score derived from approximate-match edit distance.
+ *
+ * Definition: similarity = 1 - (cost / max(len(input), len(pattern_text)))
+ *
+ * Range: [0.0, 1.0] where 1.0 means exact match (cost=0) and 0.0 means
+ * the input has been entirely rewritten (cost == max length).  Returns
+ * 0.0 when the match exceeds max_cost (i.e. no approximate match was
+ * found within the budget).  This formulation matches pg_trgm's
+ * similarity() in spirit: higher = more similar.
+ *
+ * For ranking, prefer ORDER BY tre_distance(...) ASC (smaller cost
+ * first) over similarity DESC — the integer cost is more compact and
+ * does not depend on input length.
+ */
+static double
+tre_compute_similarity(const char *input, int input_len,
+                       const char *pattern, int pattern_len,
+                       int max_cost)
+{
+    void           *compiled;
+    TreMatchResult  result;
+    int             max_len;
+
+    compiled = tre_cache_lookup(pattern, pattern_len);
+    result = tre_do_match(compiled, input, input_len,
+                          max_cost, 1, 1, 1,
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+
+    if (!result.matched)
+        return 0.0;
+
+    max_len = input_len > pattern_len ? input_len : pattern_len;
+    if (max_len <= 0)
+        return 1.0;
+
+    return 1.0 - ((double) result.cost / (double) max_len);
+}
+
+PG_FUNCTION_INFO_V1(pg_tre_similarity);
+
+Datum
+pg_tre_similarity(PG_FUNCTION_ARGS)
+{
+    text   *input    = PG_GETARG_TEXT_PP(0);
+    text   *pattern  = PG_GETARG_TEXT_PP(1);
+    int32   max_cost = PG_GETARG_INT32(2);
+    double  sim;
+
+    sim = tre_compute_similarity(VARDATA_ANY(input),
+                                  VARSIZE_ANY_EXHDR(input),
+                                  VARDATA_ANY(pattern),
+                                  VARSIZE_ANY_EXHDR(pattern),
+                                  max_cost);
+
+    PG_RETURN_FLOAT8(sim);
+}
+
+/*
+ * tre_distance(input, pattern, max_cost) -> int
+ *
+ * Returns the actual edit distance of the best alignment, or NULL if
+ * no match exists within max_cost.  This is the integer cost as
+ * computed by TRE (with default insertion=deletion=substitution=1).
+ *
+ * Equivalent to tre_amatch_cost() but with a different name to make
+ * the ranking-by-distance idiom obvious in EXPLAIN plans.
+ *
+ * Use ORDER BY tre_distance(...) ASC LIMIT N to emit the N closest
+ * matches.
+ */
+PG_FUNCTION_INFO_V1(pg_tre_distance);
+
+Datum
+pg_tre_distance(PG_FUNCTION_ARGS)
+{
+    text   *input    = PG_GETARG_TEXT_PP(0);
+    text   *pattern  = PG_GETARG_TEXT_PP(1);
+    int32   max_cost = PG_GETARG_INT32(2);
+    void   *compiled;
+    TreMatchResult result;
+
+    compiled = tre_cache_lookup(VARDATA_ANY(pattern),
+                                VARSIZE_ANY_EXHDR(pattern));
+    result = tre_do_match(compiled,
+                          VARDATA_ANY(input),
+                          VARSIZE_ANY_EXHDR(input),
+                          max_cost, 1, 1, 1,
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+
+    if (!result.matched)
+        PG_RETURN_NULL();
+
+    PG_RETURN_INT32(result.cost);
+}
+
+/*
+ * Similarity / distance against the strongly-typed tre_pattern.
+ *
+ * The pattern carries its own max_cost, so these wrappers don't
+ * need a separate argument.  Useful for ORDER BY clauses where
+ * repeating tre_pattern('foo', 2) twice would parse the regex
+ * twice; the indexed lookup uses the cached compile.
+ */
+PG_FUNCTION_INFO_V1(pg_tre_similarity_pattern);
+
+Datum
+pg_tre_similarity_pattern(PG_FUNCTION_ARGS)
+{
+    text                  *input    = PG_GETARG_TEXT_PP(0);
+    struct TrePatternData *pat      = (struct TrePatternData *)
+                                       PG_GETARG_POINTER(1);
+    char                  *pat_text;
+    int                    pat_len;
+    int32                  max_cost;
+    double                 sim;
+
+    pat_text = tre_pattern_get_text(pat, &pat_len);
+    max_cost = tre_pattern_get_max_cost(pat);
+
+    sim = tre_compute_similarity(VARDATA_ANY(input),
+                                  VARSIZE_ANY_EXHDR(input),
+                                  pat_text, pat_len,
+                                  max_cost);
+
+    PG_RETURN_FLOAT8(sim);
+}
+
+PG_FUNCTION_INFO_V1(pg_tre_distance_pattern);
+
+Datum
+pg_tre_distance_pattern(PG_FUNCTION_ARGS)
+{
+    text                  *input    = PG_GETARG_TEXT_PP(0);
+    struct TrePatternData *pat      = (struct TrePatternData *)
+                                       PG_GETARG_POINTER(1);
+    char                  *pat_text;
+    int                    pat_len;
+    int32                  max_cost;
+    void                  *compiled;
+    TreMatchResult         result;
+
+    pat_text = tre_pattern_get_text(pat, &pat_len);
+    max_cost = tre_pattern_get_max_cost(pat);
+
+    compiled = tre_cache_lookup(pat_text, pat_len);
+    result = tre_do_match(compiled,
+                          VARDATA_ANY(input),
+                          VARSIZE_ANY_EXHDR(input),
+                          max_cost, 1, 1, 1,
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+
+    if (!result.matched)
+        PG_RETURN_NULL();
+
+    PG_RETURN_INT32(result.cost);
 }
 
 PG_FUNCTION_INFO_V1(pg_tre_version);
