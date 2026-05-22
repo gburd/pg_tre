@@ -6,6 +6,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.0-dev] - in flight
+
+Between-release cycle.  See `CHANGELOG.md` for the live list of
+entries as features land in this cycle.
+
+### Added
+
+- Project-infrastructure overhaul modeled on Tiger Data's
+  `pg_textsearch` (`https://github.com/timescale/pg_textsearch`,
+  PostgreSQL License).
+  - `RELEASING.md` codifies the release procedure: catalog-object
+    diff audit, version compatibility matrix, on-disk format
+    constant registry, automated workflows table.
+  - `CONTRIBUTING.md` codifies code style, layered source
+    architecture, include-path conventions, testing
+    requirements, differential-test pattern, and PR process.
+  - `SECURITY.md` codifies the disclosure email and SLA.
+  - `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`.
+- `.clang-format` with PostgreSQL conventions (79-col, tabs,
+  Allman braces) plus `.clang-format-ignore` for vendored and
+  generated files.
+- `.pre-commit-config.yaml` (clang-format on `src/`/`include/`,
+  trailing-whitespace, EOF-fixer, check-yaml, large-file guard).
+- `.codecov.yml` (configuration-only; no upload step yet).
+- Makefile targets: `format`, `format-check`, `format-diff`,
+  `format-single FILE=...`, `format-changed`, `coverage`,
+  `coverage-build`, `coverage-clean`, `coverage-report`.
+- `scripts/bump-version.sh` — mode-aware (dev bump vs. release)
+  version bumping with targeted regexes that don't mangle
+  legacy upgrade-chain entries.
+- `.github/workflows/upgrade-tests.yml` — ALTER EXTENSION
+  UPDATE matrix against every shipped release, on PR + weekly.
+- `.github/workflows/pgspot.yml` — extension SQL security
+  scan on every push and PR.
+- `.github/workflows/formatting.yml` — `clang-format` check
+  on changed files (gating) plus tree-wide check
+  (informational until a one-shot reformat lands).
+
+### Changed
+
+- `.github/workflows/ci.yml`: builds enforce `-Werror`; the
+  regression suite runs three times per matrix cell to surface
+  flakes.
+- `scripts/release-check.sh`: runs the regression suite via
+  `scripts/run-regress.sh` against the active pgrx cluster
+  instead of the broken `make localcheck` path; TAP tests
+  default-skipped (set `RELEASE_CHECK_TAP=1` to run; takes
+  ~6 min); fixed the STATUS.md staleness check.
+- `Makefile`: `make tap` target now uses `PG_REGRESS`,
+  `PG_TAP_PERL5LIB`, `PG_TAP_TMPDIR` overrides for the pgrx
+  layout, with optional nix-shell wrapper for IPC::Run.
+
+---
+
 ## [1.1.1] - 2026-05-14
 
 Hardening release.  Same on-disk format as 1.1.0; no re-index

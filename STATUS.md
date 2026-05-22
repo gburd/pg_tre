@@ -1,10 +1,20 @@
 # pg_tre status
 
-Released: **1.1.1** (2026-05).  See `CHANGELOG.md` for the full
+Released: **1.1.1** (2026-05).  Currently in flight: **1.2.0-dev**
+project-infrastructure cycle.  See `CHANGELOG.md` for the full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-1.1.1 is a hardening release on the 1.1.0 lineage: vendored
+1.2.0-dev is a between-release cycle bringing pg_tre's project
+infrastructure up to the bar set by `pg_textsearch`.  No source-
+code behavior changes; everything is in CI workflows, release
+engineering, code-quality tooling, and documentation.  See
+`RELEASING.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+`.github/workflows/{upgrade-tests,pgspot,formatting}.yml`,
+`scripts/bump-version.sh`.  Deferred Tier-3 followups are
+tracked in `.agent/notes/community-readiness-followups.md`.
+
+1.1.1 was a hardening release on the 1.1.0 lineage: vendored
 sparsemap 2.2.0 → 2.3.0 (defensive bounds checks against
 corrupt input), no on-disk format changes, no re-index
 required.
