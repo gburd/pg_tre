@@ -32,6 +32,7 @@
 #include "catalog/index.h"
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
+#include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
 #include "utils/array.h"
@@ -389,6 +390,16 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
         for (i = 0; i < bstate.n_entries; i++)
         {
+            /*
+             * Allow CREATE INDEX [CONCURRENTLY] to be cancelled.
+             * On large heaps n_entries can be in the tens of millions
+             * and this loop runs for minutes; without an interrupt
+             * check, pg_cancel_backend / pg_terminate_backend are
+             * silently ignored.  Same root cause as the autovacuum
+             * runaway fix in pending.c.
+             */
+            CHECK_FOR_INTERRUPTS();
+
             TrigramTidEntry *entry = &bstate.entries[i];
             uint64 tid_packed = pg_tre_pack_tid(&entry->tid);
             bool new_trigram = (current_builder == NULL ||
