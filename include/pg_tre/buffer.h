@@ -25,12 +25,21 @@
 extern void pg_tre_page_init(Page page, Size page_size, PageTreKind kind);
 
 /*
- * Allocate a new buffer in the index relation, initialize it as the
- * given kind, mark it dirty and return it with exclusive lock held.
- * Phase 1 uses this during ambuildempty; Phase 2+ uses it throughout
- * build and incremental allocation.
+ * Allocate a new buffer in the index relation's main fork,
+ * initialize it as the given kind, mark it dirty and return it with
+ * exclusive lock held.  Phase 1 uses this during ambuildempty;
+ * Phase 2+ uses it throughout build and incremental allocation.
  */
 extern Buffer pg_tre_extend(Relation index, PageTreKind kind);
+
+/*
+ * Same as pg_tre_extend but extends the named fork.  Used by
+ * ambuildempty to populate the init fork of UNLOGGED indexes (the
+ * init fork is the WAL-logged template that gets copied to the main
+ * fork on crash recovery).
+ */
+extern Buffer pg_tre_extend_fork(Relation index, ForkNumber forknum,
+                                  PageTreKind kind);
 
 /*
  * Read an existing page with lock of the requested mode (BUFFER_LOCK_SHARE

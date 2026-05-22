@@ -636,5 +636,15 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 void
 pg_tre_ambuildempty(Relation index)
 {
-    pg_tre_build_empty(index);
+    /*
+     * ambuildempty populates the INIT fork of an UNLOGGED index.
+     * The init fork is the WAL-logged template that gets copied
+     * to the main fork during crash recovery.
+     *
+     * Calling pg_tre_build_empty here (which extends MAIN_FORKNUM)
+     * tripped the metabuf-block-number assertion because the main
+     * fork's block 0 was already allocated by ambuild.  Discovered
+     * by test/scripts/wal_audit.sh.
+     */
+    pg_tre_build_empty_fork(index, INIT_FORKNUM);
 }

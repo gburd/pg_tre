@@ -32,10 +32,16 @@ pg_tre_page_init(Page page, Size page_size, PageTreKind kind)
 Buffer
 pg_tre_extend(Relation index, PageTreKind kind)
 {
+    return pg_tre_extend_fork(index, MAIN_FORKNUM, kind);
+}
+
+Buffer
+pg_tre_extend_fork(Relation index, ForkNumber forknum, PageTreKind kind)
+{
     Buffer buf;
     Page   page;
 
-    buf = ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL,
+    buf = ExtendBufferedRel(BMR_REL(index), forknum, NULL,
                             EB_LOCK_FIRST);
 
     page = BufferGetPage(buf);

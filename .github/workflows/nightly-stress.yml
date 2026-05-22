@@ -1,0 +1,135 @@
+name: Nightly stress
+
+on:
+  schedule:
+    # 03:00 UTC daily.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of stress iterations'
+        required: false
+        default: '50'
+        type: string
+
+env:
+  ITERATIONS: ${{ github.event.inputs.iterations || '50' }}
+
+jobs:
+  nightly-stress:
+    name: PG${{ matrix.pg }} stress
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['18']
+        # `plain` runs without sanitizers — fast feedback on the
+        # mixed workload itself.  `asan` runs the same workload
+        # under ASAN+UBSAN to catch memory bugs that surface only
+        # under churn.
+        sanitize: ['plain', 'asan']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential autoconf automake libtool gettext bison flex \
+            wget ca-certificates gnupg systemd-coredump gdb \
+            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
+            postgresql-${{ matrix.pg }}-pgwalinspect
+
+      - name: Install sanitizer toolchain (asan only)
+        if: matrix.sanitize == 'asan'
+        run: |
+          sudo apt-get install -y clang-18 llvm-18
+
+      - name: Build pg_tre (plain)
+        if: matrix.sanitize == 'plain'
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          make
+          sudo env "PATH=$PATH" make install
+
+      - name: Build pg_tre (asan)
+        if: matrix.sanitize == 'asan'
+        env:
+          CC: clang-18
+          CFLAGS:  "-g -fsanitize=address,undefined -fno-omit-frame-pointer -Og"
+          LDFLAGS: "-fsanitize=address,undefined"
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          make PG_CFLAGS="$CFLAGS" SHLIB_LINK="$LDFLAGS"
+          sudo env "PATH=$PATH" make install
+
+      - name: Configure ASAN runtime (asan only)
+        if: matrix.sanitize == 'asan'
+        run: |
+          # Suppressions live under test/lsan.supp.  detect_leaks=0
+          # because PostgreSQL leaks transaction-lifetime allocations
+          # by design (see test/lsan.supp).
+          mkdir -p ${{ github.workspace }}/sanitizer_logs
+          {
+              echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:exitcode=27:log_path=${{ github.workspace }}/sanitizer_logs/asan:print_stacktrace=1"
+              echo "UBSAN_OPTIONS=halt_on_error=1:exitcode=27:print_stacktrace=1:log_path=${{ github.workspace }}/sanitizer_logs/ubsan"
+              echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/test/lsan.supp"
+          } >> "$GITHUB_ENV"
+
+      - name: Run stress.sh
+        env:
+          ITERATIONS: ${{ env.ITERATIONS }}
+          ROWS_PER_INSERT: '500'
+          PARALLEL_SELECTS: '4'
+          DELETE_FRACTION: '5'
+          VACUUM_EVERY: '5'
+          REINDEX_EVERY: '10'
+          RSS_CEILING_MB: '4096'
+        run: |
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          bash test/scripts/stress.sh
+
+      - name: Run wal_audit.sh
+        run: |
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          bash test/scripts/wal_audit.sh
+
+      - name: Check sanitizer reports
+        if: matrix.sanitize == 'asan'
+        run: |
+          if ls ${{ github.workspace }}/sanitizer_logs/*.* >/dev/null 2>&1; then
+              echo "::error::Sanitizer reports detected"
+              for f in ${{ github.workspace }}/sanitizer_logs/*.*; do
+                  echo "::group::$(basename $f)"
+                  cat "$f"
+                  echo "::endgroup::"
+              done
+              exit 1
+          fi
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-${{ matrix.pg }}-${{ matrix.sanitize }}
+          path: |
+            ${{ github.workspace }}/sanitizer_logs/
+            /tmp/pg_tre_*/primary/logfile
+          retention-days: 14
+
+      - name: Notify on failure
+        if: failure() && github.event_name == 'schedule'
+        run: |
+          # Placeholder: the matrix produces an artifact even
+          # without an explicit notify step, and Codeberg /
+          # GitHub email notifications cover the rest.  When
+          # we have a Slack/Discord webhook, post here.
+          echo "::warning::Nightly stress failed; see artifacts above"

@@ -7,6 +7,7 @@
 
 #include "postgres.h"
 #include "storage/block.h"
+#include "common/relpath.h"
 #include "utils/rel.h"
 
 #include "pg_tre/page.h"
@@ -31,6 +32,16 @@ extern void pg_tre_meta_read(Relation index, PgTreMetaPageData *out);
  * is WAL-logged (standard nbtree pattern).
  */
 extern void pg_tre_build_empty(Relation index);
+
+/*
+ * Same as pg_tre_build_empty but populates the named fork.  Used by
+ * pg_tre_ambuildempty to set up the init fork for UNLOGGED indexes:
+ * the init fork is the WAL-logged template that gets copied to the
+ * main fork during crash recovery.  WAL logging fires unconditionally
+ * for INIT_FORKNUM regardless of RelationNeedsWAL, since the init
+ * fork must be replayable even on UNLOGGED indexes.
+ */
+extern void pg_tre_build_empty_fork(Relation index, ForkNumber forknum);
 
 /*
  * Update the meta page's root pointers and stats.  Used by ambuild

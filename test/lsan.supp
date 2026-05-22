@@ -1,0 +1,30 @@
+# Leak suppressions for pg_tre's ASAN/LSAN runs.
+#
+# This file is referenced by the sanitizer-build-and-test.yml
+# workflow and any local ASAN runs.  Keep it short and document
+# every entry — anything we suppress here is a leak we've decided
+# is benign or out of our hands.
+#
+# Format: leak:<symbol-or-source-pattern>
+# See https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer
+
+# PostgreSQL keeps backend-lifetime structures (catalog caches,
+# the ResourceOwner tree, plan caches) that are intentionally
+# never freed before backend exit.  LSAN reports these on every
+# clean shutdown.
+leak:CatalogCacheCreate
+leak:RelationCacheInitializeBackend
+leak:InitProcess
+leak:plan_cache_init
+leak:hash_create
+
+# pg_tre's pattern cache is intentionally backend-lifetime: we
+# keep compiled regex DFAs across statements within a single
+# backend.  Cleared on backend exit by the memory-context
+# teardown but not explicitly freed.
+leak:tre_cache_init
+
+# TRE library internals.  Vendored as a submodule; we don't
+# manage their allocations.
+leak:tre_compile
+leak:tre_regncomp

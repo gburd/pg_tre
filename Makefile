@@ -174,7 +174,8 @@ src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
 # ------------------------------------------------------------------
 .PHONY: localcheck tapcheck tap vendor-clean distclean-full dist \
         format format-check format-diff format-single format-changed \
-        coverage coverage-build coverage-clean coverage-report
+        coverage coverage-build coverage-clean coverage-report \
+        test-shell test-stress test-wal-audit test-all
 
 # ------------------------------------------------------------------
 # Code formatting (clang-format with PostgreSQL style)
@@ -320,6 +321,28 @@ dist:
 # Named localcheck to avoid overriding PGXS's standard `check` target.
 localcheck:
 	PG_CONFIG='$(PG_CONFIG)' $(SHELL) scripts/run-regress.sh
+
+# Shell-based test scripts under test/scripts/.  Each script is
+# self-contained (initdb's its own cluster on a private port,
+# cleans up on exit), modeled on pg_textsearch's
+# test/scripts/*.sh layout.
+test-wal-audit:
+	@echo "==> wal_audit.sh"
+	PG_CONFIG='$(PG_CONFIG)' PATH=$$(dirname $(PG_CONFIG)):$$PATH \
+	    bash test/scripts/wal_audit.sh
+
+test-stress:
+	@echo "==> stress.sh"
+	PG_CONFIG='$(PG_CONFIG)' PATH=$$(dirname $(PG_CONFIG)):$$PATH \
+	    ITERATIONS=$${ITERATIONS:-30} \
+	    bash test/scripts/stress.sh
+
+test-shell: test-wal-audit
+	@echo "All shell-based tests completed."
+	@echo "Run 'make test-stress' separately for the long-running test."
+
+test-all: localcheck test-shell
+	@echo "Regression suite + shell tests completed."
 
 # TAP test runner for Phase 7 durability testing.
 # Tests: crash recovery, streaming replication, REINDEX CONCURRENTLY,

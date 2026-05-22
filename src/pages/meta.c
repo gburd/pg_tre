@@ -88,18 +88,37 @@ pg_tre_meta_read(Relation index, PgTreMetaPageData *out)
 void
 pg_tre_build_empty(Relation index)
 {
+    pg_tre_build_empty_fork(index, MAIN_FORKNUM);
+}
+
+void
+pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
+{
     Buffer metabuf;
     Page   metapage;
+    bool   wal_log;
 
-    /* Allocate block 0 as the meta page. */
-    metabuf = pg_tre_extend(index, PG_TRE_PAGE_META);
+    /* Allocate block 0 as the meta page in the requested fork. */
+    metabuf = pg_tre_extend_fork(index, forknum, PG_TRE_PAGE_META);
     Assert(BufferGetBlockNumber(metabuf) == PG_TRE_META_BLKNO);
 
     metapage = BufferGetPage(metabuf);
     pg_tre_meta_init(metapage);
 
-    /* WAL-log the meta-page init as a full-page image. */
-    if (RelationNeedsWAL(index))
+    /*
+     * WAL-log the meta-page init.  Two paths:
+     *
+     *   - For the main fork: log only if the relation needs WAL.
+     *     UNLOGGED relations don't WAL-log their main fork.
+     *
+     *   - For the init fork: log unconditionally.  The init fork is
+     *     the WAL-logged template that gets copied to the main fork
+     *     during crash recovery, so it MUST be replayable even on
+     *     UNLOGGED indexes (where RelationNeedsWAL returns false).
+     */
+    wal_log = (forknum == INIT_FORKNUM) || RelationNeedsWAL(index);
+
+    if (wal_log)
     {
         XLogRecPtr recptr;
 
@@ -111,6 +130,16 @@ pg_tre_build_empty(Relation index)
 
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
+
+    /*
+     * For the init fork, smgr fsync immediately so the template is
+     * durable before the surrounding CREATE INDEX commits.  This
+     * matches what btbuildempty does for the same reason.
+     */
+    if (forknum == INIT_FORKNUM)
+    {
+        smgrimmedsync(RelationGetSmgr(index), forknum);
+    }
 }
 
 void

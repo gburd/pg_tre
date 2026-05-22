@@ -6,10 +6,86 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.2.0-dev] - in flight
+### Fixed
 
-Between-release cycle.  See `CHANGELOG.md` for the live list of
-entries as features land in this cycle.
+- `pg_tre_ambuildempty` previously called `pg_tre_build_empty`,
+  which extended `MAIN_FORKNUM`.  This crashed with an
+  assertion when `BufferGetBlockNumber(metabuf) !=
+  PG_TRE_META_BLKNO` because `ambuild` had already populated
+  block 0 of the main fork before `ambuildempty` ran.  Result:
+  `CREATE INDEX ... USING tre` on an UNLOGGED table failed with
+  `TRAP: failed Assert("BufferGetBlockNumber(metabuf) ==
+  PG_TRE_META_BLKNO")`.  Fixed by adding
+  `pg_tre_build_empty_fork(forknum)` and
+  `pg_tre_extend_fork(forknum)`; `ambuildempty` now extends
+  `INIT_FORKNUM`.  WAL logging fires unconditionally for the
+  init fork (the init fork is the WAL-logged template that
+  gets copied to the main fork during crash recovery, so it
+  must be replayable even on UNLOGGED indexes where
+  `RelationNeedsWAL` returns false).  After the WAL log we
+  call `smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM)`
+  so the template is durable before the surrounding CREATE
+  INDEX commits.  Caught by the new
+  `test/scripts/wal_audit.sh`.
+- `pg_tre.tuple_bloom_enable` defaulted to `TRUE` in
+  `src/module.c` but was documented and tested as defaulting
+  to `FALSE` (per the v1.1 followups in `STATUS.md`, the
+  per-tuple bloom and positional filter are bypassed until
+  the chain-rank lookup is repaired).  The regression cluster
+  in this development environment has shipped with
+  `pg_tre.tuple_bloom_enable = 'off'` in
+  `postgresql.auto.conf` since 1.0.0; a fresh cluster without
+  that override would silently apply the broken filter and
+  return zero rows for every multi-leaf-trigram query.
+  Default flipped to `FALSE` to match the documented intent.
+
+### Added
+
+- Continued from the project-infrastructure overhaul above.
+- `.github/workflows/sanitizer-build-and-test.yml` runs
+  ASAN + UBSAN against PG 18.3 with the regression suite on
+  every push to main.  Without the PG memory-context
+  instrumentation patch (deferred to a follow-up
+  cycle): catches direct UAF, OOB read/write, double-free,
+  and undefined behavior; does not catch context-internal
+  reuse issues.
+- `.github/workflows/nightly-stress.yml` runs `stress.sh` +
+  `wal_audit.sh` nightly under both plain and ASAN+UBSAN
+  builds.
+- `test/scripts/lib.sh` is a shared shell-test library
+  modeled on pg_textsearch's `replication_lib.sh`: cluster
+  init/teardown with `shared_preload_libraries='pg_tre'`,
+  `psql_check`, `psql_capture`, `wait_for_lsn`,
+  `create_basic_table`, `diff_idx_vs_seq`, and a per-test
+  scratch dir under `$TMPDIR`.  Existing TAP tests under
+  `tap/` keep working; new shell tests build on `lib.sh`.
+- `test/scripts/wal_audit.sh` verifies (a) UNLOGGED indexes
+  emit only init-fork META_UPDATE records (no main-fork pg_tre
+  WAL), (b) LOGGED inserts produce decodable rmgr-149 records
+  with a correct identify callback, (c) crash + restart
+  preserves the index and the differential idx-vs-seq check
+  passes after recovery.
+- `test/scripts/stress.sh` runs N iterations (default 30) of
+  a mixed insert / parallel-SELECT / DELETE / VACUUM /
+  REINDEX workload, gates on a configurable RSS ceiling and a
+  postmaster-still-alive check, and runs a differential
+  idx-vs-seq check at the end of each iteration plus once
+  more after a clean shutdown + restart at the end.
+- `test/lsan.supp` lists known-benign leaks (PG catalog
+  caches, plan caches, our backend-lifetime pattern cache).
+- `Makefile` targets: `test-wal-audit`, `test-stress`,
+  `test-shell`, `test-all`.
+
+### Changed
+
+- `pg_tre_extend` retained as a thin wrapper over the new
+  `pg_tre_extend_fork`; existing callers unaffected.
+- `pg_tre_build_empty` retained as a thin wrapper over the
+  new `pg_tre_build_empty_fork`; existing callers unaffected.
+
+---
+
+## [1.2.0-dev] - 2026-05-21 — project-infrastructure overhaul
 
 ### Added
 
