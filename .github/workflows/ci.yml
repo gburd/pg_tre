@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14]
-        pg: ['18']
+        pg: ['17', '18']
         cc: [gcc, clang]
         exclude:
           - os: macos-14

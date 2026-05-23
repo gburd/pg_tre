@@ -7,7 +7,7 @@
 #   4. Compile sparsemap, pg_tre source tree, and the generated parser into
 #      the PGXS-driven shared library.
 #
-# Requires PostgreSQL 18 or newer.  Override PG_CONFIG to pick an install.
+# Requires PostgreSQL 17 or newer.  Override PG_CONFIG to pick an install.
 #
 #   make PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config
 #   make PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config install
@@ -120,15 +120,15 @@ PG_TAP_PERL5LIB ?= $(shell dirname $$(dirname $$($(PG_CONFIG) --pkglibdir 2>/dev
 PG_TAP_TMPDIR ?= /tmp/pg_tre_tap_tmp
 
 # ------------------------------------------------------------------
-# PG version guard: require >= 18.
+# PG version guard: require >= 17.
 # ------------------------------------------------------------------
 PG_VERSION_RAW := $(shell $(PG_CONFIG) --version 2>/dev/null)
 PG_MAJOR := $(shell echo '$(PG_VERSION_RAW)' | awk '{print $$2}' | cut -d. -f1)
 ifeq ($(PG_MAJOR),)
 $(error Could not determine PostgreSQL major version from PG_CONFIG=$(PG_CONFIG))
 endif
-ifeq ($(shell test $(PG_MAJOR) -lt 18 2>/dev/null && echo yes),yes)
-$(error pg_tre requires PostgreSQL 18 or newer; found $(PG_MAJOR))
+ifeq ($(shell test $(PG_MAJOR) -lt 17 2>/dev/null && echo yes),yes)
+$(error pg_tre requires PostgreSQL 17 or newer; found $(PG_MAJOR))
 endif
 
 # ------------------------------------------------------------------

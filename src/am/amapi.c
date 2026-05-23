@@ -34,9 +34,12 @@ tre_handler(PG_FUNCTION_ARGS)
 
     amroutine->amcanorder      = false;
     amroutine->amcanorderbyop  = false;
+#if PG_VERSION_NUM >= 180000
+    /* New in PG18: hash/equality/ordering descriptors. */
     amroutine->amcanhash       = false;
     amroutine->amconsistentequality = false;
     amroutine->amconsistentordering = false;
+#endif
     amroutine->amcanbackward   = false;
     amroutine->amcanunique     = false;
     amroutine->amcanmulticol   = false;
@@ -63,7 +66,10 @@ tre_handler(PG_FUNCTION_ARGS)
     amroutine->amvacuumcleanup  = pg_tre_amvacuumcleanup;
     amroutine->amcanreturn      = NULL;        /* lossy */
     amroutine->amcostestimate   = pg_tre_amcostestimate;
+#if PG_VERSION_NUM >= 180000
+    /* New in PG18: optional callback returning the index tree height. */
     amroutine->amgettreeheight  = NULL;
+#endif
     amroutine->amoptions        = pg_tre_amoptions;
     amroutine->amproperty       = NULL;
     amroutine->ambuildphasename = NULL;
@@ -79,8 +85,11 @@ tre_handler(PG_FUNCTION_ARGS)
     amroutine->amestimateparallelscan = NULL;
     amroutine->aminitparallelscan     = NULL;
     amroutine->amparallelrescan       = NULL;
+#if PG_VERSION_NUM >= 180000
+    /* New in PG18: strategy/cmptype translation API. */
     amroutine->amtranslatestrategy    = NULL;
     amroutine->amtranslatecmptype     = NULL;
+#endif
 
     PG_RETURN_POINTER(amroutine);
 }
