@@ -31,6 +31,7 @@
 #include "access/tableam.h"
 #include "catalog/index.h"
 #include "catalog/pg_type.h"
+#include "common/hashfn.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
@@ -61,12 +62,37 @@ typedef struct TrigramTidEntry
     uint32      position;       /* byte offset in original text */
 } TrigramTidEntry;
 
-/* Per-TID bloom tracking during build. */
+/*
+ * Per-TID bloom tracking during build.
+ *
+ * Used as the element type for a simplehash-generated open-addressing
+ * hash table keyed by packed_tid (an opaque uint64 derived from an
+ * ItemPointerData via pg_tre_pack_tid).  See the SH_* macros below.
+ *
+ * The earlier implementation was a flat array with linear scans on
+ * every (trigram,TID) emission and again at every post-sort flush;
+ * for 100k-row builds this dominated CPU time at O(N^2) and made the
+ * backend uncancellable.  Switching to simplehash collapses the
+ * lookup to amortized O(1).
+ */
 typedef struct TidBloomEntry
 {
-    uint64      packed_tid;
+    uint64      packed_tid;     /* SH_KEY */
     PgTreBloom *bloom;          /* palloc'd bloom filter */
+    char        status;         /* required by simplehash */
 } TidBloomEntry;
+
+/* Generate the tid_bloom_hash type and tid_bloom_{create,lookup,insert,...} */
+#define SH_PREFIX tid_bloom
+#define SH_ELEMENT_TYPE TidBloomEntry
+#define SH_KEY_TYPE uint64
+#define SH_KEY packed_tid
+#define SH_HASH_KEY(tb, key) hash_bytes((const unsigned char *) &(key), sizeof(uint64))
+#define SH_EQUAL(tb, a, b) ((a) == (b))
+#define SH_SCOPE static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
 
 /* Callback context for heap scan. */
 typedef struct BuildState
@@ -81,9 +107,7 @@ typedef struct BuildState
     int         entries_alloced;
 
     /* Per-TID bloom tracking (Phase 5). */
-    TidBloomEntry *tid_blooms;
-    int         n_tid_blooms;
-    int         tid_blooms_alloced;
+    tid_bloom_hash *tid_blooms;
 
     double      heap_tuples;
     MemoryContext tmpctx;
@@ -139,44 +163,36 @@ compare_trigram_tid(const void *a, const void *b)
 
 /*
  * Find or create a bloom filter for a given TID (Phase 5).
- * Linear search for now; Phase 8 can optimize with a hash table.
+ *
+ * Backed by a simplehash-generated open-addressing hash table keyed by
+ * packed_tid; lookup and insert are amortized O(1).  When a new entry
+ * is created, the bloom filter is allocated in CurrentMemoryContext so
+ * it lives for the duration of the build.
  */
 static PgTreBloom *
 find_or_create_tid_bloom(BuildState *bstate, ItemPointer tid)
 {
     uint64 packed = pg_tre_pack_tid(tid);
-    int i;
+    TidBloomEntry *entry;
+    bool        found;
 
     if (!pg_tre_tuple_bloom_enable)
         return NULL;
 
-    /* Linear search for existing entry. */
-    for (i = 0; i < bstate->n_tid_blooms; i++)
-    {
-        if (bstate->tid_blooms[i].packed_tid == packed)
-            return bstate->tid_blooms[i].bloom;
-    }
+    entry = tid_bloom_lookup(bstate->tid_blooms, packed);
+    if (entry != NULL)
+        return entry->bloom;
 
-    /* Not found: create new entry. */
-    if (bstate->n_tid_blooms >= bstate->tid_blooms_alloced)
+    entry = tid_bloom_insert(bstate->tid_blooms, packed, &found);
+    if (!found)
     {
-        bstate->tid_blooms_alloced *= 2;
-        bstate->tid_blooms = (TidBloomEntry *)
-            repalloc(bstate->tid_blooms,
-                     bstate->tid_blooms_alloced * sizeof(TidBloomEntry));
-    }
-
-    {
-        TidBloomEntry *tbe = &bstate->tid_blooms[bstate->n_tid_blooms++];
         Size bloom_size = pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits);
-        PgTreBloom *bloom;
+        PgTreBloom *bloom = (PgTreBloom *) palloc(bloom_size);
 
-        tbe->packed_tid = packed;
-        bloom = (PgTreBloom *) palloc(bloom_size);
         pg_tre_bloom_init(bloom, pg_tre_bloom_tuple_bits, 5 /* k */);
-        tbe->bloom = bloom;
-        return bloom;
+        entry->bloom = bloom;
     }
+    return entry->bloom;
 }
 
 /*
@@ -286,6 +302,14 @@ build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull,
     BuildState *bstate = (BuildState *) state;
 
     /*
+     * Heap scan can run for minutes on large relations; without an
+     * interrupt check the backend ignores pg_cancel_backend /
+     * pg_terminate_backend until the entire scan completes.  Same
+     * defense as the post-sort loop below.
+     */
+    CHECK_FOR_INTERRUPTS();
+
+    /*
      * Phase 2: only index the first column (assume it's text).
      * Later phases handle multi-column and operator classes properly.
      */
@@ -348,11 +372,8 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         palloc(bstate.entries_alloced * sizeof(TrigramTidEntry));
     bstate.n_entries = 0;
 
-    /* Phase 5: initialize per-TID bloom tracking. */
-    bstate.tid_blooms_alloced = 4096;
-    bstate.tid_blooms = (TidBloomEntry *)
-        palloc(bstate.tid_blooms_alloced * sizeof(TidBloomEntry));
-    bstate.n_tid_blooms = 0;
+    /* Phase 5: initialize per-TID bloom hash table. */
+    bstate.tid_blooms = tid_bloom_create(CurrentMemoryContext, 1024, NULL);
 
     bstate.heap_tuples = 0.0;
     bstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
@@ -425,15 +446,11 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                         /* Look up the TID's bloom. */
                         if (pg_tre_tuple_bloom_enable)
                         {
-                            int j;
-                            for (j = 0; j < bstate.n_tid_blooms; j++)
-                            {
-                                if (bstate.tid_blooms[j].packed_tid == current_tid_packed)
-                                {
-                                    bloom = bstate.tid_blooms[j].bloom;
-                                    break;
-                                }
-                            }
+                            TidBloomEntry *be =
+                                tid_bloom_lookup(bstate.tid_blooms,
+                                                 current_tid_packed);
+                            if (be != NULL)
+                                bloom = be->bloom;
                             if (bloom != NULL)
                                 bloom_bits = pg_tre_bloom_bits(bloom);
                         }
@@ -515,15 +532,11 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                     /* Look up the TID's bloom. */
                     if (pg_tre_tuple_bloom_enable)
                     {
-                        int j;
-                        for (j = 0; j < bstate.n_tid_blooms; j++)
-                        {
-                            if (bstate.tid_blooms[j].packed_tid == current_tid_packed)
-                            {
-                                bloom = bstate.tid_blooms[j].bloom;
-                                break;
-                            }
-                        }
+                        TidBloomEntry *be =
+                            tid_bloom_lookup(bstate.tid_blooms,
+                                             current_tid_packed);
+                        if (be != NULL)
+                            bloom = be->bloom;
                         if (bloom != NULL)
                             bloom_bits = pg_tre_bloom_bits(bloom);
                     }
@@ -568,15 +581,11 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                 /* Look up the TID's bloom. */
                 if (pg_tre_tuple_bloom_enable)
                 {
-                    int j;
-                    for (j = 0; j < bstate.n_tid_blooms; j++)
-                    {
-                        if (bstate.tid_blooms[j].packed_tid == current_tid_packed)
-                        {
-                            bloom = bstate.tid_blooms[j].bloom;
-                            break;
-                        }
-                    }
+                    TidBloomEntry *be =
+                        tid_bloom_lookup(bstate.tid_blooms,
+                                         current_tid_packed);
+                    if (be != NULL)
+                        bloom = be->bloom;
                     if (bloom != NULL)
                         bloom_bits = pg_tre_bloom_bits(bloom);
                 }
@@ -664,15 +673,20 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     MemoryContextSwitchTo(oldcxt);
     MemoryContextDelete(bstate.tmpctx);
 
-    /* Phase 5: free per-TID bloom tracking. */
+    /* Phase 5: free per-TID bloom hash table and the blooms it owns. */
     if (bstate.tid_blooms != NULL)
     {
-        for (i = 0; i < bstate.n_tid_blooms; i++)
+        tid_bloom_iterator iter;
+        TidBloomEntry *entry;
+
+        tid_bloom_start_iterate(bstate.tid_blooms, &iter);
+        while ((entry = tid_bloom_iterate(bstate.tid_blooms, &iter)) != NULL)
         {
-            if (bstate.tid_blooms[i].bloom != NULL)
-                pfree(bstate.tid_blooms[i].bloom);
+            if (entry->bloom != NULL)
+                pfree(entry->bloom);
         }
-        pfree(bstate.tid_blooms);
+        tid_bloom_destroy(bstate.tid_blooms);
+        bstate.tid_blooms = NULL;
     }
 
     pfree(bstate.entries);
