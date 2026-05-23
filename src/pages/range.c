@@ -16,6 +16,7 @@
 
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lockdefs.h"
 #include "utils/elog.h"
@@ -105,7 +106,6 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
     while (iter(iter_ctx, &trigram_hash, &posting_root, &inline_data, &inline_bytes))
     {
         sparsemap_t *smap;
-        uint64 min_tid, max_tid;
 
         /* Materialize the posting's sparsemap. */
         smap = pg_tre_posting_materialize(index, posting_root, inline_data, inline_bytes);
@@ -116,23 +116,55 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
             continue;
         }
 
-        min_tid = sm_minimum(smap);
-        max_tid = sm_maximum(smap);
-
-        /* Iterate over this posting's TIDs and union into range blooms. */
+        /*
+         * Iterate the sparse map's set bits with sm_next_member() and
+         * union each TID's heap-block range bloom with this trigram.
+         *
+         * Earlier this code did `for (tid = min_tid; tid <= max_tid; tid++)`
+         * with an sm_contains() probe per step.  For frequent trigrams
+         * (which span the entire heap), max_tid - min_tid can be tens
+         * of millions while the actual TID count is only ~N_rows --
+         * making the build O(blocks * trigrams * 65536) instead of
+         * O(N_TIDs).  100k-row builds spent the bulk of CPU here.
+         *
+         * We also dedupe by range_start within a single trigram: TIDs
+         * arrive in sorted order, so consecutive TIDs in the same range
+         * map to the same RangeAccum and we only need to add the
+         * trigram_hash to its bloom once.
+         */
         {
             uint64 tid;
-            for (tid = min_tid; tid <= max_tid; tid++)
+            uint64 prev_idx = SM_IDX_MAX;
+            BlockNumber last_range_start = InvalidBlockNumber;
+            RangeAccum *last_ra = NULL;
+            uint64 iter_count = 0;
+
+            while ((tid = sm_next_member(smap, prev_idx)) != SM_IDX_MAX)
             {
-                if (!sm_contains(smap, tid))
+                BlockNumber heap_blk;
+                BlockNumber range_start;
+                BlockNumber range_end;
+                RangeAccum *ra;
+
+                prev_idx = tid;
+
+                /*
+                 * Allow this build phase to be cancelled.  Without
+                 * this, pg_cancel_backend / pg_terminate_backend are
+                 * silently ignored for the entire bulkload.
+                 */
+                if ((iter_count++ & 0xFFFF) == 0)
+                    CHECK_FOR_INTERRUPTS();
+
+                heap_blk = (BlockNumber) (tid >> 16);
+                range_start = (heap_blk / range_size) * range_size;
+                range_end = range_start + range_size;
+
+                if (last_ra != NULL && range_start == last_range_start)
                     continue;
 
-                BlockNumber heap_blk = (BlockNumber) (tid >> 16);
-                BlockNumber range_start = (heap_blk / range_size) * range_size;
-                BlockNumber range_end = range_start + range_size;
-                RangeAccum *ra = NULL;
-
                 /* Find or create range accumulator. */
+                ra = NULL;
                 for (i = 0; i < n_ranges; i++)
                 {
                     if (ranges[i].range_start == range_start)
@@ -166,8 +198,8 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
                 /* Add this trigram to the range's bloom. */
                 pg_tre_bloom_add_trigram(ra->bloom, trigram_hash);
 
-                if (tid == max_tid)
-                    break;  /* guard against wrap */
+                last_range_start = range_start;
+                last_ra = ra;
             }
         }
 
