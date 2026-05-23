@@ -6,6 +6,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.4] - 2026-05-22 - expected-output refresh + cascade fix
+
+Patch release on the 1.2 lineage.  Same on-disk format as 1.2.3;
+no re-index required; `ALTER EXTENSION pg_tre UPDATE TO '1.2.4'`
+has no SQL work to do.
+
+### Fixed
+
+- **Cardinality + pending-overlay interaction.**  The 1.2.3
+  pending-overlay positional-filter fix cascades to the path
+  that handles trigrams dropped by `pg_tre.min_trigram_freq`:
+  high-cardinality predicates that previously returned an
+  empty index set now return the correct row set (regression
+  test `cardinality.out`: `SELECT 0` -> `SELECT 200`,
+  `counts_agree=t`, `row_sets_agree=t`).
+- Regression test expected outputs refreshed to track the
+  upstream changes from 1.2.2 / 1.2.3: `tre_version` string,
+  range-tier `built range tier with N ranges` NOTICE, the
+  cost-model update, and the tier-3 default-on flip.
+
+### Known issues
+
+- `multi_leaf` regression test takes 1-3 minutes of CPU on
+  typical hardware and >10 minutes on slower workstations
+  (100k-row high-cardinality build).  Test still runs by
+  default; a v1.3 follow-up will trim its working set.
+
+---
+
 ## [1.2.3] — 2026-05-22 — tier-3 re-enabled by default
 
 Patch release on the 1.2 lineage.  Same on-disk format as
