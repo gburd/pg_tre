@@ -10,14 +10,17 @@
 
 #include "postgres.h"
 
+#include "access/bufmask.h"
 #include "access/xlog.h"
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
 #include "access/xlogutils.h"
 #include "lib/stringinfo.h"
 #include "storage/bufmgr.h"
+#include "storage/bufpage.h"
 #include "utils/elog.h"
 
+#include "pg_tre/page.h"
 #include "pg_tre/xlog.h"
 
 void
@@ -148,12 +151,68 @@ pg_tre_identify(uint8 info)
     }
 }
 
+/*
+ * Mask a pg_tre page before WAL consistency checks.
+ *
+ * Called on both the primary's full-page image (as captured at
+ * XLogRegisterBuffer time, before XLogInsert returned the record's LSN)
+ * and the standby's just-replayed page (whose LSN was advanced to
+ * record->EndRecPtr by redo).  The mask must zero out fields that
+ * legitimately differ so the bytewise comparison succeeds; it must NOT
+ * mask user data or structural fields that real divergence would touch.
+ *
+ * Fields we mask, with rationale:
+ *
+ *   - pd_lsn / pd_checksum: The primary's FPI captures the page state
+ *     BEFORE XLogInsert assigns this record's LSN.  After redo the
+ *     standby sets pd_lsn = record->EndRecPtr.  pd_checksum is computed
+ *     after every other byte is settled, so it follows pd_lsn.  Standard
+ *     across all rmgrs.
+ *
+ *   - PageHeader hint flags + pd_prune_xid: PD_ALL_VISIBLE,
+ *     PD_PAGE_FULL, PD_HAS_FREE_LINES are hint bits that can be set
+ *     without WAL.  pg_tre does not use them today, but masking them
+ *     is the standard defensive posture (heap, btree, gin all do it).
+ *
+ *   - Hole between pd_lower and pd_upper: REGBUF_STANDARD strips this
+ *     region from the FPI on the primary and redo zeros it on the
+ *     standby, so it should already match, but masking is cheap
+ *     insurance against future code paths that touch the hole between
+ *     XLogRegisterBuffer and the page being read for comparison.
+ *
+ * Things we deliberately do NOT mask:
+ *
+ *   - PageTreOpaqueData (page_kind, flags, format_version): all three
+ *     are set at page-init time and only mutated by WAL-logged ops,
+ *     so primary and standby must agree byte-for-byte.
+ *
+ *   - Per-page-type headers (PgTreMetaPageData, PgTrePostingLeafHeader,
+ *     PgTrePendingHeader, PgTreUpperLeafEntry, PgTreRangeLeafEntry):
+ *     these are the user-visible structural state of the index.  Any
+ *     divergence here is a real redo bug, not a hint-bit quirk.
+ *
+ *   - Line-pointer flags: pg_tre stores its data in raw struct layouts
+ *     in PageGetContents(), not via line pointers, so there are no
+ *     LP_* flags to drift.
+ */
 void
 pg_tre_mask(char *pagedata, BlockNumber blkno)
 {
+    Page page = (Page) pagedata;
+
+    (void) blkno;
+
+    mask_page_lsn_and_checksum(page);
+    mask_page_hint_bits(page);
+
     /*
-     * Phase 7 implements buffer masking for wal_consistency_checking.
-     * The mask zeroes out fields that legitimately differ between
-     * primary and replica (hint bits, etc.).
+     * mask_unused_space asserts pd_lower / pd_upper are well-formed.
+     * Skip the call on a freshly-extended (all-zero) page that has
+     * never been initialized; such a page can transiently appear in
+     * the buffer cache after smgr extension and before page init,
+     * and PageIsNew is the same predicate the rest of the code uses
+     * to detect it.
      */
+    if (!PageIsNew(page))
+        mask_unused_space(page);
 }
