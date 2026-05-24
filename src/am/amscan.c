@@ -171,6 +171,22 @@ query_wants_trigram(const TrigramQuery *q, uint64 h)
     return false;
 }
 
+/*
+ * True if the query reduces to a single trigram (one conjunct with one
+ * disjunct).  In that case the candidate set IS the posting list of
+ * that trigram, and tier-3 / positional filters cannot prune anything:
+ * every candidate's per-tuple bloom contains the trigram by
+ * construction (see ambuild.c::find_or_create_tid_bloom), and the only
+ * disjunct's position window covers the query's full match span.
+ * Skipping tier-3 here turns a multi-minute hang into a millisecond
+ * pass-through; correctness is preserved by the executor recheck.
+ */
+static bool
+tre_query_is_single_trigram(const TrigramQuery *q)
+{
+    return q->n == 1 && q->conjuncts[0].n == 1;
+}
+
 static PendingOverlayEntry *
 overlay_find_or_create(PendingOverlay *ov, uint64 h)
 {
@@ -411,7 +427,7 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         sparsemap_t *candidates, MemoryContext cxt)
 {
     sparsemap_t *refined;
-    uint64 idx, maxidx;
+    uint64 idx;
     /*
      * Bloom scratch buffer.  Layout: [PgTreBloom header][bloom_bytes
      * of bit array].  The build path serializes only the bit array
@@ -457,14 +473,16 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     if (refined == NULL)
         return candidates;  /* OOM; fall back to unrefined */
 
-    maxidx = sm_maximum(candidates);
-    idx = sm_minimum(candidates);
-
-    while (idx <= maxidx)
+    /*
+     * Iterate set bits via sm_next_member rather than walking
+     * [sm_minimum, sm_maximum] and calling sm_contains at every
+     * gap.  For a 100K-row 1000-page heap the old walk visited
+     * ~65M empty indexes; this one visits only candidates.
+     */
+    idx = SM_IDX_MAX;
+    while ((idx = sm_next_member(candidates, idx)) != SM_IDX_MAX)
     {
-        if (sm_contains(candidates, idx))
-        {
-            bool passes = true;
+        bool passes = true;
 
             /* For each conjunct, check if at least one disjunct's trigram
              * is present in the tuple's bloom.  In CNF mode, ALL conjuncts
@@ -591,11 +609,6 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                     return candidates;
                 }
             }
-        }
-
-        if (idx == UINT64_MAX)
-            break;
-        idx++;
     }
 
     (void) cxt;
@@ -807,7 +820,9 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      * accumulate rank.  See doc/tier3-chain-rank.md.
      */
     if (result != NULL && st->q.global_max_cost >= 0 &&
-        pg_tre_tuple_bloom_enable)
+        pg_tre_tuple_bloom_enable &&
+        !tre_query_is_single_trigram(&st->q) &&
+        sm_cardinality(result) <= (uint64) pg_tre_tier3_max_candidates)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
                                          result, st->scan_cxt);
@@ -830,18 +845,23 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
      */
     if (result != NULL && sm_cardinality(result) > 0 &&
         st->q.mode == TRIGRAM_QUERY_CNF &&
-        pg_tre_tuple_bloom_enable)
+        pg_tre_tuple_bloom_enable &&
+        !tre_query_is_single_trigram(&st->q) &&
+        sm_cardinality(result) <= (uint64) pg_tre_tier3_max_candidates)
     {
         sparsemap_t *filtered = sm_create(sm_get_capacity(result));
         if (filtered != NULL)
         {
-            uint64 tid_idx = sm_minimum(result);
-            uint64 tid_maxidx = sm_maximum(result);
+            uint64 tid_idx = SM_IDX_MAX;
 
-            while (tid_idx <= tid_maxidx)
+            /*
+             * Iterate set bits via sm_next_member; the previous
+             * walk over [sm_minimum, sm_maximum] called sm_contains
+             * at every gap, which on a 100K-row 1000-page heap
+             * iterated tens of millions of empty indexes.
+             */
+            while ((tid_idx = sm_next_member(result, tid_idx)) != SM_IDX_MAX)
             {
-                if (sm_contains(result, tid_idx))
-                {
                     /*
                      * CNF: passes only if EVERY conjunct passes (start true,
                      * fail-fast on any failure).
@@ -981,21 +1001,16 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                         }
                     }
 
-                    if (passes)
+                if (passes)
+                {
+                    if (sm_add(filtered, tid_idx) == SM_IDX_MAX)
                     {
-                        if (sm_add(filtered, tid_idx) == SM_IDX_MAX)
-                        {
-                            /* Overflow; give up on filtering */
-                            free(filtered);
-                            filtered = NULL;
-                            break;
-                        }
+                        /* Overflow; give up on filtering */
+                        free(filtered);
+                        filtered = NULL;
+                        break;
                     }
                 }
-
-                if (tid_idx == UINT64_MAX)
-                    break;
-                tid_idx++;
             }
 
             if (filtered != NULL)

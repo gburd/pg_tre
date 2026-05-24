@@ -37,6 +37,7 @@ int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
+int  pg_tre_tier3_max_candidates   = 50000;
 
 void
 pg_tre_init_guc(void)
@@ -100,6 +101,16 @@ pg_tre_init_guc(void)
         NULL,
         &pg_tre_tuple_bloom_enable,
         true, PGC_SIGHUP, 0, NULL, NULL, NULL);
+
+    DefineCustomIntVariable("pg_tre.tier3_max_candidates",
+        "Skip per-tuple bloom and positional filters when the candidate"
+        " set already exceeds this many TIDs.",
+        "Tier-3 filters do per-TID work proportional to the candidate"
+        " cardinality.  For very large candidate sets the recheck path"
+        " is cheaper than running tier-3, so we skip it.  Set to 0 to"
+        " disable tier-3 entirely; INT_MAX disables this safety belt.",
+        &pg_tre_tier3_max_candidates,
+        50000, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
 
     /*
      * Cardinality-aware build (1.2.1+).  Posting trees with fewer

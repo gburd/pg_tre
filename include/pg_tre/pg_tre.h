@@ -32,6 +32,7 @@ extern int  pg_tre_compile_timeout_ms;
 extern int  pg_tre_match_timeout_ms;
 extern bool pg_tre_fastupdate;
 extern bool pg_tre_tuple_bloom_enable;
+extern int  pg_tre_tier3_max_candidates;
 
 /* Initialization entry points. */
 extern void pg_tre_init_guc(void);
