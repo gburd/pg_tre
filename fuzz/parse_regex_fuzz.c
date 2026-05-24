@@ -1,152 +1,96 @@
 /*
- * fuzz/parse_regex_fuzz.c - libFuzzer harness for pg_tre regex parser.
- *
- * Tests tre_parse_regex(), regex_extract_query(), and pg_tre_tile_query()
- * with arbitrary byte sequences from libFuzzer.
+ * fuzz/parse_regex_fuzz.c - libFuzzer harness for the pg_tre regex
+ * parser, trigram extraction, and Navarro tiling.
  *
  * Build:
  *   cd fuzz && make -f Makefile.fuzz
  *
  * Run:
- *   ./pg_tre_fuzz corpus -max_total_time=900 -detect_leaks=1 -rss_limit_mb=2048
+ *   ./pg_tre_fuzz corpus -max_total_time=900 -rss_limit_mb=2048 \
+ *                 -detect_leaks=0
+ *
+ * Note: -detect_leaks=0 is recommended for long campaigns because the
+ * thin backend shim in pg_backend_stub.c does not free per-iteration
+ * MemoryContext allocations -- libpgcommon's frontend palloc has no
+ * per-context tracking.  ASan still red-zones every chunk and catches
+ * UAF/OOB on individual allocations.
  */
 
+#include "postgres.h"
+
+#include "lib/stringinfo.h"
+#include "utils/memutils.h"
+
+#include "pg_tre/regex_ast.h"
+#include "pg_tre/tiling.h"
+
+#include <setjmp.h>
 #include <stdint.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <setjmp.h>
 
-/* Stub declarations for Postgres types and memory management */
-typedef struct MemoryContextData *MemoryContext;
-typedef struct StringInfoData
-{
-    char   *data;
-    int     len;
-    int     maxlen;
-} StringInfoData;
-typedef StringInfoData *StringInfo;
-
-/* Forward declarations from stubs */
-extern MemoryContext AllocSetContextCreate(MemoryContext parent,
-                                           const char *name,
-                                           int minContextSize,
-                                           int initBlockSize,
-                                           int maxBlockSize);
-extern void MemoryContextDelete(MemoryContext context);
-extern void MemoryContextReset(MemoryContext context);
-extern MemoryContext MemoryContextSwitchTo(MemoryContext context);
-
-extern void *palloc(size_t size);
-extern void *palloc0(size_t size);
-extern void pfree(void *ptr);
-extern void *repalloc(void *ptr, size_t size);
-
-extern void initStringInfo(StringInfo str);
-extern void appendStringInfoString(StringInfo str, const char *s);
-extern void appendStringInfo(StringInfo str, const char *fmt, ...);
-extern void appendStringInfoChar(StringInfo str, char c);
-
-/* Error handling via setjmp/longjmp */
+/* Defined in pg_backend_stub.c; set by the harness around each iteration. */
 extern jmp_buf *pg_fuzz_error_jmp;
-extern void ereport_noop(int level, const char *msg);
 
-/* Parser and query API */
-typedef struct TreParseCtx
-{
-    MemoryContext   mcxt;
-    const char     *input;
-    int             input_len;
-    void           *root;       /* RegexAst* */
-    int             syntax_error;
-    char            errmsg[128];
-    void           *tokenizer_state;
-} TreParseCtx;
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
-typedef struct TrigramQuery
-{
-    int             n;
-    void           *conjuncts;
-    int             min_match_len;
-    int             global_max_cost;
-    int             always_true;
-    int             mode;
-} TrigramQuery;
-
-extern int tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len);
-extern int regex_extract_query(TreParseCtx *ctx, int max_cost, TrigramQuery *out);
-extern int pg_tre_tile_query(const void *ast, int k, TrigramQuery *out, MemoryContext cxt);
-
-/* libFuzzer entry point */
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    TreParseCtx ctx;
-    MemoryContext fuzz_context = NULL;
-    jmp_buf error_buf;
-    volatile int parse_ok = 0;
+	TreParseCtx ctx;
+	MemoryContext fuzz_context = NULL;
+	MemoryContext old_context = NULL;
+	jmp_buf error_buf;
+	bool parse_ok = false;
 
-    /* Skip inputs that are too large */
-    if (size > 4096)
-        return 0;
+	if (size == 0 || size > 4096)
+		return 0;
 
-    /* Skip empty inputs */
-    if (size == 0)
-        return 0;
+	pg_fuzz_error_jmp = &error_buf;
+	if (setjmp(error_buf) != 0)
+	{
+		/* ereport(ERROR) was called; clean up and return. */
+		if (fuzz_context != NULL)
+		{
+			if (old_context != NULL)
+				MemoryContextSwitchTo(old_context);
+			MemoryContextDelete(fuzz_context);
+		}
+		pg_fuzz_error_jmp = NULL;
+		return 0;
+	}
 
-    /* Set up error handler */
-    pg_fuzz_error_jmp = &error_buf;
-    if (setjmp(error_buf) != 0)
-    {
-        /* ereport(ERROR) was called; clean up and return */
-        if (fuzz_context)
-            MemoryContextDelete(fuzz_context);
-        pg_fuzz_error_jmp = NULL;
-        return 0;
-    }
+	fuzz_context = AllocSetContextCreate(NULL,
+										 "FuzzContext",
+										 ALLOCSET_DEFAULT_SIZES);
+	old_context = MemoryContextSwitchTo(fuzz_context);
 
-    /* Create a per-iteration memory context */
-    fuzz_context = AllocSetContextCreate(NULL,
-                                         "FuzzContext",
-                                         8 * 1024,   /* minContextSize */
-                                         8 * 1024,   /* initBlockSize */
-                                         8 * 1024 * 1024); /* maxBlockSize */
-    MemoryContextSwitchTo(fuzz_context);
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.mcxt = fuzz_context;
+	ctx.input = (const char *) data;
+	ctx.input_len = (int) size;
 
-    /* Initialize parse context */
-    memset(&ctx, 0, sizeof(TreParseCtx));
-    ctx.mcxt = fuzz_context;
-    ctx.input = (const char *) data;
-    ctx.input_len = (int) size;
+	parse_ok = tre_parse_regex(&ctx, (const char *) data, (int) size);
 
-    /* Parse the regex */
-    parse_ok = tre_parse_regex(&ctx, (const char *) data, (int) size);
+	if (parse_ok && ctx.root != NULL)
+	{
+		for (int32 k = 0; k <= 2; k++)
+		{
+			TrigramQuery query;
 
-    if (parse_ok && ctx.root != NULL)
-    {
-        /* Try extraction at k=0, k=1, k=2 */
-        for (int k = 0; k <= 2; k++)
-        {
-            TrigramQuery query;
-            memset(&query, 0, sizeof(TrigramQuery));
+			memset(&query, 0, sizeof(query));
+			if (regex_extract_query(&ctx, k, &query) && k > 0 && query.n > 0)
+			{
+				TrigramQuery tiled;
 
-            /* Extract query */
-            if (regex_extract_query(&ctx, k, &query))
-            {
-                /* If we got a valid query, try tiling for k>0 */
-                if (k > 0 && query.n > 0)
-                {
-                    TrigramQuery tiled;
-                    memset(&tiled, 0, sizeof(TrigramQuery));
-                    (void) pg_tre_tile_query(ctx.root, k, &tiled, fuzz_context);
-                }
-            }
-        }
-    }
+				memset(&tiled, 0, sizeof(tiled));
+				(void) pg_tre_tile_query(ctx.root, k, &tiled, fuzz_context);
+			}
+		}
+	}
 
-    /* Clean up */
-    MemoryContextDelete(fuzz_context);
-    pg_fuzz_error_jmp = NULL;
-
-    return 0;
+	MemoryContextSwitchTo(old_context);
+	MemoryContextDelete(fuzz_context);
+	pg_fuzz_error_jmp = NULL;
+	return 0;
 }

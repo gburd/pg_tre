@@ -1,45 +1,54 @@
-# fuzz/Makefile.fuzz - out-of-tree libFuzzer build for pg_tre regex parser
+# fuzz/Makefile.fuzz - out-of-tree libFuzzer build for the pg_tre regex parser.
 #
 # Usage:
 #   cd fuzz
 #   make -f Makefile.fuzz
-#   ./pg_tre_fuzz corpus -max_total_time=900 -detect_leaks=1 -rss_limit_mb=2048
+#   ./pg_tre_fuzz corpus -max_total_time=900 -rss_limit_mb=2048 -detect_leaks=0
 #
-# Requires: clang with libFuzzer support (clang 12+)
-#
-# For nix-shell users:
-#   nix-shell -p clang clang-tools --run 'make -f Makefile.fuzz'
+# Requires: clang with libFuzzer support (clang 12+).
 
-# PostgreSQL configuration
 PG_CONFIG ?= $(HOME)/.pgrx/18.3/pgrx-install/bin/pg_config
 
-# Check that PG_CONFIG points to a valid pg_config
 ifeq ($(shell test -x $(PG_CONFIG) && echo yes),yes)
-    PG_INCLUDEDIR_SERVER := $(shell $(PG_CONFIG) --includedir-server)
+PG_INCLUDEDIR_SERVER := $(shell $(PG_CONFIG) --includedir-server)
+PG_INCLUDEDIR        := $(shell $(PG_CONFIG) --includedir)
+PG_LIBDIR            := $(shell $(PG_CONFIG) --libdir)
 else
-    $(error PG_CONFIG=$(PG_CONFIG) is not executable. Set PG_CONFIG to a valid pg_config path.)
+$(error PG_CONFIG=$(PG_CONFIG) is not executable. Set PG_CONFIG to a valid pg_config path.)
 endif
 
-# Compiler and flags
 CC := clang
+
+# libFuzzer + ASan + symbols + frame pointers for useful stack traces.
 CFLAGS := -fsanitize=fuzzer,address -g -O1 -fno-omit-frame-pointer
+
+# Real PG18 headers come from the server include tree (backend) plus the
+# internal include tree (postgres_fe.h, c.h, port.h).
 CFLAGS += -I$(PG_INCLUDEDIR_SERVER)
+CFLAGS += -I$(PG_INCLUDEDIR)/internal
 CFLAGS += -I../include
 CFLAGS += -I../vendor/tre/lib
 
-# PostgreSQL-compatible warnings, minus the ones clang doesn't support
+# PostgreSQL-compatible warnings, minus the ones clang doesn't support.
 CFLAGS += -Wall -Wmissing-prototypes -Wpointer-arith
 CFLAGS += -Wendif-labels -Wmissing-format-attribute
 CFLAGS += -Wcast-function-type -Wformat-security
 CFLAGS += -fno-strict-aliasing -fwrapv
 
-# Allow declaration-after-statement for fuzzer convenience
+# Some pg_tre / vendor sources still mix decls and statements.
 CFLAGS += -Wno-declaration-after-statement
 
-# Define PG_TRE_FUZZ to guard PostgreSQL-only code paths
+# Define PG_TRE_FUZZ to guard PostgreSQL-only code paths.
 CFLAGS += -DPG_TRE_FUZZ
 
-# Source files from pg_tre
+# libpgcommon supplies palloc/palloc0/pfree/repalloc, the StringInfo
+# routines, pg_utf_mblen_private, psprintf, pstrdup, etc.  libpgport
+# supplies pg_snprintf, pg_fprintf, pg_strerror, etc.  Standard system
+# libs round it out.
+PG_LIBS := $(PG_LIBDIR)/libpgcommon.a $(PG_LIBDIR)/libpgport.a
+LDLIBS  := $(PG_LIBS) -lz -lm -lpthread
+
+# Source files compiled into the fuzz binary.
 QUERY_SRCS := ../src/query/parser.c \
               ../src/query/tokens.c \
               ../src/query/regex_ast.c \
@@ -52,36 +61,28 @@ QUERY_SRCS := ../src/query/parser.c \
 UTIL_SRCS := ../src/util/hash.c \
              ../src/util/utf8.c
 
-FUZZ_SRCS := parse_regex_fuzz.c memutils_stub.c
+FUZZ_SRCS := parse_regex_fuzz.c pg_backend_stub.c
 
 ALL_SRCS := $(QUERY_SRCS) $(UTIL_SRCS) $(FUZZ_SRCS)
+OBJS     := $(ALL_SRCS:.c=.o)
 
-# Object files
-OBJS := $(ALL_SRCS:.c=.o)
-
-# Target binary
 TARGET := pg_tre_fuzz
 
-# Check that tre_grammar.c exists
 GRAMMAR_FILE := ../src/query/tre_grammar.c
 ifeq ($(wildcard $(GRAMMAR_FILE)),)
-    $(error $(GRAMMAR_FILE) not found. Run 'make' in the parent directory first to generate the parser.)
+$(error $(GRAMMAR_FILE) not found. Run 'make' in the parent directory first to generate the parser.)
 endif
 
-# Build target
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-# Pattern rule for object files
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Clean
 clean:
 	rm -f $(TARGET) $(OBJS)
 	rm -f *.log crash-* leak-* oom-* slow-*
 
-# Phony targets
 .PHONY: all clean
