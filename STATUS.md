@@ -1,10 +1,10 @@
 # pg_tre status
 
-Released: **1.3.0-dev** (2026-05).  See `CHANGELOG.md` for full
+Released: **1.3.0** (2026-05).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-1.2.4 is a patch release on the 1.0.0 lineage: same on-disk
+1.3.0 is the first minor release on the 1.0.0 lineage: same on-disk
 format, no re-index required.  Headline additions:
 
 - **Similarity ranking** — `tre_distance(text, tre_pattern)`,

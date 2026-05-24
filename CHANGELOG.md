@@ -6,6 +6,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.0] - 2026-05-24 - performance: 1000x scan, 100x build
+
+First minor release on the 1.x line. Same on-disk format as
+1.2.x; ALTER EXTENSION pg_tre UPDATE TO '1.3.0' has no SQL
+work to do; no re-index required. Substantial performance
+wins on high-cardinality workloads.
+
+### Added
+
+- `pg_tre.tier3_max_candidates` GUC (PGC_USERSET, default
+  50000): cardinality safety belt for the tier-3 per-tuple
+  bloom and Phase 5.1 positional filter. When the candidate
+  set exceeds this threshold, both filters are skipped and
+  the executor recheck handles correctness.
+- PostgreSQL 17 build compatibility. PG18-only IndexAmRoutine
+  fields are guarded by `#if PG_VERSION_NUM >= 180000`.
+  Added to GitHub Actions CI matrix.
+- Real `rm_mask` callback for the pg_tre custom rmgr.
+  Allows `wal_consistency_checking = 'pg_tre'` to run clean
+  on a primary+standby pair: masks pd_lsn, pd_checksum, hint
+  bits, and the page hole between pd_lower and pd_upper.
+
+### Fixed
+
+- **Multi_leaf scan hang on high-cardinality queries.**
+  Single-trigram queries (e.g. `body %~~ tre_pattern('the',
+  0)` on a 100k-row corpus where 'the' appears in every row)
+  previously hung for 10+ minutes. Root cause: tier-3 cannot
+  prune any candidates when the query is a single trigram H,
+  because the candidate set IS H's posting list and every
+  candidate's per-tuple bloom contains H by construction.
+  Now we skip tier-3 in that case; recheck handles
+  correctness. Combined with replacing the idx++ walks with
+  `sm_next_member` iteration, the 100k 'the' scan now
+  completes in 107 ms (5000x speedup).
+
+- **CREATE INDEX hang on high-cardinality data.**
+  A 100k-row build with the trigram 'the' in every row
+  previously hung past 10 minutes. Two causes fixed:
+  (a) src/am/ambuild.c had an O(N) linear-scan TID-bloom
+  registry called once per trigram emission (~5M times for
+  100k rows), making the build O(N^2). Replaced with a
+  simplehash hash table.
+  (b) src/util/sparsemap.c's chunk locator
+  `__sm_get_chunk_offset` walked all chunks linearly per
+  call. For ~100k chunks this made every sm_add O(N), and
+  N sm_adds O(N^2). Added an in-memory tail-chunk cursor;
+  ascending-order operations are now O(1) amortized.
+  Combined: 100k build went from >10 min hung to 5 seconds
+  (>120x speedup).
+  The cursor patch is being upstreamed to sparsemap.
+
+- **CHECK_FOR_INTERRUPTS coverage in build path.**
+  The heap-scan callback and inner build loops were
+  uncancellable. Added CHECK_FOR_INTERRUPTS so a stuck
+  CREATE INDEX can be killed normally.
+
+### Performance summary (100k-row corpus, 'the' in every row)
+
+| Operation | 1.2.4 | 1.3.0 | Speedup |
+|-----------|-------|-------|---------|
+| CREATE INDEX | hung 10+ min | 5 s | >120x |
+| scan all-matching | hung 10+ min | 0.107 s | >5000x |
+| scan selective (1k matches) | 1.5 s | 0.291 s | 5x |
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.2.4] - 2026-05-22 - expected-output refresh + cascade fix
 
 Patch release on the 1.2 lineage.  Same on-disk format as 1.2.3;
