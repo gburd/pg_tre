@@ -36,29 +36,33 @@
  * inline in the upper-tree leaf entry (no separate root page).
  * Value is in bytes of serialized sparsemap.
  *
- * 1.2.1 attempted to bump 256 -> 384 to cut page count for
- * sparse-trigram corpora (potentially ~30-50% smaller index),
- * but two regressions surfaced:
- *
- *   (a) wal_audit.sh's post-crash differential check fails:
- *       index returns 0 rows on the recovered table for a
- *       pattern that the seq-scan finds 1000 of.  At 256
- *       this passes; at 384 it doesn't.  The interaction
- *       between the larger inline blob and the WAL-redo
- *       path needs investigation.
- *
- *   (b) at >=448 bytes the multi-leaf 100K-row test returns
- *       0 rows for `Row 12[0-9][0-9][0-9]` (should be
- *       1000).  Inline-data scan path interaction with the
- *       multi-leaf chain walker.
- *
- * Reverted to 256 for 1.2.1.  Both bugs are tracked as v1.3
- * followups.  Unlocking this threshold is one of the largest
- * single-change wins available for index size; see
- * `doc/specs/posting-page-coalescing.md` for the longer-term
- * structural fix.
+ * History:
+ *   - 1.2.0  256 (initial conservative value).
+ *   - 1.2.1  attempted 384; backed out:
+ *       (a) wal_audit.sh post-crash differential returned 0
+ *           rows for a 1000-row regex match; root cause was
+ *           the O(N^2) bloom-registry corruption on rebuild.
+ *       (b) at >=448 the multi-leaf 100K-row test returned 0
+ *           rows for `Row 12[0-9][0-9][0-9]`; root cause was
+ *           the single-trigram tier-3 unprunable false
+ *           positive that fed an empty TID set into the
+ *           merge.
+ *       At >=1024 CREATE INDEX hung in an O(N^2) sparsemap
+ *       chunk-walk during build.
+ *   - 1.3.0  fixed all three: hash-based bloom registry, tail-
+ *       chunk cursor on sparsemap, and tier-3 skip for
+ *       unprunable single-trigram queries.
+ *   - 1.3.1  raised to 2048.  Hard ceiling sits between 2048
+ *       and 3072: at >=3072 the upper-tree internal level
+ *       overflows on real corpora (10K rows / ~4700 distinct
+ *       trigrams) because each oversized inline entry leaves
+ *       too few entries per leaf for the single-level
+ *       internal layer to address.  At 4096+ a separate scan
+ *       bug also resurfaces in the cardinality test.  Lifting
+ *       this further requires multi-level upper-tree internals
+ *       (see `doc/specs/posting-page-coalescing.md`).
  */
-#define PG_TRE_INLINE_POSTING_MAX 256
+#define PG_TRE_INLINE_POSTING_MAX 2048
 
 /* ---- Writer side (owned by Agent A -- Phase 1/2) ---- */
 
