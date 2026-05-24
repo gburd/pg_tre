@@ -507,6 +507,37 @@ struct __attribute__((aligned(8))) sparsemap {
   size_t m_data_used; /* The used size of m_data */
   uint8_t *m_data;    /* The serialized bitmap data */
   /*
+   * Tail-chunk cursor (pg_tre local addition; not serialized).
+   *
+   * The chunk-locator __sm_get_chunk_offset() is the dominant cost
+   * for ascending-order builds and forward iteration when the map
+   * has many chunks (high-cardinality TID postings can produce
+   * 100k+ single-bit chunks).  Without a cursor, every lookup walks
+   * from chunk 0 — O(N) per call, O(N^2) per build.
+   *
+   * The cursor caches the (offset, chunk_index, start_idx) of the
+   * last chunk returned by __sm_get_chunk_offset().  When the next
+   * lookup's idx is >= that chunk's start, we resume the walk from
+   * the cursor instead of from the head.  For ascending workloads
+   * this collapses each lookup to O(1) amortized.
+   *
+   * Invalidation: any operation that shifts chunk bytes at or
+   * before the cursor's offset.  See __sm_insert_data and
+   * __sm_remove_data for the policy.
+   *
+   * In-memory only.  sm_init / sm_open / sm_clear / sm_create all
+   * start with m_cursor_valid = 0 (zero-init covers most paths).
+   * sm_copy / sm_owned_copy / sm_deserialize get fresh maps and
+   * therefore fresh cursors.
+   *
+   * NB: the SHARED on-disk format is m_data; the cursor lives only
+   * in this in-memory struct and is not part of any serialization.
+   */
+  size_t  m_cursor_offset;
+  size_t  m_cursor_chunk_index;
+  uint32_t m_cursor_start_idx;
+  uint8_t m_cursor_valid;
+  /*
    * m_alloc_kind tags how m_data was provisioned.  See enum
    * sm_alloc_kind below.  Used by sm_set_data_size and
    * sm_free to know whether the library may realloc / free
@@ -1717,7 +1748,49 @@ __sm_get_size_impl(const sparsemap_t *map)
  * @param[in] map The sparse map to search within.
  * @param[in] idx The index to find the corresponding chunk offset for.
  * @return The offset of the chunk if found, otherwise -1 if no appropriate chunk is found.
+ *
+ * Tail-chunk cursor optimization (pg_tre local; not upstream yet):
+ *
+ * The original implementation walked from chunk 0 on every call.
+ * For a map with N chunks this is O(N) per lookup.  Build paths
+ * that call sm_add for every TID in ascending order are then
+ * O(N^2), which dominates 100k-row trigram builds.  We cache the
+ * (offset, chunk_index, start) of the most-recently-returned chunk
+ * in three in-memory-only fields on the sparsemap_t struct, and
+ * resume the walk from there when the new idx is at or after the
+ * cursor's chunk start.  For random-order inserts the cursor's
+ * preconditions don't hold and we fall back to a full walk.
+ *
+ * The cursor is invalidated whenever __sm_insert_data or
+ * __sm_remove_data shifts bytes at or before the cached offset,
+ * and reset by sm_clear / sm_init / sm_open / sm_open_copy /
+ * sm_create / sm_copy / sm_owned_copy / sm_deserialize /
+ * __sm_replace_buffer / sm_split (both halves) / __sm_coalesce_map.
+ *
+ * The cursor is purely an in-memory speedup; the on-disk format
+ * is unchanged, and a freshly-deserialized map starts with an
+ * invalid cursor and rebuilds it on first use.
  */
+static inline void
+__sm_cursor_invalidate(const sparsemap_t *map_ro)
+{
+  /* Cursor lives on the in-memory struct only; const-cast is safe
+   * because we never publish a const pointer that aliases the
+   * mutable fields outside the library. */
+  sparsemap_t *m = (sparsemap_t *)map_ro;
+  m->m_cursor_valid = 0;
+}
+
+static inline void
+__sm_cursor_record(const sparsemap_t *map_ro, size_t offset, size_t chunk_index, __sm_idx_t start)
+{
+  sparsemap_t *m = (sparsemap_t *)map_ro;
+  m->m_cursor_offset = offset;
+  m->m_cursor_chunk_index = chunk_index;
+  m->m_cursor_start_idx = start;
+  m->m_cursor_valid = 1;
+}
+
 static ssize_t
 __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
 {
@@ -1727,10 +1800,25 @@ __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
     return -1;
   }
 
-  uint8_t *start = __sm_get_chunk_data(map, 0);
-  uint8_t *p = start;
+  uint8_t *base = __sm_get_chunk_data(map, 0);
+  uint8_t *p = base;
+  size_t i = 0;
 
-  for (size_t i = 0; i < count - 1; i++) {
+  /*
+   * Cursor fast-path.  If the cursor is valid, references a
+   * still-existing chunk, and the lookup idx is at or after the
+   * cursor's chunk start, resume the walk from the cursor instead
+   * of from the head.  Otherwise (cursor stale or idx earlier than
+   * the cursor's chunk start) fall through to a full walk from 0.
+   */
+  if (map->m_cursor_valid
+      && map->m_cursor_chunk_index < count
+      && idx >= map->m_cursor_start_idx) {
+    p = base + map->m_cursor_offset;
+    i = map->m_cursor_chunk_index;
+  }
+
+  for (; i < count - 1; i++) {
     const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -1738,11 +1826,17 @@ __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
     if (idx >= s + __sm_chunk_get_capacity(&chunk)) {
       p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
     } else {
-      break;
+      __sm_cursor_record(map, (size_t)(p - base), i, s);
+      return p - base;
     }
   }
 
-  return p - start;
+  /* Fell through: p points at the last chunk (count - 1). */
+  {
+    const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
+    __sm_cursor_record(map, (size_t)(p - base), count - 1, s);
+  }
+  return p - base;
 }
 
 /**
@@ -1799,6 +1893,19 @@ __sm_insert_data(sparsemap_t *map, const size_t offset, const uint8_t *buffer, c
   __sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
   __sm_assert(offset <= map->m_data_used);
 
+  /*
+   * Invalidate the tail-chunk cursor if the insertion lands at or
+   * before the cursor's chunk.  Insertions strictly after
+   * m_cursor_offset either grow the cursor's chunk (offset inside
+   * its body) or appear in a later chunk — either way the cursor's
+   * (offset, chunk_index, start) remain accurate.  Insertions at
+   * exactly m_cursor_offset displace the cursor's chunk forward,
+   * so we must invalidate.
+   */
+  if (map->m_cursor_valid && offset <= map->m_cursor_offset) {
+    map->m_cursor_valid = 0;
+  }
+
   uint8_t *p = __sm_get_chunk_data(map, offset);
   memmove(p + buffer_size, p, map->m_data_used - offset);
   memcpy(p, buffer, buffer_size);
@@ -1819,6 +1926,16 @@ static void
 __sm_remove_data(sparsemap_t *map, const size_t offset, const size_t gap_size)
 {
   __sm_assert(map->m_data_used >= gap_size);
+  /*
+   * Mirror __sm_insert_data: removals at or before the cursor
+   * either erase the cursor's chunk header outright (offset ==
+   * cursor) or shift it leftward (offset < cursor).  In either
+   * case the cached (offset, chunk_index) is no longer trustworthy.
+   * Removals strictly after the cursor leave it valid.
+   */
+  if (map->m_cursor_valid && offset <= map->m_cursor_offset) {
+    map->m_cursor_valid = 0;
+  }
   uint8_t *p = __sm_get_chunk_data(map, offset);
   memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
   map->m_data_used -= gap_size;
@@ -2417,6 +2534,7 @@ sm_clear(sparsemap_t *map)
   }
   memset(map->m_data, 0, map->m_capacity);
   map->m_data_used = SM_SIZEOF_OVERHEAD;
+  map->m_cursor_valid = 0;
   __sm_set_chunk_count(map, 0);
 }
 
@@ -2545,7 +2663,8 @@ sm_owned_copy(const sparsemap_t *map)
     return NULL;
   }
   out->m_data_used = map->m_data_used;
-  /* m_capacity is already cap; m_alloc_kind is SM_OWNED_CONTIGUOUS. */
+  /* m_capacity is already cap; m_alloc_kind is SM_OWNED_CONTIGUOUS.
+   * Cursor was zeroed by sm_create's calloc; leave it invalid. */
   if (cap > 0 && map->m_data != NULL) {
     memcpy(out->m_data, map->m_data, cap);
   }
@@ -2570,7 +2689,8 @@ sm_copy(const sparsemap_t *other)
   if (map) {
     map->m_capacity = other->m_capacity;
     map->m_data_used = other->m_data_used;
-    /* m_alloc_kind is already SM_OWNED_CONTIGUOUS from sparsemap(). */
+    /* m_alloc_kind is already SM_OWNED_CONTIGUOUS from sparsemap().
+     * Cursor stays at its zero-initialized invalid state. */
     memcpy(map->m_data, other->m_data, cap);
   }
   return map;
@@ -2618,6 +2738,7 @@ sm_init(sparsemap_t *map, uint8_t *data, const size_t size)
   map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = size;
+  map->m_cursor_valid = 0;
   /*
    * Caller-allocated struct + caller-allocated buffer.  The buffer is
    * not owned by the library; sm_set_data_size will treat any
@@ -2643,6 +2764,7 @@ void
 sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
 {
   map->m_data = data;
+  map->m_cursor_valid = 0;
   /*
    * Set m_capacity and a temporary m_data_used = m_capacity *before*
    * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
@@ -2745,6 +2867,8 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     }
     map->m_capacity = size;
     map->m_alloc_kind = SM_WRAPPED;
+    /* New buffer (caller-supplied) means cursor offsets are stale. */
+    map->m_cursor_valid = 0;
     return map;
   }
 
@@ -2784,6 +2908,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
      */
     if (m->m_data_used > size) {
       m->m_data_used = size;
+      m->m_cursor_valid = 0;
     }
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); });
     return m;
@@ -2804,6 +2929,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     map->m_capacity = size;
     if (map->m_data_used > size) {
       map->m_data_used = size;
+      map->m_cursor_valid = 0;
     }
     return map;
   }
@@ -2833,6 +2959,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
       map->m_capacity = size;
       if (map->m_data_used > size) {
         map->m_data_used = size;
+        map->m_cursor_valid = 0;
       }
       return map;
     }
@@ -2848,6 +2975,9 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     map->m_data = new_data;
     map->m_capacity = size;
     map->m_alloc_kind = SM_OWNED_SPLIT;
+    /* Buffer relocated; cursor offsets are still valid as offsets,
+     * and we copied the in-use prefix verbatim.  Leave the cursor
+     * untouched. */
     return map;
   }
   }
@@ -4622,8 +4752,27 @@ sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
   const size_t count = __sm_get_chunk_count(map);
   if (count == 0) return SM_IDX_MAX;
 
-  uint8_t *p = __sm_get_chunk_data(map, 0);
-  for (size_t i = 0; i < count; i++) {
+  uint8_t *base = __sm_get_chunk_data(map, 0);
+  uint8_t *p = base;
+  size_t i = 0;
+
+  /*
+   * Cursor fast-path.  Sequential forward iteration
+   *   while ((i = sm_next_member(map, i)) != SM_IDX_MAX) ...
+   * is the dominant pg_tre scan-side hot path.  Without a cursor
+   * each call walks from chunk 0 — O(N) per call, O(N^2) per scan.
+   * Resume from the most-recently-returned chunk when prev_idx is
+   * not earlier than that chunk's start.
+   */
+  if (prev_idx != SM_IDX_MAX
+      && map->m_cursor_valid
+      && map->m_cursor_chunk_index < count
+      && map->m_cursor_start_idx <= prev_idx) {
+    p = base + map->m_cursor_offset;
+    i = map->m_cursor_chunk_index;
+  }
+
+  for (; i < count; i++) {
     const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -4635,6 +4784,7 @@ sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
     }
     const uint64_t hit = __sm_chunk_next_set(&chunk, start, prev_idx);
     if (hit != SM_IDX_MAX) {
+      __sm_cursor_record(map, (size_t)(p - base), i, start);
       return hit;
     }
     p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
@@ -5258,6 +5408,7 @@ __sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
   }
   memcpy(dst->m_data, result->m_data, result_size);
   dst->m_data_used = result_size;
+  dst->m_cursor_valid = 0;
   sm_free(result);
   return dst;
 }
@@ -6524,6 +6675,10 @@ sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
   /* Update chunk counts and force recalculation of data sizes */
   __sm_set_chunk_count(map, __sm_get_chunk_count(map) - chunks_to_move);
   map->m_data_used = split_offset;
+  /* sm_split moves chunks across two maps; cursor caches on either
+   * side are no longer trustworthy. */
+  map->m_cursor_valid = 0;
+  other->m_cursor_valid = 0;
 
   __sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
   __sm_assert(sm_get_size(other) > SM_SIZEOF_OVERHEAD);
