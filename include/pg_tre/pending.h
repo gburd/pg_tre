@@ -62,4 +62,24 @@ extern void pg_tre_pending_scan(Relation index,
  */
 extern uint64 pg_tre_pending_merge(Relation index);
 
+/*
+ * Apply a pending-insert delta to a tail page during WAL redo.
+ * Used by pg_tre_redo_pending_insert_delta in src/wal/xlog.c.
+ *
+ * The page must already be the existing tail page on the standby
+ * with `prev_n_entries` entries.  Appends `take` entries from
+ * `src_entries` at slot `prev_n_entries`, updates the page header
+ * and pd_lower.  Caller is responsible for PageSetLSN /
+ * MarkBufferDirty.
+ *
+ * Returns true on success, false if the standby's page state
+ * doesn't match `prev_n_entries`.
+ */
+struct PgTrePendingEntry;
+extern bool pg_tre_pending_redo_apply_delta(Page page,
+                                            uint16 prev_n_entries,
+                                            uint16 take,
+                                            const struct PgTrePendingEntry
+                                                *src_entries);
+
 #endif /* PG_TRE_PENDING_H */

@@ -21,6 +21,7 @@
 #include "utils/elog.h"
 
 #include "pg_tre/page.h"
+#include "pg_tre/pending.h"
 #include "pg_tre/xlog.h"
 
 void
@@ -40,10 +41,9 @@ pg_tre_cleanup(void)
  * (REGBUF_STANDARD).  XLogReadBufferForRedo applies the FPI; we
  * just need to mark it dirty and release.
  *
- * Records the AM emits today are FPI-only — we never set
- * REGBUF_WILL_INIT, because that would suppress the FPI and our
- * redo doesn't yet carry deltas.  Tracked as a v1.2 follow-up to
- * shrink the WAL by emitting deltas and only FPIs as a fallback.
+ * Records that ship deltas are dispatched separately (e.g.
+ * pg_tre_redo_pending_insert_delta).  Records still emitted as
+ * FPI-only land here.
  */
 static void
 pg_tre_redo_fpi(XLogReaderState *record)
@@ -85,29 +85,121 @@ pg_tre_redo_fpi(XLogReaderState *record)
     }
 }
 
+/*
+ * Redo for the delta variant of XLOG_PTRE_PENDING_INSERT.
+ *
+ * The record carries:
+ *   block 0 (meta): xl_pg_tre_pending_insert_meta_delta
+ *   block 1 (tail): xl_pg_tre_pending_insert_tail_delta + entries
+ *
+ * For each block, XLogReadBufferForRedo returns one of:
+ *   BLK_NEEDS_REDO   - apply the delta
+ *   BLK_RESTORED     - FPI was applied (won't happen here, no FPI in
+ *                      this record) but harmless.
+ *   BLK_DONE         - already replayed, skip
+ *   BLK_NOTFOUND     - block was truncated since, skip
+ */
+static void
+pg_tre_redo_pending_insert_delta(XLogReaderState *record)
+{
+    Buffer  metabuf;
+    Buffer  tailbuf;
+    Page    page;
+    Size    bufdata_sz;
+    char   *bufdata;
+    XLogRedoAction action;
+
+    /* Block 0: meta */
+    action = XLogReadBufferForRedo(record, 0, &metabuf);
+    if (action == BLK_NEEDS_REDO)
+    {
+        const xl_pg_tre_pending_insert_meta_delta *md;
+        PgTreMetaPage m;
+
+        bufdata = XLogRecGetBlockData(record, 0, &bufdata_sz);
+        if (bufdata_sz != sizeof(*md))
+            elog(PANIC,
+                 "pg_tre redo PENDING_INSERT_DELTA: meta payload %zu != %zu",
+                 bufdata_sz, sizeof(*md));
+        md = (const xl_pg_tre_pending_insert_meta_delta *) bufdata;
+
+        page = BufferGetPage(metabuf);
+        m = PgTreMetaPageGet(page);
+        m->pending_n_entries += md->n_entries_added;
+
+        PageSetLSN(page, record->EndRecPtr);
+        MarkBufferDirty(metabuf);
+    }
+    if (BufferIsValid(metabuf))
+        UnlockReleaseBuffer(metabuf);
+
+    /* Block 1: tail */
+    action = XLogReadBufferForRedo(record, 1, &tailbuf);
+    if (action == BLK_NEEDS_REDO)
+    {
+        const xl_pg_tre_pending_insert_tail_delta *td;
+        const PgTrePendingEntry *src;
+        Size    entries_sz;
+
+        bufdata = XLogRecGetBlockData(record, 1, &bufdata_sz);
+        if (bufdata_sz < sizeof(*td))
+            elog(PANIC,
+                 "pg_tre redo PENDING_INSERT_DELTA: tail payload %zu < %zu",
+                 bufdata_sz, sizeof(*td));
+        td = (const xl_pg_tre_pending_insert_tail_delta *) bufdata;
+        entries_sz = (Size) td->take * sizeof(PgTrePendingEntry);
+        if (bufdata_sz != sizeof(*td) + entries_sz)
+            elog(PANIC,
+                 "pg_tre redo PENDING_INSERT_DELTA: tail payload %zu != header+%zu",
+                 bufdata_sz, entries_sz);
+        src = (const PgTrePendingEntry *) (bufdata + sizeof(*td));
+
+        page = BufferGetPage(tailbuf);
+        if (!pg_tre_pending_redo_apply_delta(page, td->prev_n_entries,
+                                             td->take, src))
+            elog(PANIC,
+                 "pg_tre redo PENDING_INSERT_DELTA: standby tail state "
+                 "differs from primary at delta apply (expected prev=%u)",
+                 td->prev_n_entries);
+
+        PageSetLSN(page, record->EndRecPtr);
+        MarkBufferDirty(tailbuf);
+    }
+    if (BufferIsValid(tailbuf))
+        UnlockReleaseBuffer(tailbuf);
+}
+
 void
 pg_tre_redo(XLogReaderState *record)
 {
-    uint8 info = XLogRecGetInfo(record) & XLOG_PTRE_OPMASK;
+    uint8 info_full = XLogRecGetInfo(record);
+    uint8 op        = info_full & XLOG_PTRE_OPMASK;
+    uint8 flags     = info_full & XLOG_PTRE_FLAGMASK;
 
-    switch (info)
+    switch (op)
     {
         case XLOG_PTRE_META_UPDATE:
             pg_tre_redo_fpi(record);
             break;
 
+        case XLOG_PTRE_PENDING_INSERT:
+            if (flags & XLOG_PTRE_DELTA_FLAG)
+                pg_tre_redo_pending_insert_delta(record);
+            else
+                pg_tre_redo_fpi(record);
+            break;
+
         case XLOG_PTRE_UPPER_INSERT:
         case XLOG_PTRE_UPPER_SPLIT:
         case XLOG_PTRE_POSTING_INSERT:
-        case XLOG_PTRE_PENDING_INSERT:
         case XLOG_PTRE_PENDING_MERGE_B:
         case XLOG_PTRE_PENDING_MERGE_C:
         case XLOG_PTRE_RANGE_UPDATE:      /* Phase 5: range tier FPI */
             /*
              * Phase 2/4/5 emit these as full-page images.  The generic
-             * FPI replay is correct for all of them today; Phase 7/8
-             * hardening can introduce delta records that add their own
-             * branches here.
+             * FPI replay is correct for all of them today; future
+             * work can introduce delta records following the
+             * pending_insert delta pattern above.
              */
             pg_tre_redo_fpi(record);
             break;
@@ -115,12 +207,13 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_POSTING_DELETE:
         case XLOG_PTRE_POSTING_SPLIT:
         case XLOG_PTRE_VACUUM:
-            elog(PANIC, "pg_tre: redo for info 0x%02X not yet implemented",
-                 info);
+            elog(PANIC, "pg_tre: redo for op 0x%02X not yet implemented",
+                 op);
             break;
 
         default:
-            elog(PANIC, "pg_tre_redo: unknown xl_info 0x%02X", info);
+            elog(PANIC, "pg_tre_redo: unknown op 0x%02X (info 0x%02X)",
+                 op, info_full);
     }
 }
 

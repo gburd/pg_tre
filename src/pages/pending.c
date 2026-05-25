@@ -214,22 +214,54 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
         {
             XLogRecPtr recptr;
             XLogBeginInsert();
-            XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-            /*
-             * REGBUF_STANDARD makes PG ship a full-page image of
-             * the tail buffer.  We deliberately DO NOT pass
-             * REGBUF_WILL_INIT even when tail_is_new is true,
-             * because WILL_INIT suppresses the FPI (PG assumes the
-             * redo callback will reconstruct the page from delta
-             * data).  pg_tre_redo_fpi only restores from the FPI;
-             * our records do not yet carry deltas.  Until we add
-             * delta-aware redo, the FPI is what makes both crash
-             * recovery and streaming replication work.  Tracked as
-             * a v1.2 follow-up: shrink the WAL by emitting deltas
-             * when the tail page already exists on the standby.
-             */
-            XLogRegisterBuffer(1, tailbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_INSERT);
+
+            if (tail_is_new)
+            {
+                /*
+                 * Fresh tail page: standby cannot reconstruct the
+                 * page-init layout (special-area tag, initial
+                 * pd_lower/pd_upper) from a delta, so emit the
+                 * full-page image variant.
+                 */
+                XLogRegisterBuffer(0, metabuf,
+                                   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+                XLogRegisterBuffer(1, tailbuf,
+                                   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+                recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_INSERT);
+            }
+            else
+            {
+                /*
+                 * Existing tail page: emit a delta describing exactly
+                 * the bytes that changed.  Cuts WAL volume from two
+                 * full-page images (~16 KB) to a few hundred bytes.
+                 *
+                 * The standby's redo applies the delta on top of its
+                 * current page state via XLogReadBufferForRedo.  See
+                 * pg_tre_redo_pending_insert_delta in src/wal/xlog.c.
+                 */
+                xl_pg_tre_pending_insert_meta_delta meta_d;
+                xl_pg_tre_pending_insert_tail_delta tail_d;
+
+                meta_d.n_entries_added = (uint32) take;
+
+                tail_d.prev_n_entries = (uint16)
+                    (hdr->n_entries - take);
+                tail_d.take = (uint16) take;
+
+                XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+                XLogRegisterBufData(0, (char *) &meta_d, sizeof(meta_d));
+
+                XLogRegisterBuffer(1, tailbuf, REGBUF_STANDARD);
+                XLogRegisterBufData(1, (char *) &tail_d, sizeof(tail_d));
+                XLogRegisterBufData(1,
+                    (char *) &entries[tail_d.prev_n_entries],
+                    take * sizeof(PgTrePendingEntry));
+
+                recptr = XLogInsert(RM_PG_TRE_ID,
+                                    XLOG_PTRE_PENDING_INSERT |
+                                    XLOG_PTRE_DELTA_FLAG);
+            }
             PageSetLSN(tailpage, recptr);
             PageSetLSN(metapage, recptr);
         }
@@ -855,4 +887,31 @@ pg_tre_pending_merge(Relation index)
     MemoryContextDelete(merge_cxt);
 
     return n_merged;
+}
+
+/* --------------------------------------------------------------------
+ * WAL redo helper (called from src/wal/xlog.c)
+ * -------------------------------------------------------------------- */
+
+bool
+pg_tre_pending_redo_apply_delta(Page page,
+                                uint16 prev_n_entries,
+                                uint16 take,
+                                const PgTrePendingEntry *src_entries)
+{
+    PgTrePendingHeader *hdr     = pending_header(page);
+    PgTrePendingEntry  *entries = pending_entries(page);
+
+    if (hdr->n_entries != prev_n_entries)
+        return false;
+
+    memcpy(&entries[prev_n_entries], src_entries,
+           (size_t) take * sizeof(PgTrePendingEntry));
+
+    hdr->n_entries  += take;
+    hdr->used_bytes  = hdr->n_entries * sizeof(PgTrePendingEntry);
+    ((PageHeader) page)->pd_lower =
+        (char *) &entries[hdr->n_entries] - (char *) page;
+
+    return true;
 }
