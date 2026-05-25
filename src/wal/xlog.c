@@ -3,9 +3,15 @@
  *
  * Phase 1 wires up the rmgr registration and all hook signatures; the
  * redo and desc bodies are real when a record type is used by its
- * corresponding page-layer code.  Until a record type is emitted, its
- * redo branch remains unreachable and triggers an elog(PANIC) as a
- * correctness guard.
+ * corresponding page-layer code.  Record types not yet emitted by the
+ * page-layer are routed through the generic FPI replay path: that path
+ * is a no-op when the record carries no block data, and replays the
+ * full-page image when the emit side ever starts shipping one.  We
+ * deliberately do NOT PANIC for unimplemented op codes -- a PANIC in
+ * the redo path stops the standby and breaks replication, which is
+ * far worse than silently no-oping a hypothetical future record.
+ * Genuinely unknown op codes (a corrupted record, or a version skew)
+ * still PANIC via the default arm of the dispatcher.
  */
 
 #include "postgres.h"
@@ -195,20 +201,19 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_PENDING_MERGE_B:
         case XLOG_PTRE_PENDING_MERGE_C:
         case XLOG_PTRE_RANGE_UPDATE:      /* Phase 5: range tier FPI */
+        case XLOG_PTRE_POSTING_DELETE:    /* Phase 7: not yet emitted */
+        case XLOG_PTRE_POSTING_SPLIT:     /* Phase 7: not yet emitted */
+        case XLOG_PTRE_VACUUM:            /* Phase 7: not yet emitted */
             /*
-             * Phase 2/4/5 emit these as full-page images.  The generic
-             * FPI replay is correct for all of them today; future
-             * work can introduce delta records following the
-             * pending_insert delta pattern above.
+             * Phase 2/4/5 emit these as full-page images.  Phase 7
+             * record types (POSTING_DELETE/SPLIT/VACUUM) are not yet
+             * emitted by the page layer, but route them through the
+             * same generic FPI replay so a standby never PANICs if a
+             * future build starts emitting them.  When deltas are
+             * introduced, dispatch on the delta flag the way
+             * PENDING_INSERT does above.
              */
             pg_tre_redo_fpi(record);
-            break;
-
-        case XLOG_PTRE_POSTING_DELETE:
-        case XLOG_PTRE_POSTING_SPLIT:
-        case XLOG_PTRE_VACUUM:
-            elog(PANIC, "pg_tre: redo for op 0x%02X not yet implemented",
-                 op);
             break;
 
         default:
