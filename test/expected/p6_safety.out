@@ -203,11 +203,9 @@ psql:test/sql/p6_safety.sql:113: WARNING:  pg_tre: reloptions requested but not 
 psql:test/sql/p6_safety.sql:113: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
                      QUERY PLAN                      
 -----------------------------------------------------
- Bitmap Heap Scan on multi_opts_test
-   Recheck Cond: (body %~~ 'text1'::tre_pattern)
-   ->  Bitmap Index Scan on multi_opts_idx3
-         Index Cond: (body %~~ 'text1'::tre_pattern)
-(4 rows)
+ Index Scan using multi_opts_idx3 on multi_opts_test
+   Index Cond: (body %~~ 'text1'::tre_pattern)
+(2 rows)
 
 SET enable_seqscan = on;
 SET

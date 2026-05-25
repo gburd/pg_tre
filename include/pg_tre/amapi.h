@@ -11,6 +11,7 @@
 
 /* Strategy numbers for the text operator class. */
 #define PG_TRE_STRATEGY_APPROX_MATCH   1   /* text '%~~' tre_pattern */
+#define PG_TRE_STRATEGY_DISTANCE       2   /* text '<@>' tre_pattern (ORDER BY) */
 
 /* Support function numbers (custom -- no shared-with-core semantics). */
 #define PG_TRE_SUPPORT_EXTRACT_VALUE   1
@@ -40,6 +41,7 @@ extern IndexScanDesc pg_tre_ambeginscan(Relation index, int nkeys, int norderbys
 extern void pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
                             ScanKey orderbys, int norderbys);
 extern int64 pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
+extern bool  pg_tre_amgettuple(IndexScanDesc scan, ScanDirection dir);
 extern void pg_tre_amendscan(IndexScanDesc scan);
 extern void pg_tre_amcostestimate(struct PlannerInfo *root,
                                   struct IndexPath *path,

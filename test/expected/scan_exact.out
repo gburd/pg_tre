@@ -140,13 +140,11 @@ SET enable_seqscan = off;
 SET
 EXPLAIN (COSTS OFF)
 SELECT id FROM scan_exact_docs WHERE body %~~ tre_pattern('hello', 0);
-                     QUERY PLAN                      
------------------------------------------------------
- Bitmap Heap Scan on scan_exact_docs
-   Recheck Cond: (body %~~ 'hello'::tre_pattern)
-   ->  Bitmap Index Scan on scan_exact_idx
-         Index Cond: (body %~~ 'hello'::tre_pattern)
-(4 rows)
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Scan using scan_exact_idx on scan_exact_docs
+   Index Cond: (body %~~ 'hello'::tre_pattern)
+(2 rows)
 
 DROP FUNCTION scan_exact_diff(text);
 DROP FUNCTION

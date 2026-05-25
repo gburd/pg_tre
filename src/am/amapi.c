@@ -28,12 +28,18 @@ tre_handler(PG_FUNCTION_ARGS)
 {
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
-    amroutine->amstrategies    = 1;
+    amroutine->amstrategies    = 2;
     amroutine->amsupport       = 4;
     amroutine->amoptsprocnum   = 0;
 
     amroutine->amcanorder      = false;
-    amroutine->amcanorderbyop  = false;
+    /*
+     * KNN-style ordering: the planner can ask the AM to return rows
+     * in ascending order of an indexed-side ordering operator (here,
+     * tre_text_ops strategy 2 = `<@>`).  See pg_tre_amgettuple in
+     * src/am/amscan.c for the streaming top-k implementation.
+     */
+    amroutine->amcanorderbyop  = true;
 #if PG_VERSION_NUM >= 180000
     /* New in PG18: hash/equality/ordering descriptors. */
     amroutine->amcanhash       = false;
@@ -77,7 +83,7 @@ tre_handler(PG_FUNCTION_ARGS)
     amroutine->amadjustmembers  = NULL;
     amroutine->ambeginscan      = pg_tre_ambeginscan;
     amroutine->amrescan         = pg_tre_amrescan;
-    amroutine->amgettuple       = NULL;        /* bitmap-only AM */
+    amroutine->amgettuple       = pg_tre_amgettuple;
     amroutine->amgetbitmap      = pg_tre_amgetbitmap;
     amroutine->amendscan        = pg_tre_amendscan;
     amroutine->ammarkpos        = NULL;
