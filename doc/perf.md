@@ -87,7 +87,7 @@ psql -c "CREATE EXTENSION pg_trgm;"
 psql -f bench/bench.sql
 ```
 
-The agent-built scaffolding in `bench/fetch-corpus.sh` currently
+The current scaffolding in `bench/fetch-corpus.sh` currently
 produces an unrealistic corpus (40 KB rows of repeated common
 words) that exceeds pg_tre's Phase 4 single-leaf limit. Prefer the
 simpler 10k-row English-ish fixture used for the numbers above;
