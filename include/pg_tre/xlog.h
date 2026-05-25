@@ -34,6 +34,7 @@
 #define XLOG_PTRE_PENDING_MERGE_B    0x90
 #define XLOG_PTRE_PENDING_MERGE_C    0xA0
 #define XLOG_PTRE_VACUUM             0xB0
+#define XLOG_PTRE_PAGE_FORMAT_UPGRADE 0xC0
 
 #define XLOG_PTRE_OPMASK             0xF0
 

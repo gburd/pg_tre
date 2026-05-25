@@ -26,7 +26,9 @@ pg_tre_page_init(Page page, Size page_size, PageTreKind kind)
     opq = PageTreGetOpaque(page);
     opq->page_kind      = (uint16) kind;
     opq->flags          = 0;
-    opq->format_version = PG_TRE_FORMAT_VERSION;
+    /* New pages -- including pages rewritten by pg_tre_upgrade_index --
+     * are always in the LATEST format. */
+    opq->format_version = PG_TRE_FORMAT_VERSION_LATEST;
 }
 
 Buffer
@@ -65,14 +67,22 @@ pg_tre_read(Relation index, BlockNumber blkno, PageTreKind expected_kind,
     {
         PageTreOpaque opq = PageTreGetOpaque(page);
 
-        if (opq->format_version != PG_TRE_FORMAT_VERSION)
+        /*
+         * Accept any per-page format_version in the supported range.
+         * Future format-dependent decoders (see src/util/bloom.c, the
+         * apply_tuple_bloom_filter dispatch) branch on this value.
+         * pg_tre_upgrade_index() rewrites pages forward to LATEST.
+         */
+        if (opq->format_version < PG_TRE_FORMAT_VERSION_MIN ||
+            opq->format_version > PG_TRE_FORMAT_VERSION_LATEST)
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("pg_tre: index %u has format version %u, "
-                            "expected %u",
-                            RelationGetRelid(index),
+                     errmsg("pg_tre: index %u page %u has format version %u, "
+                            "supported range is [%u, %u]",
+                            RelationGetRelid(index), blkno,
                             opq->format_version,
-                            PG_TRE_FORMAT_VERSION)));
+                            (uint32) PG_TRE_FORMAT_VERSION_MIN,
+                            (uint32) PG_TRE_FORMAT_VERSION_LATEST)));
 
         if (expected_kind != PG_TRE_PAGE_INVALID &&
             opq->page_kind != (uint16) expected_kind)

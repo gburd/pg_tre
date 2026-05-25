@@ -54,6 +54,7 @@ OBJS = \
     src/util/hash.o \
     src/util/utf8.o \
     src/util/type_pattern.o \
+    src/util/upgrade.o \
     src/am/amapi.o \
     src/am/ambuild.o \
     src/am/aminsert.o \

@@ -598,28 +598,36 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         uint64 h = conj->alts[j].trigram_hash;
                         PgTreUpperRef ref;
                         bool has_bloom = false;
+                        uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
 
                         if (pg_tre_upper_lookup(index, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes);
+                                            bit_array, bloom_bytes,
+                                            &page_fmt);
                             pg_tre_upper_release(&ref);
                         }
 
                         if (has_bloom)
                         {
-                            /* Reconstruct the header so
-                             * pg_tre_bloom_contains_trigram reads
-                             * the right m_bits/k.  Build path uses
-                             * k=5 (see find_or_create_tid_bloom).
-                             * NB: avoid pg_tre_bloom_init() here -
-                             * it zeroes the bit array, which would
-                             * wipe out the bits we just read into
-                             * bit_array.  Set the fields directly. */
-                            bloom_view->m_bits = pg_tre_bloom_tuple_bits;
-                            bloom_view->k      = 5;
+                            /* Reconstruct the bloom header in a
+                             * format-version-aware manner.  Today
+                             * v3 == v4; the dispatch lives in
+                             * pg_tre_bloom_decode_tuple() so future
+                             * format versions can be added in one
+                             * place.  Build path uses k=5 (see
+                             * find_or_create_tid_bloom). */
+                            if (!pg_tre_bloom_decode_tuple(bloom_view,
+                                                          (uint16) pg_tre_bloom_tuple_bits,
+                                                          5, page_fmt))
+                            {
+                                /* Unknown format -- fall back to
+                                 * recheck rather than reject. */
+                                conj_pass = true;
+                                break;
+                            }
                             if (pg_tre_bloom_contains_trigram(bloom_view, h))
                             {
                                 conj_pass = true;
@@ -657,23 +665,29 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         uint64 h = tile->alts[j].trigram_hash;
                         PgTreUpperRef ref;
                         bool has_bloom = false;
+                        uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
 
                         if (pg_tre_upper_lookup(index, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes);
+                                            bit_array, bloom_bytes,
+                                            &page_fmt);
                             pg_tre_upper_release(&ref);
                         }
 
                         if (has_bloom)
                         {
-                            /* Avoid pg_tre_bloom_init: it zeroes the
-                             * bit array, wiping the bits we just
-                             * read.  Set header fields directly. */
-                            bloom_view->m_bits = pg_tre_bloom_tuple_bits;
-                            bloom_view->k      = 5;
+                            /* Format-version-aware decode.  See the
+                             * CNF arm above for rationale. */
+                            if (!pg_tre_bloom_decode_tuple(bloom_view,
+                                                          (uint16) pg_tre_bloom_tuple_bits,
+                                                          5, page_fmt))
+                            {
+                                /* Unknown format -- skip this tile. */
+                                continue;
+                            }
                             if (!pg_tre_bloom_contains_trigram(bloom_view, h))
                             {
                                 tile_pass = false;

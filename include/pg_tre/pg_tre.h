@@ -12,13 +12,36 @@
 #include "fmgr.h"
 
 /* On-disk format version advertised by meta page.
- * Version 3: multi-leaf posting trees (Phase 4.2).
+ *
+ * History:
+ *   v1     - initial format with byte-based trigrams.
+ *   v2     - codepoint-based trigrams (Phase 3.5).
+ *   v3     - multi-leaf posting trees (Phase 4.2).
+ *   v4     - introduced in 1.4.0-dev.  v3 and v4 are byte-compatible
+ *            today; the bump exists so the in-place upgrade machinery
+ *            (pg_tre_upgrade_index) has a target version to walk to
+ *            once a real format change lands.
+ *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
+ *
+ * Two-version reader policy: any version in [PG_TRE_FORMAT_VERSION_MIN,
+ * PG_TRE_FORMAT_VERSION_LATEST] is readable on the page-decode side.
+ * The meta page tracks min_page_format_version across all pages of an
+ * index; pg_tre_upgrade_index() rewrites pages forward and bumps that
+ * field when every page is at LATEST.  See doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION 3
+#define PG_TRE_FORMAT_VERSION_LATEST 4
+#define PG_TRE_FORMAT_VERSION_MIN    3
+
+/* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the
+ * version we initialise meta pages with at create time".  All new
+ * pages -- including pages rewritten by the in-place upgrade -- use
+ * PG_TRE_FORMAT_VERSION_LATEST.
+ */
+#define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.3.0"
+#define PG_TRE_VERSION_STRING "pg_tre 1.4.0-dev"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;

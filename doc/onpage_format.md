@@ -1,4 +1,4 @@
-# pg_tre on-disk page format (v3)
+# pg_tre on-disk page format (v3, v4)
 
 Authoritative declarations live in `include/pg_tre/page.h`.  This
 document is the narrative reference and the place where format
@@ -11,6 +11,10 @@ standard `PageHeaderData` at offset 0 and end with a
 
 ## Format version history
 
+- **v4 (1.4.0-dev)**: Identical byte layout to v3; the bump exists
+  to land the in-place format-upgrade infrastructure (see below).
+  No reader change between v3 and v4 beyond accepting both at
+  page-decode time.
 - **v3 (Phase 4.2)**: Multi-leaf posting trees. When a single trigram's
   posting exceeds ~8 KB, the builder splits it across multiple leaves
   linked by `right_link` (Lehman-Yao convention). Each leaf stores
@@ -18,6 +22,10 @@ standard `PageHeaderData` at offset 0 and end with a
   the leaf containing a target TID.
 - **v2 (Phase 3.5)**: Codepoint-based trigrams.
 - **v1**: Initial format with byte-based trigrams.
+
+Indexes built with v2 or earlier require REINDEX to use 1.x.
+Indexes built with v3 are read directly by 1.4.0-dev; in-place
+upgrade to v4 is available via `pg_tre_upgrade_index()`.
 
 ## Meta page (block 0)
 
@@ -130,18 +138,74 @@ Every page ends with `PageTreOpaqueData`:
 
     uint16 page_kind
     uint16 flags
-    uint32 format_version
+    uint32 format_version       /* per-page on-disk format */
 
 Positioned via `PageGetSpecialPointer(page)`.
+
+`format_version` is the *per-page* on-disk format the page bytes are
+in; it can differ from the meta page's index-level `format_version`
+while an in-place upgrade is in progress.  All readers accept any
+value in `[PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST]`.
+Writers always emit `LATEST`.
+
+## In-place format upgrade
+
+The machinery for upgrading an existing index to the current on-disk
+format without REINDEX:
+
+- Per-page: `PageTreOpaqueData.format_version` records the format the
+  page bytes are in.  Writers (page-init, posting-leaf flush, posting-
+  leaf rewrite, in-place upgrade) always set it to LATEST.
+- Meta: `PgTreMetaPageData.min_page_format_version` is the minimum
+  observed across all pages of the index.  When equal to LATEST, the
+  index is fully upgraded and future readers can skip per-page
+  format dispatch.
+
+SQL surface (1.4.0-dev):
+
+    -- Walk every page; rewrite below LATEST in place.  WAL-logs each
+    -- rewritten page as XLOG_PTRE_PAGE_FORMAT_UPGRADE (FORCE_IMAGE).
+    -- Holds per-page exclusive lock only briefly.  Updates the meta
+    -- page's min_page_format_version after the sweep.
+    SELECT pg_tre_upgrade_index('my_idx');
+
+    -- Per-version page counts.  SHARED locks; safe to run concurrently.
+    SELECT * FROM pg_tre_index_format_status('my_idx');
+
+    -- O(1) read of meta page's min_page_format_version.
+    SELECT pg_tre_index_min_format_version('my_idx');
+
+Readers that decode format-version-dependent layouts dispatch through
+`pg_tre_bloom_decode_tuple()` (see `src/util/bloom.c`); the call sites
+in `src/am/amscan.c::apply_tuple_bloom_filter` pass the per-page
+`format_version` returned out-of-band by
+`pg_tre_posting_lookup_tuple_bloom`.  Today v3 and v4 share a decode
+path; future format versions plug new arms into
+`pg_tre_bloom_decode_tuple` without touching the call sites.
+
+The upgrade is a no-op for v3 -> v4 since the byte layouts are
+identical; the framework exists so the next on-disk format change
+(planned: variable-width per-tuple blooms in a follow-on commit) can
+ship as an in-place rewrite rather than a hard REINDEX requirement.
 
 ## On-disk version policy
 
 `format_version` lives in the meta page and is copied to each
-page's opaque trailer on write.  Readers assert the two match.  Any
-layout change bumps the version and ships with:
+page's opaque trailer on write.  Readers accept any value in
+`[PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST]`; the meta
+page's `min_page_format_version` records the minimum across all
+pages of the index, updated by `pg_tre_upgrade_index()` after a full
+sweep.  Any layout change bumps `PG_TRE_FORMAT_VERSION_LATEST` and
+ships with:
 
-- A dump/restore-compatible script under `sql/pg_tre--<from>--<to>.sql`.
-- A unit test that reads a snapshot built with the previous version
-  and validates field-for-field equality after upgrade.
+- A migration script under `sql/pg_tre--<from>--<to>.sql` exposing
+  any new SQL surface.
+- For incompatible breaking changes (e.g. v2 -> v3): a unit test
+  that reads a snapshot built with the previous version and
+  validates field-for-field equality after upgrade.
+- For compatible bumps (e.g. v3 -> v4): the in-place upgrade path
+  via `pg_tre_upgrade_index()`.
 
-Version bumps are only permitted at major releases (1.0 -> 2.0).
+Breaking version bumps (anything that requires REINDEX) are only
+permitted at major releases (1.0 -> 2.0); compatible bumps that ship
+an in-place upgrade may land in minor releases.

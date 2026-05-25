@@ -50,12 +50,18 @@ typedef enum PageTreKind
  * page-kind can add kind-specific control words in front of it where
  * needed; we place this struct at the very end of the page's special
  * area and cast appropriately.
+ *
+ * format_version is the *per-page* format the page bytes are in; it
+ * may differ from the meta page's index-level format_version while
+ * an in-place upgrade is in progress.  All readers must accept any
+ * value in [PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST];
+ * see include/pg_tre/pg_tre.h.
  */
 typedef struct PageTreOpaqueData
 {
     uint16      page_kind;          /* PageTreKind */
     uint16      flags;              /* page-kind-specific flags */
-    uint32      format_version;     /* copy of meta.format_version */
+    uint32      format_version;     /* per-page on-disk format version */
 } PageTreOpaqueData;
 
 typedef PageTreOpaqueData *PageTreOpaque;
@@ -103,8 +109,19 @@ typedef struct PgTreMetaPageData
     uint64      max_posting_cardinality;
     uint64      stddev_posting_cardinality; /* approximate stddev */
 
+    /*
+     * 1.4.0-dev: minimum per-page format_version observed across all
+     * pages of this index.  Updated by pg_tre_upgrade_index() once a
+     * full sweep has rewritten every page at the target version.
+     * Older indexes upgraded in place from a 1.3.x install will have
+     * this field zero (pre-1.4.0 reserved[]); pg_tre_meta_read patches
+     * a zero value to the index-level format_version on read so the
+     * field is always meaningful in memory.
+     */
+    uint32      min_page_format_version;
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[28];
+    uint32      reserved[27];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;

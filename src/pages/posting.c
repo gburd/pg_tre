@@ -887,7 +887,8 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
                                   Size inline_bytes,
                                   uint64 packed_tid,
                                   uint8 *out_bloom,
-                                  Size out_bloom_sz)
+                                  Size out_bloom_sz,
+                                  uint32 *out_page_format_version)
 {
     Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     sparsemap_t *smap = NULL;
@@ -896,6 +897,9 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
     const uint8 *entry_ptr;
 
     Assert(out_bloom_sz >= bloom_bytes);
+
+    if (out_page_format_version != NULL)
+        *out_page_format_version = PG_TRE_FORMAT_VERSION_LATEST;
 
     /* Step 1: determine if TID is present in the sparsemap. */
     if (inline_data != NULL)
@@ -1003,6 +1007,14 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
             memcpy(out_bloom, entry_ptr, bloom_bytes);
             found = true;
         }
+
+        /*
+         * Surface the leaf page's per-page format_version so that the
+         * caller's bloom decoder can dispatch on it (see the format-
+         * version-aware decode helper in src/util/bloom.c).
+         */
+        if (out_page_format_version != NULL)
+            *out_page_format_version = PageTreGetOpaque(page)->format_version;
 
         UnlockReleaseBuffer(buf);
         return found;

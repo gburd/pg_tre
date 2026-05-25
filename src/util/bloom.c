@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "pg_tre/bloom.h"
+#include "pg_tre/pg_tre.h"
 
 Size
 pg_tre_bloom_size_bytes(uint16 m_bits)
@@ -127,4 +128,48 @@ pg_tre_bloom_union(PgTreBloom *dst, const PgTreBloom *src)
 
     for (i = 0; i < bytes; i++)
         dst_bits[i] |= src_bits[i];
+}
+
+/*
+ * Multi-version per-tuple bloom decoder.
+ *
+ * Today (v3, v4) the per-tuple bloom is a fixed-size bit vector and the
+ * decode path is the same for both versions.  This dispatch lives here
+ * so the call sites in src/am/amscan.c are version-agnostic; once a
+ * later format introduces a different on-disk layout (e.g.
+ * variable-width per-tuple blooms in a future v5+) the new arm can be
+ * added in this single place.
+ */
+bool
+pg_tre_bloom_decode_tuple(PgTreBloom *view_buf,
+                          uint16 m_bits,
+                          uint8 k,
+                          uint32 page_format_version)
+{
+    Assert(view_buf != NULL);
+
+    switch (page_format_version)
+    {
+        case 3:
+        case 4:
+            /*
+             * Fixed-width bloom: header + (m_bits + 7)/8 byte vector.
+             * The caller has already copied the bit array into the
+             * MAXALIGN(sizeof(PgTreBloom)) offset; here we only have
+             * to populate the header.  Avoid pg_tre_bloom_init() --
+             * it zeroes the bit array, which would wipe the bytes
+             * the caller just read.
+             */
+            view_buf->m_bits = m_bits;
+            view_buf->k      = k;
+            view_buf->_pad   = 0;
+            return true;
+        default:
+            /*
+             * Unknown / future format the running build cannot decode.
+             * Caller should treat this as "no bloom available" and
+             * fall back to recheck rather than ereport().
+             */
+            return false;
+    }
 }

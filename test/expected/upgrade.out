@@ -1,0 +1,114 @@
+-- test/sql/upgrade.sql
+-- Regression test for in-place format-upgrade infrastructure
+-- (1.4.0-dev).
+--
+-- Exercises:
+--   1. pg_tre_index_format_status reports a single row at the
+--      current LATEST format on a freshly-built index.
+--   2. pg_tre_index_min_format_version returns LATEST.
+--   3. pg_tre_upgrade_index runs cleanly (no-op upgrade in this
+--      release because v3 and v4 share a byte layout).
+--   4. After running the upgrade function, scans still return
+--      correct results -- no page corruption, no LSN regressions.
+--   5. pg_tre_upgrade_index is idempotent.
+--   6. The functions error out on non-pg_tre relations.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/upgrade.sql:16: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS upg_t CASCADE;
+psql:test/sql/upgrade.sql:18: NOTICE:  table "upg_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE upg_t (id serial PRIMARY KEY, body text);
+CREATE TABLE
+INSERT INTO upg_t (body)
+SELECT 'document number ' || i || ' contains ' ||
+       md5(i::text) || ' as a marker'
+FROM generate_series(1, 500) AS i;
+INSERT 0 500
+CREATE INDEX upg_idx ON upg_t USING tre (body);
+psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: collected 35392 trigram entries from 500 heap tuples
+psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built 4548 posting trees
+psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built range tier with 1 ranges
+psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: build complete, indexed 500 heap tuples into 4548 trigrams
+CREATE INDEX
+-- (1) Format status: every page should be at the current LATEST.
+SELECT format_version,
+       page_count > 0 AS has_pages
+FROM pg_tre_index_format_status('upg_idx'::regclass)
+ORDER BY format_version;
+ format_version | has_pages 
+----------------+-----------
+              4 | t
+(1 row)
+
+-- (2) Min format version matches LATEST exactly.
+SELECT pg_tre_index_min_format_version('upg_idx'::regclass) AS min_fmt;
+ min_fmt 
+---------
+       4
+(1 row)
+
+-- (3) Run pg_tre_upgrade_index.  Must succeed cleanly.
+SELECT pg_tre_upgrade_index('upg_idx'::regclass);
+ pg_tre_upgrade_index 
+----------------------
+ 
+(1 row)
+
+-- (4) Scan still returns correct results.
+SET enable_seqscan = off;
+SET
+SET enable_bitmapscan = on;
+SET
+SELECT count(*) AS hits
+FROM upg_t
+WHERE body %~~ tre_pattern('document', 0);
+ hits 
+------
+  500
+(1 row)
+
+-- (5) Idempotent: running the upgrade a second time still works
+--     and the format-status output is unchanged.
+SELECT pg_tre_upgrade_index('upg_idx'::regclass);
+ pg_tre_upgrade_index 
+----------------------
+ 
+(1 row)
+
+SELECT format_version,
+       page_count > 0 AS has_pages
+FROM pg_tre_index_format_status('upg_idx'::regclass)
+ORDER BY format_version;
+ format_version | has_pages 
+----------------+-----------
+              4 | t
+(1 row)
+
+SELECT pg_tre_index_min_format_version('upg_idx'::regclass) AS min_fmt_after;
+ min_fmt_after 
+---------------
+             4
+(1 row)
+
+-- (6) Error path: non-pg_tre relation rejected.
+DO $$
+BEGIN
+    PERFORM pg_tre_upgrade_index('upg_t'::regclass);
+    RAISE EXCEPTION 'expected error on heap table';
+EXCEPTION WHEN wrong_object_type THEN
+    RAISE NOTICE 'rejected heap table as expected';
+END $$;
+psql:test/sql/upgrade.sql:65: NOTICE:  rejected heap table as expected
+DO
+DO $$
+BEGIN
+    PERFORM pg_tre_index_format_status('upg_t_pkey'::regclass);
+    RAISE EXCEPTION 'expected error on btree index';
+EXCEPTION WHEN wrong_object_type THEN
+    RAISE NOTICE 'rejected btree index as expected';
+END $$;
+psql:test/sql/upgrade.sql:73: NOTICE:  rejected btree index as expected
+DO
+DROP TABLE upg_t CASCADE;
+DROP TABLE

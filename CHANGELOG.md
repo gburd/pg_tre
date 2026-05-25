@@ -6,6 +6,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.0-dev] - unreleased
+
+### Added
+
+- **In-place format-upgrade infrastructure.**  On-disk format bumped
+  from v3 to v4; v3 and v4 share a byte layout, so existing 1.3.x
+  indexes are read directly without REINDEX.  Three new SQL surfaces
+  let users opt in to lazy in-place rewrites for future format
+  changes:
+  - `pg_tre_upgrade_index(idx regclass)`: walk every block and
+    rewrite any page below the current format in place.  Per-page
+    exclusive lock held only for the brief rewrite + WAL emit.
+    WAL-logged as `XLOG_PTRE_PAGE_FORMAT_UPGRADE` (full-page image,
+    one record per rewritten page).  Updates the meta page's
+    `min_page_format_version` after a complete sweep.
+  - `pg_tre_index_format_status(idx regclass)` returns a
+    `(format_version int4, page_count bigint)` table of per-version
+    page counts.  SHARED locks; safe to run alongside reads/writes.
+  - `pg_tre_index_min_format_version(idx regclass) -> int4` returns
+    the meta page's tracked minimum.
+  See `doc/onpage_format.md` for the design narrative.  The
+  page-format dispatch in the bloom decoder (`pg_tre_bloom_decode_tuple`)
+  and in `pg_tre_read` accepts any version in
+  `[PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST]`; today
+  the v3 and v4 arms are identical, but the dispatch shape lands
+  here so the planned variable-width per-tuple bloom format (a
+  follow-on commit) can be introduced without touching call sites.
+- `ORDER BY <@> ASC LIMIT N` is now answered directly by the index
+  via `amorderbyop` / `amgettuple` (1.3.0--1.4.0-dev migration adds
+  the strategy 2 ordering operator on `tre_text_ops`).
+
+### Changed
+
+- `PG_TRE_FORMAT_VERSION_LATEST` is now 4; `PG_TRE_FORMAT_VERSION_MIN`
+  is 3.  The meta page tracks `min_page_format_version` (previously
+  one of the `reserved[]` slots).  1.3.x indexes upgrade transparently:
+  a zero in this slot is patched to the index-level `format_version`
+  on read.
+
+---
+
 ## [1.3.0] - 2026-05-24 - performance: 1000x scan, 100x build
 
 First minor release on the 1.x line. Same on-disk format as

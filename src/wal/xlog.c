@@ -204,6 +204,7 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_POSTING_DELETE:    /* Phase 7: not yet emitted */
         case XLOG_PTRE_POSTING_SPLIT:     /* Phase 7: not yet emitted */
         case XLOG_PTRE_VACUUM:            /* Phase 7: not yet emitted */
+        case XLOG_PTRE_PAGE_FORMAT_UPGRADE: /* 1.4.0-dev: in-place upgrade */
             /*
              * Phase 2/4/5 emit these as full-page images.  Phase 7
              * record types (POSTING_DELETE/SPLIT/VACUUM) are not yet
@@ -211,7 +212,10 @@ pg_tre_redo(XLogReaderState *record)
              * same generic FPI replay so a standby never PANICs if a
              * future build starts emitting them.  When deltas are
              * introduced, dispatch on the delta flag the way
-             * PENDING_INSERT does above.
+             * PENDING_INSERT does above.  PAGE_FORMAT_UPGRADE is
+             * always FPI for now (one record per rewritten page);
+             * a delta variant can be added once a real format
+             * change introduces a non-trivial in-place rewrite.
              */
             pg_tre_redo_fpi(record);
             break;
@@ -245,6 +249,7 @@ pg_tre_identify(uint8 info)
         case XLOG_PTRE_PENDING_MERGE_B: return "PENDING_MERGE_BEGIN";
         case XLOG_PTRE_PENDING_MERGE_C: return "PENDING_MERGE_COMMIT";
         case XLOG_PTRE_VACUUM:          return "VACUUM";
+        case XLOG_PTRE_PAGE_FORMAT_UPGRADE: return "PAGE_FORMAT_UPGRADE";
         default:                        return NULL;
     }
 }

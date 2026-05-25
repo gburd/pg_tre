@@ -36,7 +36,8 @@ pg_tre_meta_init(Page page)
     memset(meta, 0, sizeof(*meta));
 
     meta->magic              = PG_TRE_META_MAGIC;
-    meta->format_version     = PG_TRE_FORMAT_VERSION;
+    meta->format_version     = PG_TRE_FORMAT_VERSION_LATEST;
+    meta->min_page_format_version = PG_TRE_FORMAT_VERSION_LATEST;
     meta->q                  = 3;
     meta->tri_encoding       = 0;                /* byte trigrams for now */
     meta->bloom_range_m_bits = (uint32) pg_tre_bloom_tuple_bits * 16;
@@ -81,6 +82,15 @@ pg_tre_meta_read(Relation index, PgTreMetaPageData *out)
                  errmsg("pg_tre: meta page magic mismatch (got 0x%08X)",
                         out->magic)));
     }
+
+    /*
+     * Indexes built on 1.3.x and earlier left this slot zero in the
+     * reserved[] tail.  Treat zero as "unknown, assume index-level
+     * format_version".  pg_tre_upgrade_index() will set it explicitly
+     * after a sweep.
+     */
+    if (out->min_page_format_version == 0)
+        out->min_page_format_version = out->format_version;
 
     UnlockReleaseBuffer(buf);
 }

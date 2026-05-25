@@ -59,6 +59,33 @@ extern bool pg_tre_bloom_contains_trigram(const PgTreBloom *b, uint64 trigram_ha
 extern void pg_tre_bloom_union(PgTreBloom *dst, const PgTreBloom *src);
 
 /*
+ * Multi-version per-tuple bloom decoder dispatch.
+ *
+ * Reconstruct an in-memory PgTreBloom view over a serialized bit array
+ * read out of a posting leaf, using the source page's format_version to
+ * pick the right wire layout.  The bit array must be at offset
+ * MAXALIGN(sizeof(PgTreBloom)) within view_buf, so callers should
+ * arrange the buffer as [header slot][bit array] before reading bytes
+ * into the bit-array slot via pg_tre_posting_lookup_tuple_bloom().
+ *
+ * page_format_version is the per-page on-disk format the bytes came
+ * from; it must satisfy PG_TRE_FORMAT_VERSION_MIN <= v <=
+ * PG_TRE_FORMAT_VERSION_LATEST.  Today (v3, v4) the per-tuple bloom is
+ * a fixed-size (m_bits + 7)/8 byte vector and both versions share the
+ * same decode path; the dispatch shape exists so that the variable-
+ * width per-tuple bloom format planned for a follow-on commit can be
+ * added without touching the call sites.
+ *
+ * Returns true on success, false if page_format_version is unsupported
+ * (caller should treat that as "no bloom available" and fall back to
+ * recheck).
+ */
+extern bool pg_tre_bloom_decode_tuple(PgTreBloom *view_buf,
+                                       uint16 m_bits,
+                                       uint8 k,
+                                       uint32 page_format_version);
+
+/*
  * Accessor: return a pointer to the bit vector portion of the bloom filter.
  */
 static inline uint8 *

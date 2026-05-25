@@ -167,6 +167,10 @@ extern void pg_tre_posting_scan_end(PgTrePostingScan *s);
  * the TID is present in the posting and bloom data is available, false
  * otherwise.  The bloom is copied into *out_bloom (caller must allocate
  * sufficient space: pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits)).
+ *
+ * out_page_format_version (optional) receives the per-page format_version
+ * of the posting leaf the bloom was read from; used by the multi-version
+ * bloom decoder dispatch.  Pass NULL to ignore.
  */
 extern bool pg_tre_posting_lookup_tuple_bloom(
     Relation index,
@@ -175,7 +179,8 @@ extern bool pg_tre_posting_lookup_tuple_bloom(
     Size inline_bytes,
     uint64 packed_tid,
     uint8 *out_bloom,
-    Size out_bloom_sz);
+    Size out_bloom_sz,
+    uint32 *out_page_format_version);
 
 /* ---- Upper-tree lookup (both sides) ---- */
 
@@ -220,7 +225,8 @@ extern bool pg_tre_posting_lookup_tuple_bloom(Relation index,
                                               Size inline_bytes,
                                               uint64 packed_tid,
                                               uint8 *out_bloom,
-                                              Size out_bloom_sz);
+                                              Size out_bloom_sz,
+                                              uint32 *out_page_format_version);
 
 /*
  * Look up the list of positions where a trigram appears in a given TID.

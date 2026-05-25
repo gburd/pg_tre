@@ -233,3 +233,52 @@ COMMENT ON OPERATOR <@> (text, tre_pattern) IS
 
 ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
+
+-- ---------------------------------------------------------------
+-- 1.4.0-dev addition: in-place format-upgrade infrastructure.
+--
+-- Per-page format_version is tracked in the opaque trailer of each
+-- pg_tre page; the meta page tracks the minimum across all pages.
+-- Future on-disk format bumps can be applied lazily without REINDEX:
+--
+--    SELECT pg_tre_upgrade_index('my_idx');
+--
+-- See doc/onpage_format.md.
+-- ---------------------------------------------------------------
+
+CREATE FUNCTION pg_tre_upgrade_index(regclass)
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'pg_tre_upgrade_index'
+    LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+COMMENT ON FUNCTION pg_tre_upgrade_index(regclass) IS
+    'Walk every block of a pg_tre index, rewriting any page below the '
+    'current on-disk format version to the latest format in place.  '
+    'Per-page exclusive lock is held only for the duration of each '
+    'rewrite; readers and writers proceed concurrently.  WAL-logged '
+    'as XLOG_PTRE_PAGE_FORMAT_UPGRADE (full-page image, one record '
+    'per rewritten page).  Updates the meta page''s '
+    'min_page_format_version after a complete sweep.';
+
+CREATE FUNCTION pg_tre_index_format_status(regclass)
+    RETURNS TABLE(format_version int4, page_count bigint)
+    AS 'MODULE_PATHNAME', 'pg_tre_index_format_status'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE
+    ROWS 4;
+
+COMMENT ON FUNCTION pg_tre_index_format_status(regclass) IS
+    'Return one row per distinct per-page format_version observed in '
+    'the index, with a count of pages at that version.  Walks all '
+    'blocks under shared locks; safe to run concurrently with other '
+    'workloads.';
+
+CREATE FUNCTION pg_tre_index_min_format_version(regclass)
+    RETURNS int4
+    AS 'MODULE_PATHNAME', 'pg_tre_index_min_format_version'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
+    'Return the meta page''s min_page_format_version field, i.e. the '
+    'minimum per-page format_version known to exist in the index.  '
+    'Cheap O(1); for the authoritative full-walk view use '
+    'pg_tre_index_format_status().';
