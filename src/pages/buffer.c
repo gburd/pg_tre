@@ -72,7 +72,10 @@ pg_tre_read(Relation index, BlockNumber blkno, PageTreKind expected_kind,
                             "expected %u",
                             RelationGetRelid(index),
                             opq->format_version,
-                            PG_TRE_FORMAT_VERSION)));
+                            PG_TRE_FORMAT_VERSION),
+                     errhint("pg_tre 1.4 introduces variable-width per-tuple"
+                             " blooms (format v4); REINDEX this index to"
+                             " upgrade.")));
 
         if (expected_kind != PG_TRE_PAGE_INVALID &&
             opq->page_kind != (uint16) expected_kind)

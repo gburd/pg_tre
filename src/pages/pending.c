@@ -606,7 +606,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
                     {
                         ItemPointerData tid;
                         pg_tre_unpack_tid(j, &tid);
-                        pg_tre_posting_build_add(b, &tid, NULL, 0, NULL);
+                        pg_tre_posting_build_add(b, &tid, NULL, 0, NULL, 0, 0);
                     }
                     if (j == max_idx) break;
                 }

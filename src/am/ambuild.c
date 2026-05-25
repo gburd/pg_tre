@@ -63,22 +63,32 @@ typedef struct TrigramTidEntry
 } TrigramTidEntry;
 
 /*
- * Per-TID bloom tracking during build.
+ * Per-TID distinct-trigram tracking during build.
  *
- * Used as the element type for a simplehash-generated open-addressing
- * hash table keyed by packed_tid (an opaque uint64 derived from an
- * ItemPointerData via pg_tre_pack_tid).  See the SH_* macros below.
+ * Format-v4 variable-width per-tuple blooms need to know each tuple's
+ * distinct-trigram count before we can choose width and k.  We collect
+ * the trigram hashes per TID in a palloc'd array and dedup at flush
+ * time, then materialize the right-sized bloom there.
  *
- * The earlier implementation was a flat array with linear scans on
- * every (trigram,TID) emission and again at every post-sort flush;
- * for 100k-row builds this dominated CPU time at O(N^2) and made the
- * backend uncancellable.  Switching to simplehash collapses the
- * lookup to amortized O(1).
+ * The earlier 1.3.x design accumulated bits into a fixed-width bloom
+ * directly; that's correct only when m and k are also fixed.  With
+ * variable-width blooms we cannot know the right (m, k) up-front, so
+ * we defer bloom population to the post-sort flush.  Memory cost is
+ * roughly 8 bytes/(TID,trigram) which fits the build budget for the
+ * tuple-count regimes we target.
  */
 typedef struct TidBloomEntry
 {
     uint64      packed_tid;     /* SH_KEY */
-    PgTreBloom *bloom;          /* palloc'd bloom filter */
+    uint64     *trigrams;       /* palloc'd uint64 array (unsorted) */
+    int         n_trigrams;
+    int         alloced;
+    /* Cached materialized bloom (filled on first lookup at flush time;
+     * reused across all per-(trigram,TID) emissions). */
+    uint8      *bloom_bits;
+    uint16      bloom_m_bits;
+    uint8       bloom_k;
+    bool        bloom_built;
     char        status;         /* required by simplehash */
 } TidBloomEntry;
 
@@ -108,6 +118,9 @@ typedef struct BuildState
 
     /* Per-TID bloom tracking (Phase 5). */
     tid_bloom_hash *tid_blooms;
+    /* Stable allocation context for trigram arrays + cached blooms,
+     * outliving the post-sort tmpctx. */
+    MemoryContext blooms_ctx;
 
     double      heap_tuples;
     MemoryContext tmpctx;
@@ -162,37 +175,142 @@ compare_trigram_tid(const void *a, const void *b)
 }
 
 /*
- * Find or create a bloom filter for a given TID (Phase 5).
+ * Record a (TID, trigram) pair during the heap scan (format v4).
  *
- * Backed by a simplehash-generated open-addressing hash table keyed by
- * packed_tid; lookup and insert are amortized O(1).  When a new entry
- * is created, the bloom filter is allocated in CurrentMemoryContext so
- * it lives for the duration of the build.
+ * Trigrams are appended unsorted to a per-TID dynamic array; duplicate
+ * compaction happens once at flush time, which is cheaper than a per-
+ * insert dedup probe and lets us count distinct trigrams exactly
+ * before choosing bloom width and k.
  */
-static PgTreBloom *
-find_or_create_tid_bloom(BuildState *bstate, ItemPointer tid)
+static void
+record_tid_trigram(BuildState *bstate, ItemPointer tid, uint64 trigram_hash)
 {
     uint64 packed = pg_tre_pack_tid(tid);
     TidBloomEntry *entry;
     bool        found;
+    MemoryContext oldcxt;
 
     if (!pg_tre_tuple_bloom_enable)
-        return NULL;
+        return;
 
-    entry = tid_bloom_lookup(bstate->tid_blooms, packed);
-    if (entry != NULL)
-        return entry->bloom;
-
+    oldcxt = MemoryContextSwitchTo(bstate->blooms_ctx);
     entry = tid_bloom_insert(bstate->tid_blooms, packed, &found);
     if (!found)
     {
-        Size bloom_size = pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits);
-        PgTreBloom *bloom = (PgTreBloom *) palloc(bloom_size);
-
-        pg_tre_bloom_init(bloom, pg_tre_bloom_tuple_bits, 5 /* k */);
-        entry->bloom = bloom;
+        entry->n_trigrams = 0;
+        entry->alloced = 16;
+        entry->trigrams = (uint64 *) palloc(entry->alloced * sizeof(uint64));
+        entry->bloom_bits = NULL;
+        entry->bloom_m_bits = 0;
+        entry->bloom_k = 0;
+        entry->bloom_built = false;
     }
-    return entry->bloom;
+
+    if (entry->n_trigrams >= entry->alloced)
+    {
+        entry->alloced *= 2;
+        entry->trigrams = (uint64 *) repalloc(entry->trigrams,
+                              entry->alloced * sizeof(uint64));
+    }
+    entry->trigrams[entry->n_trigrams++] = trigram_hash;
+    MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Compare-and-uniq helper: sort a uint64 array in place and return
+ * the count of distinct elements (compacted at the front).
+ */
+static int
+cmp_uint64(const void *a, const void *b)
+{
+    uint64 ua = *(const uint64 *) a;
+    uint64 ub = *(const uint64 *) b;
+    if (ua < ub) return -1;
+    if (ua > ub) return 1;
+    return 0;
+}
+
+static int
+uniq_uint64(uint64 *arr, int n)
+{
+    int i, w;
+
+    if (n <= 1)
+        return n;
+    qsort(arr, n, sizeof(uint64), cmp_uint64);
+    w = 1;
+    for (i = 1; i < n; i++)
+    {
+        if (arr[i] != arr[w - 1])
+            arr[w++] = arr[i];
+    }
+    return w;
+}
+
+/*
+ * Materialize a sized bloom for a TID at flush time.  Returns the
+ * (bits, m_bits, k) triple via out-params.  The result is cached on
+ * the TidBloomEntry so subsequent calls (one per emitted (trigram,
+ * TID) pair, in the post-sort loop) are O(1).  The returned bits
+ * pointer is owned by the entry; callers must not pfree it.
+ */
+static void
+materialize_tid_bloom(BuildState *bstate, uint64 packed_tid,
+                      uint8 **out_bits, uint16 *out_m_bits, uint8 *out_k)
+{
+    TidBloomEntry *be;
+    uint16 m_bits;
+    uint8  k;
+    uint8 *bits;
+    Size   bloom_bytes;
+    int    n_distinct;
+    int    i;
+
+    *out_bits   = NULL;
+    *out_m_bits = 0;
+    *out_k      = 0;
+
+    if (!pg_tre_tuple_bloom_enable || bstate->tid_blooms == NULL)
+        return;
+
+    be = tid_bloom_lookup(bstate->tid_blooms, packed_tid);
+    if (be == NULL || be->n_trigrams == 0)
+        return;
+
+    if (be->bloom_built)
+    {
+        *out_bits   = be->bloom_bits;
+        *out_m_bits = be->bloom_m_bits;
+        *out_k      = be->bloom_k;
+        return;
+    }
+
+    n_distinct = uniq_uint64(be->trigrams, be->n_trigrams);
+    be->n_trigrams = n_distinct;
+
+    m_bits = pg_tre_bloom_select_width((uint32) n_distinct,
+                                       (uint16) pg_tre_bloom_tuple_bits);
+    k      = pg_tre_bloom_select_k(m_bits, (uint32) n_distinct);
+    be->bloom_built = true;
+    if (m_bits == 0 || k == 0)
+    {
+        be->bloom_m_bits = 0;
+        be->bloom_k = 0;
+        return;
+    }
+
+    bloom_bytes = (Size) (m_bits + 7) / 8;
+    bits = (uint8 *) MemoryContextAllocZero(bstate->blooms_ctx, bloom_bytes);
+    for (i = 0; i < n_distinct; i++)
+        pg_tre_bloom_add_trigram_raw(bits, m_bits, k, be->trigrams[i]);
+
+    be->bloom_bits   = bits;
+    be->bloom_m_bits = m_bits;
+    be->bloom_k      = k;
+
+    *out_bits   = bits;
+    *out_m_bits = m_bits;
+    *out_k      = k;
 }
 
 /*
@@ -213,7 +331,6 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     int         ring_n = 0;/* how many codepoints we've seen so far */
     int32       cp;
     int         cp_start;  /* byte offset where current codepoint starts */
-    PgTreBloom *bloom = NULL;
 
     if (isnull)
         return;
@@ -222,10 +339,6 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     txt = DatumGetTextPP(value);
     str = VARDATA_ANY(txt);
     len = VARSIZE_ANY_EXHDR(txt);
-
-    /* Phase 5: get or create the per-TID bloom filter. */
-    if (pg_tre_tuple_bloom_enable)
-        bloom = find_or_create_tid_bloom(bstate, tid);
 
     /* Initialize codepoint stream. */
     pg_tre_cpstream_init(&stream, str, len);
@@ -285,9 +398,10 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
             /* Position is the byte offset where the first codepoint starts. */
             entry->position = (uint32) ring_pos[0];
 
-            /* Phase 5: add trigram to the per-tuple bloom. */
-            if (bloom != NULL)
-                pg_tre_bloom_add_trigram(bloom, trigram_hash);
+            /* Format v4: record the (TID, trigram) pair for distinct-
+             * trigram counting and deferred bloom materialization. */
+            if (pg_tre_tuple_bloom_enable)
+                record_tid_trigram(bstate, tid, trigram_hash);
         }
     }
 }
@@ -372,8 +486,14 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         palloc(bstate.entries_alloced * sizeof(TrigramTidEntry));
     bstate.n_entries = 0;
 
-    /* Phase 5: initialize per-TID bloom hash table. */
-    bstate.tid_blooms = tid_bloom_create(CurrentMemoryContext, 1024, NULL);
+    /* Phase 5: initialize per-TID bloom hash table.  blooms_ctx is
+     * a long-lived context that outlives the post-sort tmpctx; the
+     * hash itself, the per-TID trigram arrays, and the cached
+     * materialized blooms all live here. */
+    bstate.blooms_ctx = AllocSetContextCreate(CurrentMemoryContext,
+                                              "pg_tre tid_blooms",
+                                              ALLOCSET_DEFAULT_SIZES);
+    bstate.tid_blooms = tid_bloom_create(bstate.blooms_ctx, 1024, NULL);
 
     bstate.heap_tuples = 0.0;
     bstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
@@ -438,26 +558,17 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                     if (current_tid_packed != UINT64_MAX)
                     {
                         ItemPointerData tid;
-                        PgTreBloom *bloom = NULL;
                         uint8 *bloom_bits = NULL;
+                        uint16 bloom_m = 0;
+                        uint8  bloom_k = 0;
 
                         pg_tre_unpack_tid(current_tid_packed, &tid);
-
-                        /* Look up the TID's bloom. */
-                        if (pg_tre_tuple_bloom_enable)
-                        {
-                            TidBloomEntry *be =
-                                tid_bloom_lookup(bstate.tid_blooms,
-                                                 current_tid_packed);
-                            if (be != NULL)
-                                bloom = be->bloom;
-                            if (bloom != NULL)
-                                bloom_bits = pg_tre_bloom_bits(bloom);
-                        }
+                        materialize_tid_bloom(&bstate, current_tid_packed,
+                                              &bloom_bits, &bloom_m, &bloom_k);
 
                         pg_tre_posting_build_add(current_builder, &tid,
                                                 positions_buf, n_positions,
-                                                bloom_bits);
+                                                bloom_bits, bloom_m, bloom_k);
                     }
 
                     /* Finish the posting tree. */
@@ -524,26 +635,17 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                 if (current_tid_packed != UINT64_MAX)
                 {
                     ItemPointerData tid;
-                    PgTreBloom *bloom = NULL;
                     uint8 *bloom_bits = NULL;
+                    uint16 bloom_m = 0;
+                    uint8  bloom_k = 0;
 
                     pg_tre_unpack_tid(current_tid_packed, &tid);
-
-                    /* Look up the TID's bloom. */
-                    if (pg_tre_tuple_bloom_enable)
-                    {
-                        TidBloomEntry *be =
-                            tid_bloom_lookup(bstate.tid_blooms,
-                                             current_tid_packed);
-                        if (be != NULL)
-                            bloom = be->bloom;
-                        if (bloom != NULL)
-                            bloom_bits = pg_tre_bloom_bits(bloom);
-                    }
+                    materialize_tid_bloom(&bstate, current_tid_packed,
+                                          &bloom_bits, &bloom_m, &bloom_k);
 
                     pg_tre_posting_build_add(current_builder, &tid,
                                             positions_buf, n_positions,
-                                            bloom_bits);
+                                            bloom_bits, bloom_m, bloom_k);
                     n_positions = 0;
                 }
             }
@@ -573,26 +675,17 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
             if (current_tid_packed != UINT64_MAX)
             {
                 ItemPointerData tid;
-                PgTreBloom *bloom = NULL;
                 uint8 *bloom_bits = NULL;
+                uint16 bloom_m = 0;
+                uint8  bloom_k = 0;
 
                 pg_tre_unpack_tid(current_tid_packed, &tid);
-
-                /* Look up the TID's bloom. */
-                if (pg_tre_tuple_bloom_enable)
-                {
-                    TidBloomEntry *be =
-                        tid_bloom_lookup(bstate.tid_blooms,
-                                         current_tid_packed);
-                    if (be != NULL)
-                        bloom = be->bloom;
-                    if (bloom != NULL)
-                        bloom_bits = pg_tre_bloom_bits(bloom);
-                }
+                materialize_tid_bloom(&bstate, current_tid_packed,
+                                      &bloom_bits, &bloom_m, &bloom_k);
 
                 pg_tre_posting_build_add(current_builder, &tid,
                                         positions_buf, n_positions,
-                                        bloom_bits);
+                                        bloom_bits, bloom_m, bloom_k);
             }
 
             /* Finish the posting tree. */
@@ -673,20 +766,14 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     MemoryContextSwitchTo(oldcxt);
     MemoryContextDelete(bstate.tmpctx);
 
-    /* Phase 5: free per-TID bloom hash table and the blooms it owns. */
+    /* Format v4: free per-TID trigram-tracking hash and the per-TID
+     * dynamic arrays + cached blooms it owns.  All of these live in
+     * blooms_ctx, so a single context delete is sufficient. */
     if (bstate.tid_blooms != NULL)
     {
-        tid_bloom_iterator iter;
-        TidBloomEntry *entry;
-
-        tid_bloom_start_iterate(bstate.tid_blooms, &iter);
-        while ((entry = tid_bloom_iterate(bstate.tid_blooms, &iter)) != NULL)
-        {
-            if (entry->bloom != NULL)
-                pfree(entry->bloom);
-        }
-        tid_bloom_destroy(bstate.tid_blooms);
         bstate.tid_blooms = NULL;
+        MemoryContextDelete(bstate.blooms_ctx);
+        bstate.blooms_ctx = NULL;
     }
 
     pfree(bstate.entries);

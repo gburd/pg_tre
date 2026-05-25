@@ -12,10 +12,16 @@
 #include "fmgr.h"
 
 /* On-disk format version advertised by meta page.
+ * Version 4: variable-width per-tuple blooms (1.4 / format-v4).
+ *   Each per-tuple payload entry is now preceded by a (width_code, k)
+ *   byte pair, with bloom width chosen from the tuple's distinct-
+ *   trigram count.  See doc/specs/variable-width-blooms.md and
+ *   doc/onpage_format.md.
  * Version 3: multi-leaf posting trees (Phase 4.2).
- * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
+ * BREAKING CHANGE: indexes built with v3 or earlier must be REINDEXed
+ * after upgrading to a v4 binary.
  */
-#define PG_TRE_FORMAT_VERSION 3
+#define PG_TRE_FORMAT_VERSION 4
 
 /* String version returned by tre_version(). */
 #define PG_TRE_VERSION_STRING "pg_tre 1.3.0"

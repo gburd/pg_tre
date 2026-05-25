@@ -294,7 +294,7 @@ WITH (
 
 **pending_list_limit:** Maximum pending list size in KiB before auto-merge. Larger = better write throughput, slower unmaintained scans.
 
-**bloom_tuple_bits:** Bits per per-tuple bloom filter. More bits = lower false-positive rate = fewer heap fetches. Range: 32-1024.
+**bloom_tuple_bits:** Maximum bits per per-tuple bloom filter (cap).  Format v4 picks a per-row width from the row's distinct-trigram count (32 / 64 / 128 / 256 / 512 / 1024 bits) and respects this value as an upper bound.  Larger cap = lower false-positive rate on long rows = fewer heap fetches at the cost of larger payload.  Range: 32-1024.
 
 **range_size_blocks:** Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.
 
@@ -459,7 +459,7 @@ pg_tre uses three progressively refined filters before heap recheck:
 
 2. **Tier 2 (Posting tree):** Per-trigram sparsemap postings. AND/OR merged based on query mode (CNF for k=0, DNF for k>0 tiled). Produces candidate TID set.
 
-3. **Tier 3 (Per-tuple bloom):** Each posting leaf stores a 128-bit bloom per TID with all trigrams from that tuple. Candidate TIDs tested; non-matches rejected without heap I/O.
+3. **Tier 3 (Per-tuple bloom):** Each posting leaf stores a variable-width bloom per TID with all trigrams from that tuple.  Width is selected per row from the row's distinct-trigram count (32-1024 bits, capped at `pg_tre.bloom_tuple_bits`); k is chosen via Kirsch-Mitzenmacher.  Candidate TIDs tested; non-matches rejected without heap I/O.
 
 4. **Recheck:** Surviving TIDs fetched from heap, TRE's `regaexec` runs the full approximate-match algorithm.
 

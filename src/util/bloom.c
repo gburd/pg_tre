@@ -128,3 +128,61 @@ pg_tre_bloom_union(PgTreBloom *dst, const PgTreBloom *src)
     for (i = 0; i < bytes; i++)
         dst_bits[i] |= src_bits[i];
 }
+
+/*
+ * Raw add: operate directly on a flat bit array without the PgTreBloom
+ * header.  Equivalent to pg_tre_bloom_add_trigram() over a buffer
+ * containing only bits[(m_bits+7)/8].
+ */
+void
+pg_tre_bloom_add_trigram_raw(uint8 *bits, uint16 m_bits, uint8 k,
+                             uint64 trigram_hash)
+{
+    uint32 h1 = (uint32) (trigram_hash & 0xFFFFFFFF);
+    uint32 h2 = (uint32) (trigram_hash >> 32);
+    uint32 m = m_bits;
+    uint8  i;
+
+    if (m == 0 || k == 0)
+        return;
+    if (h2 == 0)
+        h2 = 1;
+
+    for (i = 0; i < k; i++)
+    {
+        uint64 pos64 = ((uint64) h1 + (uint64) i * (uint64) h2) % m;
+        uint32 pos = (uint32) pos64;
+        bits[pos >> 3] |= (uint8) (1u << (pos & 7));
+    }
+}
+
+/*
+ * Raw test: counterpart to pg_tre_bloom_contains_trigram() over a
+ * flat bit array.  Returns true on "all bits set" (might-contain).
+ * For k == 0 returns true ("always pass" sentinel).
+ */
+bool
+pg_tre_bloom_contains_trigram_raw(const uint8 *bits, uint16 m_bits, uint8 k,
+                                  uint64 trigram_hash)
+{
+    uint32 h1 = (uint32) (trigram_hash & 0xFFFFFFFF);
+    uint32 h2 = (uint32) (trigram_hash >> 32);
+    uint32 m = m_bits;
+    uint8  i;
+
+    if (k == 0)
+        return true;
+    if (m == 0)
+        return true;
+    if (h2 == 0)
+        h2 = 1;
+
+    for (i = 0; i < k; i++)
+    {
+        uint64 pos64 = ((uint64) h1 + (uint64) i * (uint64) h2) % m;
+        uint32 pos = (uint32) pos64;
+        if ((bits[pos >> 3] & (uint8) (1u << (pos & 7))) == 0)
+            return false;
+    }
+    return true;
+}

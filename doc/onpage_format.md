@@ -1,4 +1,4 @@
-# pg_tre on-disk page format (v3)
+# pg_tre on-disk page format (v4)
 
 Authoritative declarations live in `include/pg_tre/page.h`.  This
 document is the narrative reference and the place where format
@@ -11,6 +11,12 @@ standard `PageHeaderData` at offset 0 and end with a
 
 ## Format version history
 
+- **v4 (1.4 / variable-width blooms)**: Per-tuple bloom width is
+  selected per row from the row's distinct-trigram count.  Each
+  payload entry now carries a (width_code, k) byte pair before the
+  bloom bit array; readers map width_code to bit count via the
+  table in `include/pg_tre/bloom.h`.  See
+  `doc/specs/variable-width-blooms.md`.
 - **v3 (Phase 4.2)**: Multi-leaf posting trees. When a single trigram's
   posting exceeds ~8 KB, the builder splits it across multiple leaves
   linked by `right_link` (Lehman-Yao convention). Each leaf stores
@@ -96,8 +102,12 @@ target TID.
     |                                   |
     +-----------------------------------+
     | payload region (grows from below) |  payload_bytes
-    |   per-TID: (pos_list_varlen,      |
-    |             tuple_bloom_128)      |
+    |   per-TID:                        |
+    |     uint16 n_positions            |
+    |     uint32 positions[n_positions] |
+    |     uint8  bloom_width_code       |  v4: maps to bits via
+    |     uint8  bloom_k                |       pg_tre_bloom_width_from_code
+    |     uint8  bloom_bits[width/8]    |       (omitted when width_code=255)
     +-----------------------------------+
     | PageTreOpaqueData                 |   8 B
     |   page_kind = POSTING_L           |

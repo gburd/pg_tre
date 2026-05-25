@@ -6,6 +6,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased] - format-v4: variable-width per-tuple blooms
+
+**BREAKING:** on-disk format bumps from v3 to v4.  Existing
+1.3.x indexes must be REINDEX'd; the buffer-read path now
+refuses pages whose `format_version` does not match the
+binary's `PG_TRE_FORMAT_VERSION`.
+
+### Changed
+
+- Per-tuple bloom width is now chosen per row at build time
+  from the row's distinct-trigram count.  Short rows (<= 8
+  distinct trigrams) get 32-bit blooms with k=7; medium
+  rows get 64-128 bit blooms; long rows get 256/512/1024
+  bit blooms (capped at `pg_tre.bloom_tuple_bits`).  k is
+  chosen via Kirsch-Mitzenmacher as ceil(m*ln 2 / n),
+  clamped to [1, 16].  See `doc/specs/variable-width-blooms.md`.
+- The on-disk per-tuple payload entry now carries a
+  (width_code, k) byte pair before the bit array; readers
+  look up the bit count from a small width-code table
+  (`include/pg_tre/bloom.h`).  width_code = 255 with k = 0
+  is the "always pass" sentinel for tuples with no trigrams.
+- `pg_tre_posting_lookup_tuple_bloom` returns the bloom's
+  (m_bits, k) alongside the bits so the scan-side checker
+  can dispatch correctly.
+- `pg_tre_bloom_*_raw` low-level helpers operate on flat
+  bit arrays without a `PgTreBloom` header so the read path
+  doesn't need to reconstruct one in scratch storage.
+
+### Why
+
+Fixed-width 128-bit blooms over-saturate on long rows
+(load factor > 1, FP rate ~ 1; tier-3 prunes nothing) and
+waste space on short rows (a 5-trigram row needs <8 bits to
+stay below 1% FPR).  Variable widths give every row a bloom
+sized to its actual distinct-trigram count.
+
+### Migration
+
+```sql
+REINDEX INDEX <every_pg_tre_index>;
+```
+
+or on a per-table basis:
+
+```sql
+REINDEX TABLE <table_with_pg_tre_index>;
+```
+
+The new binary loads against an old (v3) meta page and
+produces a clear error: `pg_tre: index N has format version
+3, expected 4` with a HINT recommending REINDEX.
+
+---
+
 ## [1.3.0] - 2026-05-24 - performance: 1000x scan, 100x build
 
 First minor release on the 1.x line. Same on-disk format as

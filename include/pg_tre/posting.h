@@ -90,12 +90,21 @@ extern PgTrePostingBuilder *pg_tre_posting_build_begin_sized(Relation index,
                                                              bool with_payload,
                                                              size_t expected_bytes);
 
-/* Append one (TID, position, tuple-bloom-bits) triple. */
+/* Append one (TID, position, tuple-bloom-bits) triple.
+ *
+ * For format v4 (variable-width blooms), tuple_bloom_bits is the raw
+ * bit array of size (m_bits+7)/8 bytes, and (m_bits, k) describe its
+ * geometry; both are stored alongside the bits in the per-tuple
+ * payload.  m_bits == 0 / k == 0 means "no bloom" and the slot is
+ * encoded with the PG_TRE_BLOOM_WIDTH_NONE sentinel.
+ */
 extern void pg_tre_posting_build_add(PgTrePostingBuilder *b,
                                      ItemPointer tid,
                                      const uint32 *positions,
                                      int n_positions,
-                                     const uint8 *tuple_bloom_bits);
+                                     const uint8 *tuple_bloom_bits,
+                                     uint16 tuple_bloom_m_bits,
+                                     uint8 tuple_bloom_k);
 
 /*
  * Finalize the build: emit all leaf pages (WAL-logged), possibly
@@ -164,18 +173,27 @@ extern void pg_tre_posting_scan_end(PgTrePostingScan *s);
 
 /*
  * Look up the per-tuple bloom filter for a given TID.  Returns true if
- * the TID is present in the posting and bloom data is available, false
- * otherwise.  The bloom is copied into *out_bloom (caller must allocate
- * sufficient space: pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits)).
+ * the TID is present in the posting and the slot carries a bloom
+ * payload, false otherwise.
+ *
+ * On success, copies up to out_bloom_capacity bytes of bloom bits into
+ * out_bloom_bits and writes the bloom geometry into *out_m_bits and
+ * *out_k.  If *out_k is 0 the slot is the "always pass" sentinel and
+ * the bit buffer carries no useful data.  Callers must size out_bloom
+ * to at least (PG_TRE_MAX_BLOOM_BITS + 7) / 8 = 128 bytes.
  */
+#define PG_TRE_MAX_BLOOM_BITS 1024
+
 extern bool pg_tre_posting_lookup_tuple_bloom(
     Relation index,
     BlockNumber root,
     const uint8 *inline_data,
     Size inline_bytes,
     uint64 packed_tid,
-    uint8 *out_bloom,
-    Size out_bloom_sz);
+    uint8 *out_bloom_bits,
+    Size out_bloom_capacity,
+    uint16 *out_m_bits,
+    uint8 *out_k);
 
 /* ---- Upper-tree lookup (both sides) ---- */
 
@@ -204,23 +222,7 @@ extern void pg_tre_upper_release(PgTreUpperRef *ref);
 
 /* ---- Phase 5 payload APIs ---- */
 
-/*
- * Look up the per-tuple bloom filter for a given TID in a posting tree.
- * Returns true if the TID is present in the posting and has an associated
- * bloom, false otherwise.  Copies the bloom bits into out_bloom (caller
- * must provide a buffer of at least out_bloom_sz bytes).
- *
- * Phase 5 WRITE has implemented this function.
- */
 typedef struct PgTreBloom PgTreBloom;  /* forward decl from bloom.h */
-
-extern bool pg_tre_posting_lookup_tuple_bloom(Relation index,
-                                              BlockNumber root,
-                                              const uint8 *inline_data,
-                                              Size inline_bytes,
-                                              uint64 packed_tid,
-                                              uint8 *out_bloom,
-                                              Size out_bloom_sz);
 
 /*
  * Look up the list of positions where a trigram appears in a given TID.

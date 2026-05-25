@@ -176,7 +176,8 @@ query_wants_trigram(const TrigramQuery *q, uint64 h)
  * disjunct).  In that case the candidate set IS the posting list of
  * that trigram, and tier-3 / positional filters cannot prune anything:
  * every candidate's per-tuple bloom contains the trigram by
- * construction (see ambuild.c::find_or_create_tid_bloom), and the only
+ * construction (see ambuild.c::record_tid_trigram and
+ * materialize_tid_bloom), and the only
  * disjunct's position window covers the query's full match span.
  * Skipping tier-3 here turns a multi-minute hang into a millisecond
  * pass-through; correctness is preserved by the executor recheck.
@@ -417,10 +418,11 @@ sm_scan_cb(uint64 vec[], size_t n, void *aux)
  * checking each TID's per-tuple bloom against all required trigrams.
  * Returns a new sparsemap containing only TIDs that pass the bloom filter.
  *
- * Phase 5 stub: pg_tre_posting_lookup_tuple_bloom is implemented by
- * Phase 5 WRITE, but returns false for TIDs without payload (Phase 4
- * postings).  So this function gracefully degrades to a no-op for indexes
- * built before Phase 5 payload support.
+ * Format v4: each on-disk slot carries a (width_code, k) header.  The
+ * scan reads those out via pg_tre_posting_lookup_tuple_bloom and uses
+ * pg_tre_bloom_contains_trigram_raw against the returned bit array.
+ * Slots with k == 0 are the always-pass sentinel and contribute no
+ * pruning power.
  */
 static sparsemap_t *
 apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
@@ -429,45 +431,15 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     sparsemap_t *refined;
     uint64 idx;
     /*
-     * Bloom scratch buffer.  Layout: [PgTreBloom header][bloom_bytes
-     * of bit array].  The build path serializes only the bit array
-     * into the posting-leaf payload (see
-     * src/pages/posting.c::serialize_payload), so on scan we read
-     * those bytes into the *bit-array region* and reconstruct the
-     * header in place before calling pg_tre_bloom_contains_trigram
-     * — which expects a real PgTreBloom* and reads m_bits/k from
-     * the header.
-     *
-     * 256 bytes covers headers + the largest reasonable
-     * pg_tre.bloom_tuple_bits (1024 bits = 128 bytes) plus the
-     * sizeof(PgTreBloom) header with MAXALIGN padding.
-     *
-     * Pre-1.2.1 this code cast a raw bit array directly to
-     * (PgTreBloom *) and read garbage from the bit data as if it
-     * were the m_bits/k header — the chain-rank "bug" we tracked
-     * for several releases was actually this.  Tier-3 was gated
-     * off via pg_tre.tuple_bloom_enable=false to mask it.
+     * Bloom scratch buffer.  Format-v4 widths max out at 1024 bits =
+     * 128 bytes; this buffer is sized to hold the largest possible
+     * bloom regardless of the GUC cap.
      */
-    uint8 bloom_buf[256];
-    Size bloom_bytes;
+    uint8 bloom_bits[(PG_TRE_MAX_BLOOM_BITS + 7) / 8];
     int i, j;
 
     if (candidates == NULL || sm_cardinality(candidates) == 0)
         return candidates;
-
-    /* Phase 5: per-tuple blooms are (pg_tre_bloom_tuple_bits + 7) / 8 bytes */
-    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    /*
-     * The bloom scratch is laid out as [header][bit array].  Total
-     * footprint must fit in bloom_buf.  Cap bloom_bytes if it
-     * would overflow the buffer (defensive; the GUC validator
-     * already caps bloom_tuple_bits well below this).
-     */
-    {
-        Size header_bytes = MAXALIGN(sizeof(PgTreBloom));
-        if (header_bytes + bloom_bytes > sizeof(bloom_buf))
-            bloom_bytes = sizeof(bloom_buf) - header_bytes;
-    }
 
     refined = sm_create(sm_get_capacity(candidates) * 2 + 256);
     if (refined == NULL)
@@ -496,40 +468,31 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                 {
                     const TrigramConjunct *conj = &q->conjuncts[i];
                     bool conj_pass = false;
-                    /* Header lives at offset 0; bit array starts at
-                     * MAXALIGN(sizeof(PgTreBloom)).  See the
-                     * bloom_buf comment above. */
-                    PgTreBloom *bloom_view = (PgTreBloom *) bloom_buf;
-                    uint8 *bit_array = bloom_buf + MAXALIGN(sizeof(PgTreBloom));
 
                     for (j = 0; j < conj->n; j++)
                     {
                         uint64 h = conj->alts[j].trigram_hash;
                         PgTreUpperRef ref;
                         bool has_bloom = false;
+                        uint16 m_bits = 0;
+                        uint8  k = 0;
 
                         if (pg_tre_upper_lookup(index, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes);
+                                            bloom_bits, sizeof(bloom_bits),
+                                            &m_bits, &k);
                             pg_tre_upper_release(&ref);
                         }
 
                         if (has_bloom)
                         {
-                            /* Reconstruct the header so
-                             * pg_tre_bloom_contains_trigram reads
-                             * the right m_bits/k.  Build path uses
-                             * k=5 (see find_or_create_tid_bloom).
-                             * NB: avoid pg_tre_bloom_init() here —
-                             * it zeroes the bit array, which would
-                             * wipe out the bits we just read into
-                             * bit_array.  Set the fields directly. */
-                            bloom_view->m_bits = pg_tre_bloom_tuple_bits;
-                            bloom_view->k      = 5;
-                            if (pg_tre_bloom_contains_trigram(bloom_view, h))
+                            /* k == 0 (always-pass sentinel) yields true
+                             * unconditionally; otherwise probe the bloom. */
+                            if (pg_tre_bloom_contains_trigram_raw(
+                                    bloom_bits, m_bits, k, h))
                             {
                                 conj_pass = true;
                                 break;
@@ -558,32 +521,29 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                 {
                     const TrigramConjunct *tile = &q->conjuncts[i];
                     bool tile_pass = true;
-                    PgTreBloom *bloom_view = (PgTreBloom *) bloom_buf;
-                    uint8 *bit_array = bloom_buf + MAXALIGN(sizeof(PgTreBloom));
 
                     for (j = 0; j < tile->n && tile_pass; j++)
                     {
                         uint64 h = tile->alts[j].trigram_hash;
                         PgTreUpperRef ref;
                         bool has_bloom = false;
+                        uint16 m_bits = 0;
+                        uint8  k = 0;
 
                         if (pg_tre_upper_lookup(index, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes);
+                                            bloom_bits, sizeof(bloom_bits),
+                                            &m_bits, &k);
                             pg_tre_upper_release(&ref);
                         }
 
                         if (has_bloom)
                         {
-                            /* Avoid pg_tre_bloom_init: it zeroes the
-                             * bit array, wiping the bits we just
-                             * read.  Set header fields directly. */
-                            bloom_view->m_bits = pg_tre_bloom_tuple_bits;
-                            bloom_view->k      = 5;
-                            if (!pg_tre_bloom_contains_trigram(bloom_view, h))
+                            if (!pg_tre_bloom_contains_trigram_raw(
+                                    bloom_bits, m_bits, k, h))
                             {
                                 tile_pass = false;
                                 break;
