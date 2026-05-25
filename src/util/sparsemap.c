@@ -154,7 +154,7 @@ __sm_store_u32(uint8_t *p, const uint32_t v)
   memcpy(p, &v, sizeof(v));
 }
 
-// NOTE: When using in production feel free to remove this section of test code.
+// Test/diagnostic helpers, gated by SPARSEMAP_TESTING.
 #ifdef SPARSEMAP_TESTING
 #include <inttypes.h>
 char *QCC_showSparsemap(void *value, int len);
@@ -1548,9 +1548,6 @@ __sm_get_chunk_count(const sparsemap_t *map)
    * = 0 but garbage chunk count" patches at every call site.  The
    * canonical fix is here: an uninitialized chunk-count slot
    * means "no chunks", full stop.
-   *
-   * See pg_tre/doc/sparsemap-bugfix-m_data_used-0.md and
-   * .agent/notes/sparsemap-cleanup-plan.md (Phase 1, step 8).
    */
   if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
     return 0;

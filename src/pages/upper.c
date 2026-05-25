@@ -153,7 +153,7 @@ upper_flush_leaf(UpperBulkState *state)
         memcpy(dest, state->leaf_inline_data, state->leaf_inline_used);
 
         /*
-         * Phase 2 TODO: fix up inline_data pointers in entries.
+         * Phase 8 perf TODO: fix up inline_data pointers in entries.
          * For now, the upper-tree lookup code handles inline data
          * by pointing past the entry array.  A proper implementation
          * would store page-relative offsets in the entries.
