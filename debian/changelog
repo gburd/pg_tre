@@ -1,4 +1,4 @@
-pg_tre (1.4.0-1) unstable; urgency=medium
+pg_tre (1.4.1-dev-1) unstable; urgency=medium
 
   * Index-side ORDER BY <@>: distance-ordered scans via amcanorderbyop
     + amgettuple. EXPLAIN shows Index Scan with Order By, no Sort node.

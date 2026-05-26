@@ -221,7 +221,7 @@ COMMENT ON OPERATOR <@> (text, tre_pattern) IS
     'similarity.';
 
 -- ---------------------------------------------------------------
--- 1.4.0 addition: ORDER BY <@> support in the index AM.
+-- 1.4.1-dev addition: ORDER BY <@> support in the index AM.
 --
 -- Strategy 2 = ordering operator returning int4 (edit distance).
 -- The integer_ops opfamily is the btree int4 ordering family;
@@ -235,7 +235,7 @@ ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
 -- ---------------------------------------------------------------
--- 1.4.0 addition: in-place format-upgrade infrastructure.
+-- 1.4.1-dev addition: in-place format-upgrade infrastructure.
 --
 -- Per-page format_version is tracked in the opaque trailer of each
 -- pg_tre page; the meta page tracks the minimum across all pages.
