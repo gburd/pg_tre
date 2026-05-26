@@ -504,6 +504,190 @@ sm_scan_cb(uint64 vec[], size_t n, void *aux)
 #endif
 
 /*
+ * Per-trigram upper-tree lookup cache.
+ *
+ * Tier-3 (per-tuple bloom) and Phase 5.1 (positional) filters walk the
+ * candidate sparsemap one TID at a time and, inside that loop, used to
+ * call pg_tre_upper_lookup() once per (candidate, query-trigram) pair.
+ * That probe descends the upper B-tree on every iteration even though
+ * the (trigram_hash -> {root, inline_data}) mapping is invariant for
+ * the life of the scan.  At C candidates and T query trigrams the
+ * inner-loop probe count is C*T; for a 200k-candidate / 18-trigram
+ * scan we burn ~3.6M B-tree probes that produce identical results.
+ *
+ * Lifetime invariant: the cache MUST NOT hold the upper-tree leaf
+ * buffer across the scan.  pg_tre_upper_lookup() returns a
+ * PgTreUpperRef that owns both a buffer pin AND a SHARE LWLock on
+ * the leaf page; holding many SHARE locks across a long scan blocks
+ * concurrent writers, risks LWLock-rank assertion failures, and was
+ * empirically slower than the un-hoisted code (lock bookkeeping in
+ * the per-candidate posting-tree-leaf walks).  Instead the build
+ * step copies (root, inline_data, inline_bytes) out of the leaf into
+ * cache-owned palloc'd memory and immediately releases the leaf;
+ * cache lookups synthesize a PgTreUpperRef with upper_buf =
+ * InvalidBuffer.  Consumers (pg_tre_posting_lookup_tuple_bloom,
+ * pg_tre_posting_lookup_positions) only read root / inline_data /
+ * inline_bytes from the ref and never dereference upper_buf, so the
+ * synthetic ref is functionally equivalent.
+ */
+typedef struct TriUpperCacheEntry
+{
+    uint64        hash;          /* trigram_hash key */
+    bool          present;       /* true iff pg_tre_upper_lookup found it */
+    BlockNumber   root;           /* posting root, or InvalidBlockNumber */
+    uint8        *inline_data;    /* palloc'd copy in cache cxt, or NULL */
+    Size          inline_bytes;   /* size of inline_data */
+} TriUpperCacheEntry;
+
+typedef struct TriUpperCache
+{
+    int                  n;        /* number of distinct trigrams cached */
+    int                  cap;      /* allocated entries */
+    TriUpperCacheEntry  *entries;  /* palloc'd in caller's MemoryContext */
+} TriUpperCache;
+
+/*
+ * Look up a trigram_hash in the cache.  Returns true iff a cache
+ * entry exists AND the upper-tree lookup found the trigram (i.e.
+ * pg_tre_upper_lookup would have returned true).  When true, *out is
+ * filled with a synthetic PgTreUpperRef whose upper_buf is
+ * InvalidBuffer; the caller must NOT call pg_tre_upper_release on
+ * it (and doing so would be a no-op anyway since BufferIsValid is
+ * false).
+ */
+static inline bool
+tri_upper_cache_lookup(const TriUpperCache *cache, uint64 hash,
+                       PgTreUpperRef *out)
+{
+    int i;
+
+    if (cache == NULL)
+        return false;
+    for (i = 0; i < cache->n; i++)
+    {
+        if (cache->entries[i].hash == hash)
+        {
+            if (!cache->entries[i].present)
+                return false;
+            out->upper_buf = InvalidBuffer;
+            out->root = cache->entries[i].root;
+            out->inline_data = cache->entries[i].inline_data;
+            out->inline_bytes = cache->entries[i].inline_bytes;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Build the cache: walk every trigram_hash mentioned anywhere in q,
+ * dedup by linear scan, and call pg_tre_upper_lookup at most once per
+ * distinct hash.  Inline blobs are copied into cxt-owned palloc'd
+ * buffers so the upper-tree leaf buffer can be released before this
+ * function returns -- the cache holds no buffer pins or LWLocks.
+ */
+static void
+tri_upper_cache_build(TriUpperCache *cache, Relation index,
+                      const TrigramQuery *q, MemoryContext cxt)
+{
+    int total;
+    int ci, j, k;
+    MemoryContext old;
+
+    cache->n = 0;
+    cache->cap = 0;
+    cache->entries = NULL;
+
+    if (q == NULL || q->n <= 0)
+        return;
+
+    /* Upper bound on distinct trigrams = sum of disjunct counts. */
+    total = 0;
+    for (ci = 0; ci < q->n; ci++)
+        total += q->conjuncts[ci].n;
+    if (total <= 0)
+        return;
+
+    old = MemoryContextSwitchTo(cxt);
+    cache->entries = (TriUpperCacheEntry *)
+                     palloc(sizeof(TriUpperCacheEntry) * total);
+    cache->cap = total;
+    MemoryContextSwitchTo(old);
+
+    for (ci = 0; ci < q->n; ci++)
+    {
+        const TrigramConjunct *conj = &q->conjuncts[ci];
+        for (j = 0; j < conj->n; j++)
+        {
+            uint64        h = conj->alts[j].trigram_hash;
+            bool          seen = false;
+            PgTreUpperRef tmp;
+            TriUpperCacheEntry *slot;
+
+            for (k = 0; k < cache->n; k++)
+            {
+                if (cache->entries[k].hash == h)
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen)
+                continue;
+
+            slot = &cache->entries[cache->n];
+            slot->hash = h;
+            slot->present = false;
+            slot->root = InvalidBlockNumber;
+            slot->inline_data = NULL;
+            slot->inline_bytes = 0;
+
+            if (pg_tre_upper_lookup(index, h, &tmp))
+            {
+                slot->present = true;
+                slot->root = tmp.root;
+                slot->inline_bytes = tmp.inline_bytes;
+                if (tmp.inline_bytes > 0 && tmp.inline_data != NULL)
+                {
+                    /*
+                     * Copy the inline blob out of the leaf buffer
+                     * into cache-owned memory so we can release the
+                     * leaf below without invalidating slot->
+                     * inline_data.
+                     */
+                    old = MemoryContextSwitchTo(cxt);
+                    slot->inline_data = (uint8 *) palloc(tmp.inline_bytes);
+                    MemoryContextSwitchTo(old);
+                    memcpy(slot->inline_data, tmp.inline_data,
+                           tmp.inline_bytes);
+                }
+                /*
+                 * Release the leaf buffer + LWLock.  The cache must
+                 * not hold either across the scan.
+                 */
+                pg_tre_upper_release(&tmp);
+            }
+            cache->n++;
+        }
+    }
+}
+
+/*
+ * Release cache state.  No buffer pins or LWLocks are held by the
+ * cache (those were released in tri_upper_cache_build), so this is
+ * just a bookkeeping reset.  The palloc'd inline_data copies live in
+ * the caller's MemoryContext and are reclaimed when that context
+ * resets.
+ */
+static void
+tri_upper_cache_release(TriUpperCache *cache)
+{
+    if (cache == NULL)
+        return;
+    cache->n = 0;
+}
+
+/*
  * Tier-3 per-tuple bloom filter: refine a candidate TID sparsemap by
  * checking each TID's per-tuple bloom against all required trigrams.
  * Returns a new sparsemap containing only TIDs that pass the bloom filter.
@@ -512,10 +696,15 @@ sm_scan_cb(uint64 vec[], size_t n, void *aux)
  * Phase 5 WRITE, but returns false for TIDs without payload (Phase 4
  * postings).  So this function gracefully degrades to a no-op for indexes
  * built before Phase 5 payload support.
+ *
+ * The caller must build a TriUpperCache covering every trigram_hash in
+ * q and pass it via 'cache'; the inner loop is then a hash-cache
+ * lookup instead of a per-(candidate, trigram) upper-tree probe.
  */
 static sparsemap_t *
 apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
-                        sparsemap_t *candidates, MemoryContext cxt)
+                        sparsemap_t *candidates, MemoryContext cxt,
+                        const TriUpperCache *cache)
 {
     sparsemap_t *refined;
     uint64 idx;
@@ -600,14 +789,14 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         bool has_bloom = false;
                         uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
 
-                        if (pg_tre_upper_lookup(index, h, &ref))
+                        if (tri_upper_cache_lookup(cache, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
                                             bit_array, bloom_bytes,
                                             &page_fmt);
-                            pg_tre_upper_release(&ref);
+                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
                         }
 
                         if (has_bloom)
@@ -667,14 +856,14 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         bool has_bloom = false;
                         uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
 
-                        if (pg_tre_upper_lookup(index, h, &ref))
+                        if (tri_upper_cache_lookup(cache, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
                                             bit_array, bloom_bytes,
                                             &page_fmt);
-                            pg_tre_upper_release(&ref);
+                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
                         }
 
                         if (has_bloom)
@@ -845,6 +1034,18 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         overlay_free(&ov);
     }
 
+    /*
+     * Build the per-trigram upper-tree lookup cache.  Both tier-3 and
+     * the Phase 5.1 positional filter walk every candidate TID and used
+     * to call pg_tre_upper_lookup() in their innermost loop -- O(C*T)
+     * upper-tree probes for C candidates and T query trigrams.  Hoist
+     * the lookups into a single O(T) pass; the inner loops do a small
+     * linear-scan cache hit instead.
+     */
+    TriUpperCache upper_cache;
+    tri_upper_cache_build(&upper_cache, scan->indexRelation, &st->q,
+                          st->scan_cxt);
+
     /* Tier-3: per-tuple bloom filter (chain-rank gated; see comment in
      * pg_tre_amgetbitmap below). */
     if (result != NULL && st->q.global_max_cost >= 0 &&
@@ -853,7 +1054,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         sm_cardinality(result) <= (uint64) pg_tre_tier3_max_candidates)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
-                                          result, st->scan_cxt);
+                                          result, st->scan_cxt,
+                                          &upper_cache);
     }
 
     /* Phase 5.1: positional filter (CNF only). */
@@ -891,8 +1093,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                             const uint32 *positions;
                             int n_positions, p;
 
-                            if (!pg_tre_upper_lookup(scan->indexRelation,
-                                                    dis->trigram_hash, &ref))
+                            if (!tri_upper_cache_lookup(&upper_cache,
+                                                        dis->trigram_hash,
+                                                        &ref))
                                 continue;
                             any_evaluated = true;
 
@@ -901,7 +1104,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                                             ref.root, ref.inline_data,
                                             ref.inline_bytes,
                                             tid_idx, &positions);
-                            pg_tre_upper_release(&ref);
+                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
 
                             if (n_positions == 0)
                             {
@@ -935,8 +1138,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                             int n_positions, p;
                             bool this_tri_pass = false;
 
-                            if (!pg_tre_upper_lookup(scan->indexRelation,
-                                                    dis->trigram_hash, &ref))
+                            if (!tri_upper_cache_lookup(&upper_cache,
+                                                        dis->trigram_hash,
+                                                        &ref))
                             {
                                 tile_pass = false;
                                 break;
@@ -947,7 +1151,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                                             ref.root, ref.inline_data,
                                             ref.inline_bytes,
                                             tid_idx, &positions);
-                            pg_tre_upper_release(&ref);
+                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
 
                             if (n_positions == 0)
                                 this_tri_pass = true;
@@ -996,6 +1200,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
             }
         }
     }
+
+    tri_upper_cache_release(&upper_cache);
 
     return result;
 }
