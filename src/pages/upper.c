@@ -262,19 +262,28 @@ upper_add_leaf_entry(UpperBulkState *state, uint64 hash, BlockNumber root,
 }
 
 /*
- * Build internal level from an array of (first_key, child_blk) pairs.
- * Returns the root block number of the new level.
+ * Build internal levels from an array of (first_key, child_blk)
+ * pairs.  Returns the root block number of the new tree.
+ *
+ * Recursive: when the input array is too large to fit on one
+ * internal page, splits into ceil(n / entries_per_page) sibling
+ * pages and recurses on the first-keys of those siblings.
+ * Continues until one root remains.
+ *
+ * Memory: allocates a temporary array for the next level's keys
+ * and blocks at each recursion step.  Sized to ceil(n / fanout)
+ * which shrinks geometrically; total auxiliary memory is O(n).
  */
 static BlockNumber
 upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
                            int n_entries)
 {
-    Buffer  buf;
-    Page    page;
-    PgTreUpperInternalEntry *entries;
-    int     i;
     int     entries_per_page;
-    BlockNumber root_blk = InvalidBlockNumber;
+    int     n_pages;
+    int     i, page_idx;
+    uint64 *next_keys;
+    BlockNumber *next_blocks;
+    BlockNumber root_blk;
 
     if (n_entries == 0)
         return InvalidBlockNumber;
@@ -285,47 +294,66 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
         return blocks[0];
     }
 
-    /*
-     * Multiple children: build one or more internal pages.  For Phase 2,
-     * we assume n_entries fits in one page.  If not, we'd need multiple
-     * internal pages and recursion.
-     */
     entries_per_page = UPPER_INTERNAL_MAX_ENTRIES;
-    if (n_entries > entries_per_page)
-        elog(ERROR, "pg_tre: upper-tree internal level overflow "
-             "(%d entries > %d max); Phase 2 does not support multi-level internals",
-             n_entries, entries_per_page);
+    n_pages = (n_entries + entries_per_page - 1) / entries_per_page;
 
-    /* Allocate a single internal page. */
-    buf = pg_tre_extend(index, PG_TRE_PAGE_UPPER);
-    page = BufferGetPage(buf);
+    /*
+     * Build n_pages sibling internal pages at this level.
+     * Each page covers a contiguous run of [start, end) input
+     * entries.  Distribute as evenly as possible to avoid a
+     * tail page with very few entries; not strictly necessary
+     * for correctness but reduces tree depth on edge cases.
+     */
+    next_keys   = (uint64 *) palloc(n_pages * sizeof(uint64));
+    next_blocks = (BlockNumber *) palloc(n_pages * sizeof(BlockNumber));
 
-    entries = (PgTreUpperInternalEntry *) PageGetContents(page);
-    for (i = 0; i < n_entries; i++)
+    for (page_idx = 0; page_idx < n_pages; page_idx++)
     {
-        entries[i].first_key = keys[i];
-        entries[i].child_blk = blocks[i];
+        Buffer  buf;
+        Page    page;
+        PgTreUpperInternalEntry *entries;
+        int     start = (int) ((int64) page_idx * n_entries / n_pages);
+        int     end   = (int) ((int64) (page_idx + 1) * n_entries / n_pages);
+        int     this_n = end - start;
+
+        Assert(this_n > 0);
+        Assert(this_n <= entries_per_page);
+
+        buf = pg_tre_extend(index, PG_TRE_PAGE_UPPER);
+        page = BufferGetPage(buf);
+        entries = (PgTreUpperInternalEntry *) PageGetContents(page);
+        for (i = 0; i < this_n; i++)
+        {
+            entries[i].first_key = keys[start + i];
+            entries[i].child_blk = blocks[start + i];
+        }
+
+        ((PageHeader) page)->pd_lower =
+            (char *) &entries[this_n] - (char *) page;
+
+        if (RelationNeedsWAL(index))
+        {
+            XLogRecPtr recptr;
+
+            XLogBeginInsert();
+            XLogRegisterBuffer(0, buf,
+                               REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
+            PageSetLSN(page, recptr);
+        }
+
+        MarkBufferDirty(buf);
+        next_keys[page_idx]   = keys[start];   /* first key on this page */
+        next_blocks[page_idx] = BufferGetBlockNumber(buf);
+        UnlockReleaseBuffer(buf);
     }
 
-    ((PageHeader) page)->pd_lower =
-        (char *) &entries[n_entries] - (char *) page;
+    /* Recurse on the parent level. */
+    root_blk = upper_build_internal_level(index, next_keys, next_blocks,
+                                          n_pages);
 
-    /* WAL-log. */
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
-        PageSetLSN(page, recptr);
-    }
-
-    MarkBufferDirty(buf);
-    root_blk = BufferGetBlockNumber(buf);
-    UnlockReleaseBuffer(buf);
-
+    pfree(next_keys);
+    pfree(next_blocks);
     return root_blk;
 }
 
@@ -391,6 +419,7 @@ pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
     Buffer  buf;
     Page    page;
     PageTreOpaque opq;
+    BlockNumber blk;
     int     i;
 
     /* Read meta to get root_upper. */
@@ -406,17 +435,58 @@ pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
     }
 
     /*
-     * Descend to find the leaf.  For Phase 2 with a single internal
-     * page or a single leaf, this is straightforward.
+     * Descend through internal levels until we reach a leaf page.
+     * The tree may have one or more internal levels (multi-level
+     * support landed in 1.4.x to handle large vocabularies); each
+     * level dispatches to a single child by selecting the rightmost
+     * entry whose first_key <= trigram_hash.
      */
-    buf = pg_tre_read(index, meta.root_upper, PG_TRE_PAGE_INVALID,
-                      BUFFER_LOCK_SHARE);
-    page = BufferGetPage(buf);
-    opq = PageTreGetOpaque(page);
-
-    if (opq->page_kind == PG_TRE_PAGE_UPPER_L)
+    blk = meta.root_upper;
+    for (;;)
     {
-        /* Root is a leaf; search it. */
+        BlockNumber child_blk = InvalidBlockNumber;
+        PgTreUpperInternalEntry *internal_entries;
+        int n_internal;
+
+        buf = pg_tre_read(index, blk, PG_TRE_PAGE_INVALID,
+                          BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+        opq = PageTreGetOpaque(page);
+
+        if (opq->page_kind == PG_TRE_PAGE_UPPER_L)
+            break;          /* Reached a leaf; search below. */
+
+        if (opq->page_kind != PG_TRE_PAGE_UPPER)
+        {
+            UnlockReleaseBuffer(buf);
+            elog(ERROR,
+                 "pg_tre: unexpected page kind %u during upper-tree descent",
+                 opq->page_kind);
+        }
+
+        /* Internal page: pick child by first_key <= trigram_hash. */
+        internal_entries = (PgTreUpperInternalEntry *) PageGetContents(page);
+        n_internal = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData)) /
+                     sizeof(PgTreUpperInternalEntry);
+        for (i = 0; i < n_internal; i++)
+        {
+            if (internal_entries[i].first_key <= trigram_hash)
+                child_blk = internal_entries[i].child_blk;
+            else
+                break;
+        }
+        UnlockReleaseBuffer(buf);
+
+        if (child_blk == InvalidBlockNumber)
+        {
+            out->upper_buf = InvalidBuffer;
+            return false;
+        }
+        blk = child_blk;
+    }
+
+    /* `buf` / `page` now hold a leaf page. */
+    {
         PgTreUpperLeafEntry *entries;
         int n_entries;
 
@@ -469,79 +539,6 @@ pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
         UnlockReleaseBuffer(buf);
         out->upper_buf = InvalidBuffer;
         return false;
-    }
-    else if (opq->page_kind == PG_TRE_PAGE_UPPER)
-    {
-        /*
-         * Internal page: descend to the correct child.  For Phase 2,
-         * we only have one internal page.
-         */
-        PgTreUpperInternalEntry *entries;
-        int n_entries;
-        BlockNumber child_blk = InvalidBlockNumber;
-
-        entries = (PgTreUpperInternalEntry *) PageGetContents(page);
-        n_entries = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData)) /
-                    sizeof(PgTreUpperInternalEntry);
-
-        /* Find the rightmost entry whose first_key <= trigram_hash. */
-        for (i = 0; i < n_entries; i++)
-        {
-            if (entries[i].first_key <= trigram_hash)
-                child_blk = entries[i].child_blk;
-            else
-                break;
-        }
-
-        UnlockReleaseBuffer(buf);
-
-        if (child_blk == InvalidBlockNumber)
-        {
-            out->upper_buf = InvalidBuffer;
-            return false;
-        }
-
-        /* Read the child leaf and search it. */
-        buf = pg_tre_read(index, child_blk, PG_TRE_PAGE_UPPER_L,
-                          BUFFER_LOCK_SHARE);
-        page = BufferGetPage(buf);
-
-        PgTreUpperLeafEntry *entries2;
-        int n_entries2;
-
-        entries2 = (PgTreUpperLeafEntry *) PageGetContents(page);
-        n_entries2 = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData)) /
-                     sizeof(PgTreUpperLeafEntry);
-
-        for (i = 0; i < n_entries2; i++)
-        {
-            if (entries2[i].trigram_hash == trigram_hash)
-            {
-                out->upper_buf = buf;
-                out->root = entries2[i].posting_root;
-                if (entries2[i].inline_bytes > 0)
-                {
-                    out->inline_data = (const uint8 *) &entries2[n_entries2];
-                    out->inline_bytes = entries2[i].inline_bytes;
-                }
-                else
-                {
-                    out->inline_data = NULL;
-                    out->inline_bytes = 0;
-                }
-                return true;
-            }
-        }
-
-        UnlockReleaseBuffer(buf);
-        out->upper_buf = InvalidBuffer;
-        return false;
-    }
-    else
-    {
-        UnlockReleaseBuffer(buf);
-        elog(ERROR, "pg_tre: unexpected page kind %u at root_upper",
-             opq->page_kind);
     }
 }
 

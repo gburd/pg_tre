@@ -283,18 +283,20 @@ SET
 SET
 SET
 SET
- id | txt 
-----+-----
-(0 rows)
+ id |                  txt                   
+----+----------------------------------------
+  1 | The café in Zürich serves great coffee
+(1 row)
 
  id |               txt                
 ----+----------------------------------
   2 | Tokyo tower in 東京 is very tall
 (1 row)
 
- id | txt 
-----+-----
-(0 rows)
+ id |                   txt                   
+----+-----------------------------------------
+  3 | Naïve résumé writing is not recommended
+(1 row)
 
  id |                 txt                 
 ----+-------------------------------------

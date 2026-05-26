@@ -75,9 +75,12 @@ FROM ob_t
 WHERE body %~~ tre_pattern('foobar', 0)
 ORDER BY body <@> tre_pattern('foobar', 0) ASC, id ASC
 LIMIT 10;
- id | body | dist 
-----+------+------
-(0 rows)
+ id |           body           | dist 
+----+--------------------------+------
+  1 | exact foobar match alpha |    0
+  2 | exact foobar match beta  |    0
+  3 | exact foobar match gamma |    0
+(3 rows)
 
 -- ----------------------------------------------------------------
 -- 3. Cross-check against seq-scan + executor sort: same top-N rows.
@@ -125,7 +128,7 @@ SELECT (SELECT array_agg(id ORDER BY id) FROM idx) =
        AS top5_matches;
  top5_matches 
 --------------
- 
+ t
 (1 row)
 
 -- Cleanup

@@ -270,12 +270,14 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
 
             trigram_hash = pg_tre_hash_trigram_cp(ring);
 
-            /* Grow array if needed. */
+            /* Grow array if needed.  Uses _huge variants because
+             * a 1M-row corpus emits ~50M trigram entries (~1.2 GB),
+             * exceeding palloc's 1 GB MaxAllocSize cap. */
             if (bstate->n_entries >= bstate->entries_alloced)
             {
                 bstate->entries_alloced *= 2;
                 bstate->entries = (TrigramTidEntry *)
-                    repalloc(bstate->entries,
+                    repalloc_huge(bstate->entries,
                              bstate->entries_alloced * sizeof(TrigramTidEntry));
             }
 
@@ -369,7 +371,8 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     bstate.indexInfo = indexInfo;
     bstate.entries_alloced = 1024 * 1024;  /* start with 1M entries */
     bstate.entries = (TrigramTidEntry *)
-        palloc(bstate.entries_alloced * sizeof(TrigramTidEntry));
+        MemoryContextAllocHuge(CurrentMemoryContext,
+                               bstate.entries_alloced * sizeof(TrigramTidEntry));
     bstate.n_entries = 0;
 
     /* Phase 5: initialize per-TID bloom hash table. */
