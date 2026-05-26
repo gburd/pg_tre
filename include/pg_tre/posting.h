@@ -32,6 +32,9 @@
 #include "pg_tre/page.h"
 #include "pg_tre/sparsemap.h"
 
+/* Forward decl from bloom.h; full definition not required by this header. */
+struct PgTreBloom;
+
 /* Inline threshold: posting sets smaller than this are stored
  * inline in the upper-tree leaf entry (no separate root page).
  * Value is in bytes of serialized sparsemap.
@@ -90,12 +93,16 @@ extern PgTrePostingBuilder *pg_tre_posting_build_begin_sized(Relation index,
                                                              bool with_payload,
                                                              size_t expected_bytes);
 
-/* Append one (TID, position, tuple-bloom-bits) triple. */
+/* Append one (TID, position, tuple-bloom) triple.  The bloom is
+ * borrowed (the build-side TID-bloom hash owns it), so callers must
+ * keep it alive until pg_tre_posting_build_finish has returned.  Pass
+ * NULL when with_payload is false (e.g. the pending-list merge
+ * path); when with_payload is true the bloom is required. */
 extern void pg_tre_posting_build_add(PgTrePostingBuilder *b,
                                      ItemPointer tid,
                                      const uint32 *positions,
                                      int n_positions,
-                                     const uint8 *tuple_bloom_bits);
+                                     struct PgTreBloom *tuple_bloom);
 
 /*
  * Finalize the build: emit all leaf pages (WAL-logged), possibly
@@ -165,8 +172,12 @@ extern void pg_tre_posting_scan_end(PgTrePostingScan *s);
 /*
  * Look up the per-tuple bloom filter for a given TID.  Returns true if
  * the TID is present in the posting and bloom data is available, false
- * otherwise.  The bloom is copied into *out_bloom (caller must allocate
- * sufficient space: pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits)).
+ * otherwise.  The bloom bit array is copied into *out_bloom (caller
+ * must allocate at least out_bloom_sz bytes; size for max(GUC,
+ * PG_TRE_BLOOM_MAX_M_BITS / 8)).  out_m_bits and out_k receive the
+ * bloom's width and hash-position count -- pre-v6 pages return the
+ * index-wide GUC values; v6 pages return the per-tuple values from
+ * the on-disk header.  Both out_m_bits and out_k must be non-NULL.
  *
  * out_page_format_version (optional) receives the per-page format_version
  * of the posting leaf the bloom was read from; used by the multi-version
@@ -180,6 +191,8 @@ extern bool pg_tre_posting_lookup_tuple_bloom(
     uint64 packed_tid,
     uint8 *out_bloom,
     Size out_bloom_sz,
+    uint16 *out_m_bits,
+    uint8 *out_k,
     uint32 *out_page_format_version);
 
 /* ---- Upper-tree lookup (both sides) ---- */
@@ -210,23 +223,9 @@ extern void pg_tre_upper_release(PgTreUpperRef *ref);
 /* ---- Phase 5 payload APIs ---- */
 
 /*
- * Look up the per-tuple bloom filter for a given TID in a posting tree.
- * Returns true if the TID is present in the posting and has an associated
- * bloom, false otherwise.  Copies the bloom bits into out_bloom (caller
- * must provide a buffer of at least out_bloom_sz bytes).
- *
- * Phase 5 WRITE has implemented this function.
+ * (Re-declared above; kept here so old call sites grepping for the
+ * Phase 5 banner still find the prototype.)
  */
-typedef struct PgTreBloom PgTreBloom;  /* forward decl from bloom.h */
-
-extern bool pg_tre_posting_lookup_tuple_bloom(Relation index,
-                                              BlockNumber root,
-                                              const uint8 *inline_data,
-                                              Size inline_bytes,
-                                              uint64 packed_tid,
-                                              uint8 *out_bloom,
-                                              Size out_bloom_sz,
-                                              uint32 *out_page_format_version);
 
 /*
  * Look up the list of positions where a trigram appears in a given TID.

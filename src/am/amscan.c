@@ -520,18 +520,11 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
     sparsemap_t *refined;
     uint64 idx;
     /*
-     * Bloom scratch buffer.  Layout: [PgTreBloom header][bloom_bytes
-     * of bit array].  The build path serializes only the bit array
-     * into the posting-leaf payload (see
-     * src/pages/posting.c::serialize_payload), so on scan we read
-     * those bytes into the *bit-array region* and reconstruct the
-     * header in place before calling pg_tre_bloom_contains_trigram
-     * - which expects a real PgTreBloom* and reads m_bits/k from
-     * the header.
-     *
-     * 256 bytes covers headers + the largest reasonable
-     * pg_tre.bloom_tuple_bits (1024 bits = 128 bytes) plus the
-     * sizeof(PgTreBloom) header with MAXALIGN padding.
+     * Bloom scratch buffer.  Layout: [PgTreBloom header][bit array].
+     * The buffer is sized to fit any bloom width the index could
+     * surface: max(GUC pg_tre.bloom_tuple_bits, PG_TRE_BLOOM_MAX_M_BITS)
+     * bits.  The GUC currently caps at 1024 bits (128 B);
+     * PG_TRE_BLOOM_MAX_M_BITS is 512 (64 B); 256 bytes is plenty.
      *
      * Pre-1.2.1 this code cast a raw bit array directly to
      * (PgTreBloom *) and read garbage from the bit data as if it
@@ -540,25 +533,13 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
      * off via pg_tre.tuple_bloom_enable=false to mask it.
      */
     uint8 bloom_buf[256];
-    Size bloom_bytes;
+    Size bit_array_capacity;
     int i, j;
 
     if (candidates == NULL || sm_cardinality(candidates) == 0)
         return candidates;
 
-    /* Phase 5: per-tuple blooms are (pg_tre_bloom_tuple_bits + 7) / 8 bytes */
-    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    /*
-     * The bloom scratch is laid out as [header][bit array].  Total
-     * footprint must fit in bloom_buf.  Cap bloom_bytes if it
-     * would overflow the buffer (defensive; the GUC validator
-     * already caps bloom_tuple_bits well below this).
-     */
-    {
-        Size header_bytes = MAXALIGN(sizeof(PgTreBloom));
-        if (header_bytes + bloom_bytes > sizeof(bloom_buf))
-            bloom_bytes = sizeof(bloom_buf) - header_bytes;
-    }
+    bit_array_capacity = sizeof(bloom_buf) - MAXALIGN(sizeof(PgTreBloom));
 
     refined = sm_create(sm_get_capacity(candidates) * 2 + 256);
     if (refined == NULL)
@@ -599,29 +580,28 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         PgTreUpperRef ref;
                         bool has_bloom = false;
                         uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
+                        uint16 m_bits = 0;
+                        uint8  k = 0;
 
                         if (pg_tre_upper_lookup(index, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes,
-                                            &page_fmt);
+                                            bit_array, bit_array_capacity,
+                                            &m_bits, &k, &page_fmt);
                             pg_tre_upper_release(&ref);
                         }
 
                         if (has_bloom)
                         {
-                            /* Reconstruct the bloom header in a
-                             * format-version-aware manner.  Today
-                             * v3 == v4; the dispatch lives in
-                             * pg_tre_bloom_decode_tuple() so future
-                             * format versions can be added in one
-                             * place.  Build path uses k=5 (see
-                             * find_or_create_tid_bloom). */
+                            /* Reconstruct the bloom header from the
+                             * (m_bits, k) the page-walker surfaced --
+                             * v6 from the on-disk header, pre-v6 from
+                             * the index-wide GUC. */
                             if (!pg_tre_bloom_decode_tuple(bloom_view,
-                                                          (uint16) pg_tre_bloom_tuple_bits,
-                                                          5, page_fmt))
+                                                          m_bits, k,
+                                                          page_fmt))
                             {
                                 /* Unknown format -- fall back to
                                  * recheck rather than reject. */
@@ -666,14 +646,16 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                         PgTreUpperRef ref;
                         bool has_bloom = false;
                         uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
+                        uint16 m_bits = 0;
+                        uint8  k = 0;
 
                         if (pg_tre_upper_lookup(index, h, &ref))
                         {
                             has_bloom = pg_tre_posting_lookup_tuple_bloom(
                                             index, ref.root, ref.inline_data,
                                             ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes,
-                                            &page_fmt);
+                                            bit_array, bit_array_capacity,
+                                            &m_bits, &k, &page_fmt);
                             pg_tre_upper_release(&ref);
                         }
 
@@ -682,8 +664,8 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
                             /* Format-version-aware decode.  See the
                              * CNF arm above for rationale. */
                             if (!pg_tre_bloom_decode_tuple(bloom_view,
-                                                          (uint16) pg_tre_bloom_tuple_bits,
-                                                          5, page_fmt))
+                                                          m_bits, k,
+                                                          page_fmt))
                             {
                                 /* Unknown format -- skip this tile. */
                                 continue;

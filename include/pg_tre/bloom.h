@@ -14,6 +14,28 @@
 #include "postgres.h"
 
 /*
+ * Variable-width per-tuple bloom support (format v6).
+ *
+ * On v6 posting-leaf pages each per-tuple bloom is preceded by a
+ * 2-byte [m_code:u8, k:u8] header giving its width and number of
+ * hash positions.  Pre-v6 pages stored fixed-size blooms whose
+ * width and k were taken from index-wide GUCs.
+ *
+ * Width codes 0..PG_TRE_BLOOM_M_NCODES-1 map to m_bits via
+ * pg_tre_bloom_m_for_code; pg_tre_bloom_select_m_code picks the
+ * smallest preset that contains a tuple's distinct-trigram count
+ * with target FPR ~10%, capped at PG_TRE_BLOOM_MAX_M_BITS.  k is
+ * tuned to (m, n) with pg_tre_bloom_select_k.
+ */
+#define PG_TRE_BLOOM_M_NCODES   5
+#define PG_TRE_BLOOM_MAX_M_BITS 512
+
+extern uint16 pg_tre_bloom_m_for_code(uint8 m_code);
+extern uint8  pg_tre_bloom_code_for_m(uint16 m_bits);
+extern uint8  pg_tre_bloom_select_m_code(uint32 n_distinct, uint16 cap_bits);
+extern uint8  pg_tre_bloom_select_k(uint16 m, uint32 n_distinct);
+
+/*
  * Variable-length bloom filter structure.  The actual bit vector follows
  * the header inline.  Total size is MAXALIGN(sizeof(PgTreBloom)) +
  * MAXALIGN((m_bits + 7) / 8).
@@ -61,24 +83,23 @@ extern void pg_tre_bloom_union(PgTreBloom *dst, const PgTreBloom *src);
 /*
  * Multi-version per-tuple bloom decoder dispatch.
  *
- * Reconstruct an in-memory PgTreBloom view over a serialized bit array
- * read out of a posting leaf, using the source page's format_version to
- * pick the right wire layout.  The bit array must be at offset
+ * Reconstruct an in-memory PgTreBloom view over a serialized bit
+ * array read out of a posting leaf.  The bit array must be at offset
  * MAXALIGN(sizeof(PgTreBloom)) within view_buf, so callers should
- * arrange the buffer as [header slot][bit array] before reading bytes
- * into the bit-array slot via pg_tre_posting_lookup_tuple_bloom().
+ * arrange the buffer as [header slot][bit array] before reading
+ * bytes into the bit-array slot via
+ * pg_tre_posting_lookup_tuple_bloom().
  *
  * page_format_version is the per-page on-disk format the bytes came
  * from; it must satisfy PG_TRE_FORMAT_VERSION_MIN <= v <=
- * PG_TRE_FORMAT_VERSION_LATEST.  Today (v3, v4) the per-tuple bloom is
- * a fixed-size (m_bits + 7)/8 byte vector and both versions share the
- * same decode path; the dispatch shape exists so that the variable-
- * width per-tuple bloom format planned for a follow-on commit can be
- * added without touching the call sites.
+ * PG_TRE_FORMAT_VERSION_LATEST.  v3..v5 stored fixed-width blooms
+ * whose (m_bits, k) come from the index-wide configuration; v6
+ * carries per-tuple (m_bits, k) inline so the page-walker extracts
+ * those values from the on-disk header and passes them in here.
  *
- * Returns true on success, false if page_format_version is unsupported
- * (caller should treat that as "no bloom available" and fall back to
- * recheck).
+ * Returns true on success, false if page_format_version is
+ * unsupported (caller should treat that as "no bloom available" and
+ * fall back to recheck).
  */
 extern bool pg_tre_bloom_decode_tuple(PgTreBloom *view_buf,
                                        uint16 m_bits,

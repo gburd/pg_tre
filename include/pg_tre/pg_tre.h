@@ -27,6 +27,14 @@
  *            Only RANGE pages differ between v4 and v5; other page
  *            kinds are byte-identical.  Readers handle v<5 range
  *            pages (no header) for back-compat with 1.4.x indexes.
+ *   v6     - variable-width per-tuple blooms.  Each posting-leaf
+ *            payload entry now carries a 2-byte [m_code:u8, k:u8]
+ *            header preceding its bit array, sizing the bloom by
+ *            the tuple's actual trigram count rather than the
+ *            index-wide GUC.  Each entry is MAXALIGN-padded so
+ *            subsequent u16 reads stay aligned.  Only POSTING_L
+ *            pages differ between v5 and v6; readers dispatch on
+ *            the per-page format_version.
  *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
  *
@@ -36,7 +44,7 @@
  * index; pg_tre_upgrade_index() rewrites pages forward and bumps that
  * field when every page is at LATEST.  See doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 5
+#define PG_TRE_FORMAT_VERSION_LATEST 6
 #define PG_TRE_FORMAT_VERSION_MIN    3
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the

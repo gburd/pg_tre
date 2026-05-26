@@ -39,6 +39,7 @@
 #include "utils/rel.h"
 
 #include "pg_tre/buffer.h"
+#include "pg_tre/bloom.h"
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
 #include "pg_tre/pg_tre.h"
@@ -59,13 +60,17 @@ posting_leaf_budget(void)
  * Builder
  * ================================================================ */
 
-/* Per-TID payload entry (positions + bloom). */
+/* Per-TID payload entry (positions + bloom).
+ *
+ * Phase 6: bloom is borrowed from the build-side TID-bloom hash; the
+ * builder does not own it and must not free it.  See
+ * src/am/ambuild.c::TidBloomEntry. */
 typedef struct PayloadEntry
 {
-    uint64  tid;                /* packed TID */
-    uint32 *positions;          /* palloc'd array of position offsets */
-    int     n_positions;
-    uint8  *bloom_bits;         /* palloc'd bloom filter bits */
+    uint64       tid;           /* packed TID */
+    uint32      *positions;     /* palloc'd array of position offsets */
+    int          n_positions;
+    PgTreBloom  *bloom;         /* borrowed; owned by the build state */
 } PayloadEntry;
 
 struct PgTrePostingBuilder
@@ -150,7 +155,7 @@ pg_tre_posting_build_begin_sized(Relation index, uint64 trigram_hash,
 void
 pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
                          const uint32 *positions, int n_positions,
-                         const uint8 *tuple_bloom_bits)
+                         PgTreBloom *tuple_bloom)
 {
     uint64 packed = pg_tre_pack_tid(tid);
 
@@ -167,7 +172,6 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
     if (b->with_payload)
     {
         PayloadEntry *pe;
-        Size bloom_bytes;
 
         /* Grow payload array if needed. */
         if (b->payload_count >= b->payload_alloced)
@@ -192,18 +196,14 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
             pe->positions = NULL;
         }
 
-        /* Copy bloom bits. */
-        bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-        if (tuple_bloom_bits != NULL)
-        {
-            pe->bloom_bits = (uint8 *) palloc(bloom_bytes);
-            memcpy(pe->bloom_bits, tuple_bloom_bits, bloom_bytes);
-        }
-        else
-        {
-            /* No bloom provided: allocate zeroed bloom. */
-            pe->bloom_bits = (uint8 *) palloc0(bloom_bytes);
-        }
+        /*
+         * Borrow the per-TID bloom; the build-side TID-bloom hash
+         * owns the storage and outlives the builder.  When
+         * with_payload is true the caller must always supply a
+         * bloom -- a NULL here means a build-side bug.
+         */
+        Assert(tuple_bloom != NULL);
+        pe->bloom = tuple_bloom;
     }
 
     if (packed < b->min_tid) b->min_tid = packed;
@@ -306,31 +306,37 @@ write_single_leaf(Relation index, uint64 trigram_hash,
 
 /*
  * Serialize the payload array into a compact byte stream.
- * Format for each TID (in sparsemap order):
- *   - uint16 n_positions (variable-byte encoded as 1 or 2 bytes)
- *   - uint8  position_deltas[n_positions] (delta-coded from 0)
- *   - uint8  bloom_bits[(pg_tre_bloom_tuple_bits + 7) / 8]
  *
- * Phase 5: for simplicity, use fixed-width encoding: 2 bytes for n_positions,
- * 4 bytes per position (no delta coding yet), bloom_bits follow.
+ * Format v6 wire layout for each TID (in sparsemap order):
+ *   [n_pos:u16] [positions:u32 * n_pos] [m_code:u8] [k:u8]
+ *   [bits: ceil(m/8) bytes]
+ * Each entry is MAXALIGN-padded so subsequent u16 reads stay aligned
+ * regardless of the variable bit-array size.  Trailing pad bytes are
+ * zeroed so reproducing the bytes from a fresh build is
+ * deterministic for diff/audit tooling.
  *
  * Returns palloc'd buffer; caller must pfree.
  */
 static uint8 *
 serialize_payload(PayloadEntry *payload, int payload_count, Size *out_size)
 {
-    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     Size estimate = 0;
     uint8 *buf, *ptr;
     int i;
 
-    /* Estimate size: for each entry, 2 bytes for n_positions,
-     * 4 bytes per position, and bloom_bytes for bloom. */
+    /*
+     * Estimate size: sum MAXALIGN(per-entry size) over all entries.
+     * Per entry: 2 (n_pos) + 4*n_pos + 2 (m_code,k) + ceil(m/8) bits.
+     */
     for (i = 0; i < payload_count; i++)
     {
-        estimate += 2;  /* n_positions */
-        estimate += payload[i].n_positions * sizeof(uint32);
-        estimate += bloom_bytes;
+        PayloadEntry *pe = &payload[i];
+        uint16 m_bits = (pe->bloom != NULL) ? pe->bloom->m_bits
+                                            : (uint16) pg_tre_bloom_tuple_bits;
+        Size bloom_bytes = (m_bits + 7) / 8;
+
+        estimate += MAXALIGN((Size) 2 + (Size) pe->n_positions * sizeof(uint32)
+                             + 2 + bloom_bytes);
     }
 
     buf = (uint8 *) palloc0(estimate);
@@ -340,29 +346,41 @@ serialize_payload(PayloadEntry *payload, int payload_count, Size *out_size)
     {
         PayloadEntry *pe = &payload[i];
         uint16 n = (uint16) pe->n_positions;
+        uint16 m_bits;
+        uint8  m_code;
+        uint8  k;
+        Size   bloom_bytes;
+        Size   raw_size;
+        uint8 *entry_start = ptr;
 
-        /* Write n_positions as uint16. */
+        Assert(pe->bloom != NULL);
+        m_bits = pe->bloom->m_bits;
+        m_code = pg_tre_bloom_code_for_m(m_bits);
+        k      = pe->bloom->k;
+        bloom_bytes = (m_bits + 7) / 8;
+
+        /* n_pos */
         memcpy(ptr, &n, sizeof(uint16));
         ptr += sizeof(uint16);
 
-        /* Write positions as uint32 array (no delta coding for Phase 5). */
+        /* positions (no delta coding for now) */
         if (n > 0 && pe->positions != NULL)
         {
-            memcpy(ptr, pe->positions, n * sizeof(uint32));
-            ptr += n * sizeof(uint32);
+            memcpy(ptr, pe->positions, (Size) n * sizeof(uint32));
+            ptr += (Size) n * sizeof(uint32);
         }
 
-        /* Write bloom bits. */
-        if (pe->bloom_bits != NULL)
-        {
-            memcpy(ptr, pe->bloom_bits, bloom_bytes);
-        }
-        else
-        {
-            /* Zero bloom if missing. */
-            memset(ptr, 0, bloom_bytes);
-        }
+        /* [m_code, k] */
+        *ptr++ = m_code;
+        *ptr++ = k;
+
+        /* bit array */
+        memcpy(ptr, pg_tre_bloom_bits(pe->bloom), bloom_bytes);
         ptr += bloom_bytes;
+
+        /* MAXALIGN-pad: subsequent entries' u16 reads stay aligned. */
+        raw_size = (Size) (ptr - entry_start);
+        ptr = entry_start + MAXALIGN(raw_size);
     }
 
     *out_size = ptr - buf;
@@ -638,7 +656,12 @@ pg_tre_posting_build_free(PgTrePostingBuilder *b)
     if (b->tids != NULL)
         pfree(b->tids);
 
-    /* Free payload entries (Phase 5). */
+    /*
+     * Free payload entries (Phase 5).  Note: pe->bloom is borrowed
+     * from the build-side TID-bloom hash (see
+     * src/am/ambuild.c::TidBloomEntry); the builder must not free
+     * it.
+     */
     if (b->payload != NULL)
     {
         int i;
@@ -646,8 +669,6 @@ pg_tre_posting_build_free(PgTrePostingBuilder *b)
         {
             if (b->payload[i].positions != NULL)
                 pfree(b->payload[i].positions);
-            if (b->payload[i].bloom_bits != NULL)
-                pfree(b->payload[i].bloom_bits);
         }
         pfree(b->payload);
     }
@@ -869,6 +890,92 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
 }
 
 /*
+ * Walk a v6 posting-leaf payload to the entry at sparsemap rank
+ * `target_rank` (1-indexed: rank == 1 means the first entry).
+ * Each v6 entry is
+ *     [n_pos:u16] [positions:u32 * n_pos] [m_code:u8] [k:u8]
+ *     [bits: ceil(m/8)]
+ * MAXALIGN-padded so the subsequent entry's u16 read stays aligned.
+ *
+ * Returns a pointer to the start of the target entry, or NULL if
+ * the payload region was too small.  Sets *out_n_pos / *out_m_bits /
+ * *out_k / *out_bits to fields read from the entry header on
+ * success.
+ */
+static const uint8 *
+v6_walk_payload_to_rank(const uint8 *payload_base, Size payload_bytes,
+                        size_t target_rank,
+                        uint16 *out_n_pos, uint16 *out_m_bits,
+                        uint8 *out_k, const uint8 **out_bits)
+{
+    const uint8 *p = payload_base;
+    const uint8 *end = payload_base + payload_bytes;
+    size_t i;
+
+    if (target_rank == 0)
+        return NULL;
+
+    /* Skip (target_rank - 1) entries. */
+    for (i = 0; i + 1 < target_rank; i++)
+    {
+        const uint8 *entry_start = p;
+        uint16 n_pos;
+        uint8  m_code;
+        uint16 m_bits;
+        Size   bloom_bytes;
+        Size   raw_size;
+
+        if (p + sizeof(uint16) > end)
+            return NULL;
+        memcpy(&n_pos, p, sizeof(uint16));
+        p += sizeof(uint16);
+        p += (Size) n_pos * sizeof(uint32);
+        if (p + 2 > end)
+            return NULL;
+        m_code = *p++;
+        /* k */ p++;
+        m_bits = pg_tre_bloom_m_for_code(m_code);
+        bloom_bytes = (m_bits + 7) / 8;
+        p += bloom_bytes;
+        if (p > end)
+            return NULL;
+
+        raw_size = (Size) (p - entry_start);
+        p = entry_start + MAXALIGN(raw_size);
+        if (p > end)
+            return NULL;
+    }
+
+    /* Target entry: parse header and surface fields. */
+    {
+        const uint8 *entry_start = p;
+        uint16 n_pos;
+        uint8  m_code;
+        uint8  k;
+        uint16 m_bits;
+
+        if (p + sizeof(uint16) > end)
+            return NULL;
+        memcpy(&n_pos, p, sizeof(uint16));
+        p += sizeof(uint16);
+        p += (Size) n_pos * sizeof(uint32);
+        if (p + 2 > end)
+            return NULL;
+        m_code = *p++;
+        k      = *p++;
+        m_bits = pg_tre_bloom_m_for_code(m_code);
+        if (p + (m_bits + 7) / 8 > end)
+            return NULL;
+
+        if (out_n_pos)  *out_n_pos  = n_pos;
+        if (out_m_bits) *out_m_bits = m_bits;
+        if (out_k)      *out_k      = k;
+        if (out_bits)   *out_bits   = p;
+        return entry_start;
+    }
+}
+
+/*
  * Lookup the per-tuple bloom filter for a specific TID.
  *
  * Phase 5 WRITE-side implementation.  READ side will extend this with
@@ -878,7 +985,9 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
  * Returns true if the TID is present in the posting and bloom data is
  * available; false otherwise.  If true, copies the bloom bits into
  * out_bloom (caller must provide a buffer of at least out_bloom_sz bytes,
- * typically (pg_tre_bloom_tuple_bits + 7) / 8).
+ * sized for the largest possible width: max(GUC pg_tre.bloom_tuple_bits,
+ * PG_TRE_BLOOM_MAX_M_BITS)) and surfaces the on-disk (m_bits, k)
+ * via out_m_bits / out_k.
  */
 bool
 pg_tre_posting_lookup_tuple_bloom(Relation index,
@@ -888,15 +997,13 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
                                   uint64 packed_tid,
                                   uint8 *out_bloom,
                                   Size out_bloom_sz,
+                                  uint16 *out_m_bits,
+                                  uint8 *out_k,
                                   uint32 *out_page_format_version)
 {
-    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     sparsemap_t *smap = NULL;
     size_t rank;
     const uint8 *payload_base;
-    const uint8 *entry_ptr;
-
-    Assert(out_bloom_sz >= bloom_bytes);
 
     if (out_page_format_version != NULL)
         *out_page_format_version = PG_TRE_FORMAT_VERSION_LATEST;
@@ -920,6 +1027,7 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
         Page page;
         PgTrePostingLeafHeader *hdr;
         uint8 *sm_bytes;
+        uint32 page_fmt;
         bool found = false;
 
         /* Walk right-links until we find the leaf with min_tid <= target <= max_tid */
@@ -954,6 +1062,7 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
 
         /* Now buf points to the leaf containing packed_tid */
         sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
+        page_fmt = PageTreGetOpaque(page)->format_version;
 
         /* Check if we have payload data. */
         if (hdr->payload_bytes == 0)
@@ -980,32 +1089,90 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
         rank = sm_rank(smap, 0, packed_tid, true);
         free(smap);
 
-        /* Phase 5: payload layout:
-         * Each entry is: uint16 n_positions + uint32 positions[n_positions]
-         * + uint8 bloom[bloom_bytes].
-         * Walk forward 'rank-1' entries to find the target. */
         payload_base = (const uint8 *) page + hdr->payload_offset;
-        entry_ptr = payload_base;
 
-        for (size_t i = 0; i + 1 < rank; i++)
+        if (page_fmt >= 6)
         {
+            /* v6: variable-width per-tuple blooms. */
             uint16 n_pos;
-            memcpy(&n_pos, entry_ptr, sizeof(uint16));
-            entry_ptr += sizeof(uint16);
-            entry_ptr += n_pos * sizeof(uint32);
-            entry_ptr += bloom_bytes;
-        }
+            uint16 m_bits;
+            uint8  k;
+            const uint8 *bits;
+            const uint8 *entry;
+            Size bloom_bytes;
 
-        /* Now entry_ptr points at the start of the target entry. */
-        {
-            uint16 n_pos;
-            memcpy(&n_pos, entry_ptr, sizeof(uint16));
-            entry_ptr += sizeof(uint16);
-            entry_ptr += n_pos * sizeof(uint32);
+            entry = v6_walk_payload_to_rank(payload_base,
+                                            hdr->payload_bytes,
+                                            rank,
+                                            &n_pos, &m_bits, &k, &bits);
+            if (entry == NULL)
+            {
+                UnlockReleaseBuffer(buf);
+                return false;
+            }
 
-            /* entry_ptr now points at the bloom bits. */
-            memcpy(out_bloom, entry_ptr, bloom_bytes);
+            bloom_bytes = (m_bits + 7) / 8;
+            if (bloom_bytes > out_bloom_sz)
+            {
+                /* Caller's buffer is too small for this width. */
+                UnlockReleaseBuffer(buf);
+                return false;
+            }
+            memcpy(out_bloom, bits, bloom_bytes);
+            if (out_m_bits) *out_m_bits = m_bits;
+            if (out_k)      *out_k      = k;
             found = true;
+        }
+        else
+        {
+            /* v3..v5: fixed-width bloom; (m_bits, k) come from GUCs. */
+            Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+            const uint8 *entry_ptr = payload_base;
+            const uint8 *end = payload_base + hdr->payload_bytes;
+            size_t i;
+
+            Assert(out_bloom_sz >= bloom_bytes);
+
+            for (i = 0; i + 1 < rank; i++)
+            {
+                uint16 n_pos;
+                if (entry_ptr + sizeof(uint16) > end)
+                {
+                    UnlockReleaseBuffer(buf);
+                    return false;
+                }
+                memcpy(&n_pos, entry_ptr, sizeof(uint16));
+                entry_ptr += sizeof(uint16);
+                entry_ptr += (Size) n_pos * sizeof(uint32);
+                entry_ptr += bloom_bytes;
+                if (entry_ptr > end)
+                {
+                    UnlockReleaseBuffer(buf);
+                    return false;
+                }
+            }
+
+            {
+                uint16 n_pos;
+                if (entry_ptr + sizeof(uint16) > end)
+                {
+                    UnlockReleaseBuffer(buf);
+                    return false;
+                }
+                memcpy(&n_pos, entry_ptr, sizeof(uint16));
+                entry_ptr += sizeof(uint16);
+                entry_ptr += (Size) n_pos * sizeof(uint32);
+
+                if (entry_ptr + bloom_bytes > end)
+                {
+                    UnlockReleaseBuffer(buf);
+                    return false;
+                }
+                memcpy(out_bloom, entry_ptr, bloom_bytes);
+                if (out_m_bits) *out_m_bits = (uint16) pg_tre_bloom_tuple_bits;
+                if (out_k)      *out_k      = 5;
+                found = true;
+            }
         }
 
         /*
@@ -1014,7 +1181,7 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
          * version-aware decode helper in src/util/bloom.c).
          */
         if (out_page_format_version != NULL)
-            *out_page_format_version = PageTreGetOpaque(page)->format_version;
+            *out_page_format_version = page_fmt;
 
         UnlockReleaseBuffer(buf);
         return found;
@@ -1037,13 +1204,11 @@ pg_tre_posting_lookup_positions(Relation index,
                                 const uint32 **out_positions)
 {
     static uint32 positions_buf[1024];  /* thread-local buffer */
-    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     sparsemap_t *smap = NULL;
     size_t rank;
     const uint8 *payload_base;
-    const uint8 *entry_ptr;
-    uint16 n_positions;
-    const uint32 *positions_ptr;
+    uint16 n_positions = 0;
+    const uint32 *positions_ptr = NULL;
 
     /* Step 1: determine if TID is present in the sparsemap. */
     if (inline_data != NULL)
@@ -1121,11 +1286,44 @@ pg_tre_posting_lookup_positions(Relation index,
         /* Payload starts at payload_offset from page start */
         payload_base = (const uint8 *) page + hdr->payload_offset;
 
-        /* Walk payload entries to find our rank */
-        entry_ptr = payload_base;
+        if (PageTreGetOpaque(page)->format_version >= 6)
         {
+            /* v6: variable-width per-tuple blooms; the wire format
+             * still puts positions immediately after n_pos so the
+             * v6 walker exposes the same starting pointer. */
+            uint16 entry_n_pos;
+            uint16 m_bits;
+            uint8  k;
+            const uint8 *bits_unused;
+            const uint8 *entry =
+                v6_walk_payload_to_rank(payload_base,
+                                        hdr->payload_bytes,
+                                        rank,
+                                        &entry_n_pos, &m_bits, &k,
+                                        &bits_unused);
+
+            (void) k;
+            (void) bits_unused;
+            (void) m_bits;
+
+            if (entry == NULL)
+            {
+                UnlockReleaseBuffer(buf);
+                return 0;
+            }
+
+            n_positions = entry_n_pos;
+            if (n_positions > 1024)
+                n_positions = 1024;
+            positions_ptr = (const uint32 *) (entry + sizeof(uint16));
+        }
+        else
+        {
+            /* Pre-v6: fixed-width bloom; walk packed entries. */
+            Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+            const uint8 *entry_ptr = payload_base;
             size_t entry_idx;
-            /* Same fix as in lookup_tuple_bloom: skip (rank-1) entries */
+
             for (entry_idx = 0; entry_idx + 1 < rank; entry_idx++)
             {
                 uint16 entry_n_positions;
@@ -1134,16 +1332,13 @@ pg_tre_posting_lookup_positions(Relation index,
                 entry_ptr += entry_n_positions * sizeof(uint32);
                 entry_ptr += bloom_bytes;
             }
+
+            memcpy(&n_positions, entry_ptr, sizeof(uint16));
+            entry_ptr += sizeof(uint16);
+            if (n_positions > 1024)
+                n_positions = 1024;
+            positions_ptr = (const uint32 *) entry_ptr;
         }
-
-        /* Now entry_ptr points at our TID's payload entry */
-        memcpy(&n_positions, entry_ptr, sizeof(uint16));
-        entry_ptr += sizeof(uint16);
-
-        if (n_positions > 1024)
-            n_positions = 1024;  /* cap at buffer size */
-
-        positions_ptr = (const uint32 *) entry_ptr;
 
         /* Copy positions to thread-local buffer */
         memcpy(positions_buf, positions_ptr, n_positions * sizeof(uint32));
