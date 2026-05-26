@@ -16,8 +16,8 @@
 
 EXTENSION    = pg_tre
 MODULE_big   = pg_tre
-DATA         = sql/pg_tre--1.5.0-dev.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
-       sql/pg_tre--1.4.1--1.5.0-dev.sql \
+DATA         = sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+       sql/pg_tre--1.4.1--1.5.0.sql \
        sql/pg_tre--1.4.0--1.4.1.sql \
        sql/pg_tre--1.3.0--1.4.0.sql \
        sql/pg_tre--1.2.4--1.3.0.sql \

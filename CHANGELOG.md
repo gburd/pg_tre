@@ -6,6 +6,95 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.0] - 2026-05-26 - range-tier multi-leaf, query-time hoist
+
+Minor release on the 1.x line.  On-disk format bump from
+v4 to v5 for range pages (right-link chained); existing
+v4 indexes remain readable, no REINDEX required.  Use
+`pg_tre_upgrade_index()` to lazy-rewrite v4 range pages
+in v5 format if you want them to benefit from the multi-
+leaf feature without a rebuild.
+
+### Added
+
+- **Multi-leaf range tier**: `PgTreRangeHeader` (8 bytes) at
+  the start of each range page chains pages via `right_link`.
+  Build path emits multiple range pages when entries don't
+  fit on one; read paths walk the chain.  Per-page format
+  dispatch keeps v3/v4 range pages (no header) readable for
+  back-compat.
+- 1M-row natural-text corpus now reports
+  `built range tier with 118 ranges across 4 pages` (was: 30
+  captured + 88 silently truncated, with a warning).
+  **Tier-1 selectivity now applies to 100% of the heap**
+  instead of the first 25%.
+
+### Changed
+
+- **Hoist `pg_tre_upper_lookup` out of tier-3 inner loop**.
+  `apply_tuple_bloom_filter` and the Phase 5.1 positional
+  filter previously called `pg_tre_upper_lookup` once per
+  (candidate, query-trigram) pair (3.6M probes for the 1M
+  reproducer).  A per-scan trigram_hash -> upper-tree leaf
+  cache is now built once at scan setup and consulted in
+  the inner loop.
+  - 1M `'connection refused'` cold-cache: ~66 s -> ~36 s
+    (1.84x speedup).
+  - Buffer-hit reduction is small (~1.5%): the dominant
+    structural cost is `pg_tre_posting_materialize` for
+    high-cardinality trigrams, not upper_lookup.  Skip-
+    pointer style intersection short-circuit for that path
+    is queued for a future cycle.
+- Critical implementation detail: cached entries hold no
+  buffer pin or LWLock across the scan (the inline blob is
+  copied out and the leaf released immediately).  An earlier
+  iteration that held SHARE LWLocks was 2x slower.
+- `PG_TRE_FORMAT_VERSION_LATEST = 5`.
+
+### Honest performance status
+
+Variable-width per-tuple blooms were prototyped on branch
+`variable-width-v6` (commit `4bbbc38`).  Wire format,
+build-side two-pass restructure, and decoder dispatch all
+work; 17/17 regression passes; `wal_audit` and
+`replication` clean.  But on the test corpus (1M rows of
+`/usr/share/dict/words` Zipfian samples, ~83 trigram
+emissions/row, 24,269 distinct trigrams), the variable-
+width output is **3 MB larger** than the fixed-128 baseline
+(every row landed in the 256-bit bucket; the bucket
+thresholds were calibrated for distinct-count, not
+emission-count).  Branch is parked; not merged.  The win
+materializes for short-text corpora (URLs, error codes,
+IDs); the natural-text 1M case is bottlenecked elsewhere.
+
+At 1M rows on this corpus, exact-match queries via the
+index remain ~2 orders of magnitude slower than `pg_trgm`
+GIN.  The remaining gap lives in the trigram posting-list
+intersection cost in `pg_tre_posting_materialize`.
+Closing it requires skip-pointer-style early termination,
+which is a multi-week structural change deferred to a
+future release.
+
+Where `pg_tre` is the only PostgreSQL answer (k>0 fuzzy,
+character-class regex, ORDER BY `<@>`), it stands alone
+at any scale.
+
+### Verified
+
+- 17/17 regression tests pass.
+- `test/scripts/wal_audit.sh`: 3/3 pass.
+- `test/scripts/replication.sh` (default): 4/4 pass.
+- `test/scripts/replication.sh` with
+  `TRE_WAL_CONSISTENCY=1`: 4/4 pass.
+- 1M-row CREATE INDEX completes in ~80 s (no truncation
+  warning); index size ~3.8 GB; `'connection refused'`
+  query 36 s cold / 33 s warm.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.4.1] - 2026-05-26 - 1M-row scaling fixes
 
 Patch release on the 1.4 line.  Same on-disk format as 1.4.0;

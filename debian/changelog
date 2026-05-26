@@ -1,4 +1,20 @@
-pg_tre (1.5.0-dev-1) unstable; urgency=medium
+pg_tre (1.5.0-1) unstable; urgency=medium
+
+  * Multi-leaf range tier (format v5 for range pages): full heap
+    coverage in tier-1 selectivity at scale.  Was capped at ~30
+    entries before truncation.
+  * Hoist pg_tre_upper_lookup out of tier-3 inner loop: per-scan
+    cache replaces per-candidate B-tree probes.  ~1.84x cold-cache
+    speedup on the 1M-row 'connection refused' reproducer.
+  * Backward-compatible read for v4 range pages; pg_tre_upgrade_index
+    rewrites them to v5 in place when run.
+  * Variable-width per-tuple blooms prototyped on variable-width-v6
+    branch but did not deliver a size win on natural-text 1M-row
+    corpora; parked for short-text corpus targets.
+
+ -- Greg Burd <greg@burd.me>  Tue, 27 May 2026 00:00:00 +0000
+
+pg_tre (1.5.0-1) unstable; urgency=medium
 
   * Fix two production-blocking bugs surfaced by the 1M-row benchmark:
     palloc 1 GB cap in ambuild.c (use _huge variants), and
@@ -9,7 +25,7 @@ pg_tre (1.5.0-dev-1) unstable; urgency=medium
 
  -- Greg Burd <greg@burd.me>  Mon, 26 May 2026 00:00:00 +0000
 
-pg_tre (1.5.0-dev-1) unstable; urgency=medium
+pg_tre (1.5.0-1) unstable; urgency=medium
 
   * Index-side ORDER BY <@>: distance-ordered scans via amcanorderbyop
     + amgettuple. EXPLAIN shows Index Scan with Order By, no Sort node.

@@ -17,7 +17,7 @@
  *   v1     - initial format with byte-based trigrams.
  *   v2     - codepoint-based trigrams (Phase 3.5).
  *   v3     - multi-leaf posting trees (Phase 4.2).
- *   v4     - introduced in 1.5.0-dev.  v3 and v4 are byte-compatible
+ *   v4     - introduced in 1.5.0.  v3 and v4 are byte-compatible
  *            today; the bump exists so the in-place upgrade machinery
  *            (pg_tre_upgrade_index) has a target version to walk to
  *            once a real format change lands.
@@ -47,7 +47,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.5.0-dev"
+#define PG_TRE_VERSION_STRING "pg_tre 1.5.0"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;
