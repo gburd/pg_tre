@@ -30,7 +30,7 @@
  * index; pg_tre_upgrade_index() rewrites pages forward and bumps that
  * field when every page is at LATEST.  See doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 4
+#define PG_TRE_FORMAT_VERSION_LATEST 5
 #define PG_TRE_FORMAT_VERSION_MIN    3
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the

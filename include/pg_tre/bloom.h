@@ -14,6 +14,33 @@
 #include "postgres.h"
 
 /*
+ * Variable-width per-tuple bloom support (format v5).
+ *
+ * Each per-tuple bloom on a v5 page is preceded by a 2-byte
+ * header [m_code:1][k:1] giving the bloom's width and number
+ * of hash positions.  Pre-v5 pages stored fixed-size blooms
+ * with width and k taken from index-wide GUCs.
+ *
+ * Width codes 0..PG_TRE_BLOOM_M_NCODES-1 map to m_bits via
+ * pg_tre_bloom_m_for_code.  The selector chooses an m (capped
+ * to the GUC pg_tre.bloom_tuple_bits) based on a tuple's
+ * distinct-trigram count, and a k tuned for that (m, n) ratio
+ * with target FPR ~10%.
+ */
+#define PG_TRE_BLOOM_M_NCODES   5
+extern uint16 pg_tre_bloom_m_for_code(uint8 m_code);
+extern uint8  pg_tre_bloom_select_m_code(uint32 n_distinct, uint16 cap_bits);
+extern uint8  pg_tre_bloom_select_k(uint16 m, uint32 n_distinct);
+
+/*
+ * Compute the on-disk size of a v5 per-tuple bloom: 2-byte
+ * header + ceil(m_bits/8) bytes of bit array, MAXALIGN'd at
+ * the end so callers can pack adjacent blooms with no
+ * misalignment of subsequent fixed-size headers.
+ */
+extern Size pg_tre_bloom_v5_wire_bytes(uint16 m_bits);
+
+/*
  * Variable-length bloom filter structure.  The actual bit vector follows
  * the header inline.  Total size is MAXALIGN(sizeof(PgTreBloom)) +
  * MAXALIGN((m_bits + 7) / 8).
