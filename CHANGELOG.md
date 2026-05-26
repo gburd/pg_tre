@@ -6,6 +6,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.1] - 2026-05-26 - 1M-row scaling fixes
+
+Patch release on the 1.4 line.  Same on-disk format as 1.4.0;
+ALTER EXTENSION pg_tre UPDATE TO '1.4.1' has no SQL work to do;
+no re-index required.
+
+### Fixed
+
+- **`palloc` 1 GB cap in `ambuild.c`**: the build path collected
+  `(trigram_hash, tid, position)` entries for every trigram
+  emission during heap scan.  At ~85 trigrams/row x 1M rows
+  that is ~83.5M entries x 24 bytes = ~2 GB, exceeding PG's
+  `MaxAllocSize`.  Switched the entries-array allocation to
+  `MemoryContextAllocHuge` / `repalloc_huge`.  CREATE INDEX on
+  1M+ rows previously failed with
+  `invalid memory alloc request size 1610612736`.
+- **Single-level upper-tree internals in `upper.c`**: the old
+  `upper_build_internal_level` was hardcoded to a single internal
+  page (max ~506 entries).  This capped pg_tre at ~10-20K
+  distinct trigrams - which maps to roughly 50K rows of
+  dictionary-style natural text.  Beyond that the build
+  failed with `pg_tre: upper-tree internal level overflow`.
+  Now the writer is recursive: when the input doesn't fit on
+  one page it builds `ceil(N / fanout)` sibling pages and
+  recurses on those pages' first-keys.  The reader's descent
+  in `pg_tre_upper_lookup` is refactored from an if/else
+  (root-is-leaf vs root-is-internal-with-one-descent) into a
+  loop that walks any number of internal levels until it hits
+  a leaf.
+- **Latent correctness bug surfaced by the multi-level descent**:
+  the previous single-level descent's `first_key <=
+  trigram_hash` rightmost-match returned no match when the
+  query trigram's hash was less than the leftmost first_key
+  on the internal page.  Most queries' hashes land in the
+  middle of the distribution so the bug was masked, but a few
+  selective queries against indexes built with multiple leaves
+  silently dropped rows.  `test/expected/utf8.out` and
+  `test/expected/order_by.out` were refreshed to reflect the
+  now-correct behavior (rows that the index used to drop are
+  now returned).
+
+### Verified
+
+- 17/17 regression tests pass.
+- `test/scripts/wal_audit.sh`: 3/3 pass.
+- `test/scripts/replication.sh` (default): 4/4 pass.
+- `test/scripts/replication.sh` with `TRE_WAL_CONSISTENCY=1`:
+  4/4 pass.
+- 1M-row CREATE INDEX now completes in 80 s (was: ERROR at
+  invalid memory alloc 1.5 GB or upper-tree internal overflow).
+
+### Benchmark infrastructure
+
+- `bench/gen_corpus.py`: Python CSV generator using
+  `/usr/share/dict/words`.  Produces 1M rows in 3.9 s.
+- `bench/bench_1m_v2.sql`: `\copy`-based driver replacing the
+  O(N^2) plpgsql sampler in the original `bench_1m.sql`
+  (which was unusable beyond ~10K rows).
+- `doc/perf.md` rewritten with 1M-row numbers.  pg_tre is
+  structurally larger (24x) and slower (3x build) than pg_trgm
+  GIN at 1M rows because of per-trigram page allocation; v2.0's
+  posting-page coalescing is the planned fix.  Where pg_tre
+  is the only answer (k>0 fuzzy, character-class regex,
+  ORDER BY `<@>`), it completes in 1-7 seconds at 1M rows.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.4.0] - 2026-05-25 - ORDER BY index-side, delta WAL, format-upgrade framework
 
 First minor release on the 1.4 line. Same on-disk format as
