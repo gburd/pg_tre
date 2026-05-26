@@ -1,3 +1,23 @@
+pg_tre (1.4.0-1) unstable; urgency=medium
+
+  * Index-side ORDER BY <@>: distance-ordered scans via amcanorderbyop
+    + amgettuple. EXPLAIN shows Index Scan with Order By, no Sort node.
+  * Delta-aware WAL redo for pending_insert: ~370x reduction in FPI
+    bytes on the high-volume insert path; wal_consistency_checking still
+    passes.
+  * In-place format-upgrade infrastructure: pg_tre_upgrade_index() and
+    pg_tre_index_format_status() let users upgrade across format
+    versions without REINDEX.
+  * libFuzzer harness uses real libpgcommon (palloc, MemoryContext,
+    StringInfo) instead of stubs.
+  * PostgreSQL 17 build compatibility (PG_VERSION_NUM guards).
+  * PG_TRE_INLINE_POSTING_MAX raised from 256 to 2048 bytes.
+  * Three not-yet-implemented WAL redo PANICs replaced with FPI-fallthrough
+    (correct because those record types aren't emitted yet).
+  * No on-disk format changes; no re-index required.
+
+ -- Greg Burd <greg@burd.me>  Mon, 25 May 2026 21:00:00 +0000
+
 pg_tre (1.3.0-1) unstable; urgency=medium
 
   * Vendor sparsemap 2.3.0 (drop-in compatible upgrade from 2.2.0).

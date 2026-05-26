@@ -6,44 +6,97 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.4.0-dev] - unreleased
+## [1.4.0] - 2026-05-25 - ORDER BY index-side, delta WAL, format-upgrade framework
+
+First minor release on the 1.4 line. Same on-disk format as
+1.3.x: existing indexes are read transparently. Forward-compatible
+format-upgrade framework lands so future format bumps (variable-
+width per-tuple blooms in v2.0) can be applied in place via
+`pg_tre_upgrade_index()` without REINDEX.
 
 ### Added
 
-- **In-place format-upgrade infrastructure.**  On-disk format bumped
-  from v3 to v4; v3 and v4 share a byte layout, so existing 1.3.x
-  indexes are read directly without REINDEX.  Three new SQL surfaces
-  let users opt in to lazy in-place rewrites for future format
-  changes:
-  - `pg_tre_upgrade_index(idx regclass)`: walk every block and
-    rewrite any page below the current format in place.  Per-page
-    exclusive lock held only for the brief rewrite + WAL emit.
-    WAL-logged as `XLOG_PTRE_PAGE_FORMAT_UPGRADE` (full-page image,
-    one record per rewritten page).  Updates the meta page's
+- **Index-side `ORDER BY <@>`** via `amcanorderbyop` and a
+  new `amgettuple` implementation.  `SELECT ... WHERE body
+  %~~ p ORDER BY body <@> p ASC LIMIT N` now produces an
+  Index Scan with `Order By:` and no Sort node.  10k-row
+  LIMIT 10 measured at 23 ms (was 40 ms with executor sort).
+  `tre_text_ops` operator class adds strategy 2 for the
+  ordering operator; `pg_tre--1.3.0--1.4.0.sql` registers it.
+  Honest caveat: true streaming early-termination requires
+  per-tuple distance proxies stored in the index — followup
+  for v2.0 alongside variable-width blooms.
+- **Delta-aware WAL redo for `pending_insert`.**  The hottest
+  WAL emit path (per-row inserts into a fastupdate index) now
+  ships a delta (~24 bytes header + entries) instead of two
+  ~8 KB full-page images.  Measured on a 10k-row INSERT:
+  ~370x reduction in FPI bytes on the pending_insert path,
+  ~30x reduction in total pg_tre WAL volume.
+  `wal_consistency_checking='pg_tre'` still passes — standby
+  bytewise comparison agrees after delta replay.
+  Other call sites still on FORCE_IMAGE; pattern is
+  established and replicable for them.
+- **In-place format-upgrade infrastructure.**  Three new SQL
+  surfaces:
+  - `pg_tre_upgrade_index(idx regclass)`: walks every block,
+    rewrites pages below the current format version,
+    WAL-logs each rewrite, updates the meta page's
     `min_page_format_version` after a complete sweep.
-  - `pg_tre_index_format_status(idx regclass)` returns a
-    `(format_version int4, page_count bigint)` table of per-version
-    page counts.  SHARED locks; safe to run alongside reads/writes.
-  - `pg_tre_index_min_format_version(idx regclass) -> int4` returns
-    the meta page's tracked minimum.
-  See `doc/onpage_format.md` for the design narrative.  The
-  page-format dispatch in the bloom decoder (`pg_tre_bloom_decode_tuple`)
-  and in `pg_tre_read` accepts any version in
-  `[PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST]`; today
-  the v3 and v4 arms are identical, but the dispatch shape lands
-  here so the planned variable-width per-tuple bloom format (a
-  follow-on commit) can be introduced without touching call sites.
-- `ORDER BY <@> ASC LIMIT N` is now answered directly by the index
-  via `amorderbyop` / `amgettuple` (1.3.0--1.4.0-dev migration adds
-  the strategy 2 ordering operator on `tre_text_ops`).
+    Per-page exclusive lock held only for the brief
+    rewrite + WAL emit.
+  - `pg_tre_index_format_status(idx regclass)` returns
+    `(format_version int4, page_count bigint)`.  SHARED
+    locks; safe to run alongside reads/writes.
+  - `pg_tre_index_min_format_version(idx regclass) -> int4`
+    returns the meta page's tracked minimum.
+  Today's pg_tre_upgrade_index is a structural no-op
+  (v3 and v4 are byte-identical); the framework is in place
+  so v2.0's variable-width-bloom format change can ship
+  with zero-downtime upgrades.
+- **PostgreSQL 17 build compatibility.**  PG18-only
+  IndexAmRoutine fields (`amconsistentequality`,
+  `amconsistentordering`, `amtranslatestrategy`,
+  `amtranslatecmptype`) are guarded by
+  `#if PG_VERSION_NUM >= 180000`.  PG17 added to the GitHub
+  Actions CI matrix.
 
 ### Changed
 
-- `PG_TRE_FORMAT_VERSION_LATEST` is now 4; `PG_TRE_FORMAT_VERSION_MIN`
-  is 3.  The meta page tracks `min_page_format_version` (previously
-  one of the `reserved[]` slots).  1.3.x indexes upgrade transparently:
-  a zero in this slot is patched to the index-level `format_version`
-  on read.
+- `PG_TRE_INLINE_POSTING_MAX` raised from 256 to 2048 bytes.
+  At 2048 most natural-language trigrams' posting lists
+  stay inline; index size drops modestly on real corpora.
+  v1.3's build/scan perf fixes confirmed safe at this
+  threshold across the regression matrix.
+- `PG_TRE_FORMAT_VERSION_LATEST = 4`,
+  `PG_TRE_FORMAT_VERSION_MIN = 3`.  v3 indexes still readable
+  (byte-identical layout); meta-page `min_page_format_version`
+  tracks the minimum across all pages.
+- `fuzz/memutils_stub.c` removed.  Fuzz harness now links
+  `libpgcommon.a` + `libpgport.a` and uses real `palloc` /
+  `MemoryContext` / `StringInfo`.  Limitation: cross-context
+  UAF detection requires running as a backend extension
+  (separate refactor).
+
+### Fixed
+
+- Three not-yet-implemented WAL redo PANICs
+  (`XLOG_PTRE_POSTING_DELETE`, `XLOG_PTRE_POSTING_SPLIT`,
+  `XLOG_PTRE_VACUUM`) replaced with FPI-fallthrough.  These
+  ops are not emitted by today's page layer, so the routes
+  were unreachable — but a stale PANIC in the redo dispatch
+  was a footgun for future work.  The unknown-op default
+  arm correctly remains a PANIC (corrupt WAL).
+
+### Repo hygiene
+
+- `.mailmap` collapses prior `Greg Burd (pi agent)` commits
+  to canonical `Greg Burd` for `git log`, GitHub, Codeberg.
+  History is unchanged; mapping is non-destructive.
+- Agent-tooling ignore patterns moved from public
+  `.gitignore` to `.local-gitignore`.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
 
 ---
 

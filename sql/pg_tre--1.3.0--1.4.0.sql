@@ -1,4 +1,4 @@
--- pg_tre upgrade 1.3.0 -> 1.4.0-dev
+-- pg_tre upgrade 1.3.0 -> 1.4.0
 --
 -- Adds index-side ORDER BY <@> support:
 --   * Strategy 2 of tre_text_ops becomes the ordering operator
@@ -15,7 +15,7 @@
 ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
--- 1.4.0-dev: in-place format-upgrade infrastructure.  See
+-- 1.4.0: in-place format-upgrade infrastructure.  See
 -- doc/onpage_format.md for the design.  These functions are no-ops on
 -- 1.3.x indexes since v3 and v4 share a byte layout, but the
 -- machinery is in place for the next on-disk format change.
