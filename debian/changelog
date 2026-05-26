@@ -1,4 +1,4 @@
-pg_tre (1.4.1-1) unstable; urgency=medium
+pg_tre (1.5.0-dev-1) unstable; urgency=medium
 
   * Fix two production-blocking bugs surfaced by the 1M-row benchmark:
     palloc 1 GB cap in ambuild.c (use _huge variants), and
@@ -9,7 +9,7 @@ pg_tre (1.4.1-1) unstable; urgency=medium
 
  -- Greg Burd <greg@burd.me>  Mon, 26 May 2026 00:00:00 +0000
 
-pg_tre (1.4.1-1) unstable; urgency=medium
+pg_tre (1.5.0-dev-1) unstable; urgency=medium
 
   * Index-side ORDER BY <@>: distance-ordered scans via amcanorderbyop
     + amgettuple. EXPLAIN shows Index Scan with Order By, no Sort node.
