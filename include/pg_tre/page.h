@@ -173,6 +173,36 @@ typedef struct PgTreRangeLeafEntry
     /* bloom bytes follow inline */
 } PgTreRangeLeafEntry;
 
+/* ---- Range summary page header (format v5+) ----
+ *
+ * Range pages at format_version >= 5 begin their content area with this
+ * 8-byte header; range entries follow immediately after.  Pages chain
+ * via right_link to support more entries than fit on one page.
+ *
+ * Layout of a v5 range page:
+ *
+ *   [ PageHeader              ]   24 B
+ *   [ PgTreRangeHeader        ]    8 B   (right_link, n_entries, _pad)
+ *   [ PgTreRangeLeafEntry  #0 ]   variable (entry + inline bloom bytes)
+ *   [ PgTreRangeLeafEntry  #1 ]
+ *   ...
+ *   [ ... free space ...     ]
+ *   [ PageTreOpaqueData       ]    8 B
+ *
+ * meta.root_range points to the FIRST page of the chain.  right_link is
+ * InvalidBlockNumber on the last page.  pd_lower marks the end of the
+ * last entry written on the page (inclusive of the header).
+ *
+ * Format v3 / v4 range pages do NOT have this header; entries start at
+ * PageGetContents() directly.  Readers dispatch on opq->format_version.
+ */
+typedef struct PgTreRangeHeader
+{
+    BlockNumber right_link;     /* next range page, or InvalidBlockNumber */
+    uint16      n_entries;      /* entries written on this page */
+    uint16      _pad;           /* zero */
+} PgTreRangeHeader;
+
 /* ---- Pending list page ---- */
 
 typedef struct PgTrePendingHeader

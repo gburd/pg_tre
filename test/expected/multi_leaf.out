@@ -25,7 +25,7 @@ INSERT 0 100000
 CREATE INDEX multi_leaf_idx ON multi_leaf_test USING tre (body);
 psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: collected 5188895 trigram entries from 100000 heap tuples
 psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built 1145 posting trees
-psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built range tier with 9 ranges
+psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built range tier with 9 ranges across 1 pages
 psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: build complete, indexed 100000 heap tuples into 1145 trigrams
 CREATE INDEX
 -- Verify index built successfully (no errcode_program_limit_exceeded).
@@ -217,7 +217,7 @@ DROP TABLE
 REINDEX INDEX multi_leaf_idx;
 psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: collected 5188895 trigram entries from 100000 heap tuples
 psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built 1145 posting trees
-psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built range tier with 9 ranges
+psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built range tier with 9 ranges across 1 pages
 psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: build complete, indexed 100000 heap tuples into 1145 trigrams
 REINDEX
 -- Verify rebuilt index still works correctly.

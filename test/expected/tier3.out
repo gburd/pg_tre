@@ -20,7 +20,7 @@ INSERT 0 10
 CREATE INDEX tier3_test_idx ON tier3_test USING tre (body);
 psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: collected 172 trigram entries from 10 heap tuples
 psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: built 132 posting trees
-psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: built range tier with 1 ranges
+psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/tier3.sql:21: NOTICE:  pg_tre: build complete, indexed 10 heap tuples into 132 trigrams
 CREATE INDEX
 -- Verify tier-3 is working: exact match for 'fox'

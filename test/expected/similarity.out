@@ -103,7 +103,7 @@ INSERT 0 7
 CREATE INDEX sim_idx ON sim_t USING tre (body);
 psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: collected 96 trigram entries from 7 heap tuples
 psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: built 56 posting trees
-psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: built range tier with 1 ranges
+psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/similarity.sql:58: NOTICE:  pg_tre: build complete, indexed 7 heap tuples into 56 trigrams
 CREATE INDEX
 -- ORDER BY <@> ASC NULLS LAST returns closest matches first.  We

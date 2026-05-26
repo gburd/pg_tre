@@ -28,7 +28,7 @@ INSERT 0 500
 CREATE INDEX upg_idx ON upg_t USING tre (body);
 psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: collected 35392 trigram entries from 500 heap tuples
 psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built 4548 posting trees
-psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built range tier with 1 ranges
+psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: build complete, indexed 500 heap tuples into 4548 trigrams
 CREATE INDEX
 -- (1) Format status: every page should be at the current LATEST.
@@ -38,14 +38,14 @@ FROM pg_tre_index_format_status('upg_idx'::regclass)
 ORDER BY format_version;
  format_version | has_pages 
 ----------------+-----------
-              4 | t
+              5 | t
 (1 row)
 
 -- (2) Min format version matches LATEST exactly.
 SELECT pg_tre_index_min_format_version('upg_idx'::regclass) AS min_fmt;
  min_fmt 
 ---------
-       4
+       5
 (1 row)
 
 -- (3) Run pg_tre_upgrade_index.  Must succeed cleanly.
@@ -82,13 +82,13 @@ FROM pg_tre_index_format_status('upg_idx'::regclass)
 ORDER BY format_version;
  format_version | has_pages 
 ----------------+-----------
-              4 | t
+              5 | t
 (1 row)
 
 SELECT pg_tre_index_min_format_version('upg_idx'::regclass) AS min_fmt_after;
  min_fmt_after 
 ---------------
-             4
+             5
 (1 row)
 
 -- (6) Error path: non-pg_tre relation rejected.

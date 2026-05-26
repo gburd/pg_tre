@@ -1,13 +1,23 @@
 /*
  * src/pages/range.c - BRIN-style range summary tier (tier 1).
  *
- * Phase 5: single-leaf implementation.  Each range entry covers
- * pg_tre_range_size_blocks heap blocks and carries a bloom filter
- * summarizing all trigrams present in that range.
+ * Phase 8: multi-leaf implementation.  Range pages chain via
+ * PgTreRangeHeader.right_link.  meta.root_range points at the FIRST
+ * page of the chain.  Each range entry covers pg_tre_range_size_blocks
+ * heap blocks and carries a bloom filter summarizing all trigrams
+ * present in that range.
+ *
+ * Format-version dispatch on read:
+ *   v5+  range pages carry a PgTreRangeHeader at the start of their
+ *        content area; entries follow.  right_link walks the chain.
+ *   v<5  range pages have no header; entries start at PageGetContents()
+ *        and pd_lower bounds the entry area.  Single-page only (the
+ *        bulkload that wrote them truncated past the first page).
  *
  * The range tree is keyed by range_start_blk and provides fast rejection
- * of entire heap regions during scan.  Phase 8 will extend this to a
- * multi-level tree; Phase 5 keeps it simple with a single leaf page.
+ * of entire heap regions during scan.  Phase 8 keeps the chain ordered
+ * by range_start across pages, so a future binary-search reader can
+ * land on the right page in O(log n_pages).
  */
 
 #include "postgres.h"
@@ -62,6 +72,54 @@ compare_range_start(const void *a, const void *b)
 }
 
 /*
+ * Per-page content capacity: bytes available between the end of
+ * PageHeaderData (where PageGetContents() lands) and the start of the
+ * special area (where PageTreOpaqueData lives).
+ */
+static inline Size
+range_page_content_capacity(Page page)
+{
+    return ((PageHeader) page)->pd_special - MAXALIGN(SizeOfPageHeaderData);
+}
+
+/*
+ * Finalize a range page by stamping its header (v5+) and pd_lower,
+ * marking dirty, emitting an FPI if the relation is WAL-logged, and
+ * releasing the buffer lock.  next_blk is the right_link target
+ * (InvalidBlockNumber for the tail page).
+ */
+static void
+finalize_range_page(Relation index, Buffer rangebuf,
+                    Size entry_offset_in_content, int entries_on_page,
+                    BlockNumber next_blk)
+{
+    Page page = BufferGetPage(rangebuf);
+    char *content = (char *) PageGetContents(page);
+    PgTreRangeHeader *hdr = (PgTreRangeHeader *) content;
+
+    hdr->right_link = next_blk;
+    hdr->n_entries  = (uint16) entries_on_page;
+    hdr->_pad       = 0;
+
+    ((PageHeader) page)->pd_lower =
+        (LocationIndex) (content + entry_offset_in_content - (char *) page);
+
+    MarkBufferDirty(rangebuf);
+
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, rangebuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_RANGE_UPDATE);
+        PageSetLSN(page, recptr);
+    }
+
+    UnlockReleaseBuffer(rangebuf);
+}
+
+/*
  * Bulk-load the range tree from posting trees.  Scans all trigrams,
  * groups TIDs by heap block range, unions each range's trigrams into
  * a bloom filter, and writes a single range leaf page.
@@ -88,8 +146,14 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
     Buffer rangebuf;
     Page rangepage;
     BlockNumber rangeblk;
-    char *entry_area;
+    BlockNumber root_blk;
+    char *content;
     Size entry_offset;
+    int entries_on_page;
+    int n_pages;
+    Size capacity;
+    Size bloom_bytes;
+    Size entry_size;
     int range_size;
     int i;
 
@@ -216,34 +280,84 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
     /* Sort ranges by range_start for deterministic layout. */
     qsort(ranges, n_ranges, sizeof(RangeAccum), compare_range_start);
 
-    /* Allocate a single range leaf page. */
+    bloom_bytes = (meta.bloom_range_m_bits + 7) / 8;
+    entry_size  = sizeof(PgTreRangeLeafEntry) + bloom_bytes;
+
+    /*
+     * Allocate the first range page (head of the chain).  pg_tre_extend
+     * stamps it at PG_TRE_FORMAT_VERSION_LATEST, so we always write the
+     * v5 PgTreRangeHeader.  Subsequent pages in the chain are allocated
+     * lazily as the current page fills.
+     */
     rangebuf = pg_tre_extend(index, PG_TRE_PAGE_RANGE);
     rangepage = BufferGetPage(rangebuf);
-    rangeblk = BufferGetBlockNumber(rangebuf);
+    rangeblk  = BufferGetBlockNumber(rangebuf);
+    root_blk  = rangeblk;
+    content   = (char *) PageGetContents(rangepage);
+    capacity  = range_page_content_capacity(rangepage);
 
-    /* Write range entries. */
-    entry_area = (char *) PageGetContents(rangepage);
-    entry_offset = 0;
+    /*
+     * Initialize the on-page header in place.  finalize_range_page()
+     * will stamp the final right_link / n_entries when we hand off.
+     */
+    {
+        PgTreRangeHeader *hdr = (PgTreRangeHeader *) content;
+        hdr->right_link = InvalidBlockNumber;
+        hdr->n_entries  = 0;
+        hdr->_pad       = 0;
+    }
+    entry_offset    = sizeof(PgTreRangeHeader);
+    entries_on_page = 0;
+    n_pages         = 1;
+
+    /*
+     * Defend against pathological configurations: if a single entry
+     * (header + bloom) cannot fit on an empty page, we'd loop forever
+     * allocating new pages.  This means bloom_range_m_bits is too
+     * large for the current BLCKSZ.
+     */
+    if (sizeof(PgTreRangeHeader) + entry_size > capacity)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("pg_tre: range bloom too large for page"),
+                 errdetail("entry size %zu exceeds page capacity %zu",
+                           sizeof(PgTreRangeHeader) + entry_size, capacity)));
 
     for (i = 0; i < n_ranges; i++)
     {
         PgTreRangeLeafEntry *entry;
-        Size bloom_bytes = (meta.bloom_range_m_bits + 7) / 8;
-        Size entry_size = sizeof(PgTreRangeLeafEntry) + bloom_bytes;
 
-        if (entry_offset + entry_size > BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData)))
+        /* Out of space on the current page: chain to a new one. */
+        if (entry_offset + entry_size > capacity)
         {
-            /* Out of space: Phase 8 will handle multi-leaf trees. */
-            ereport(WARNING,
-                    (errmsg("pg_tre: range leaf full after %d entries, truncating", i),
-                     errhint("Phase 8 will support multi-leaf range trees.")));
-            break;
+            Buffer  nextbuf  = pg_tre_extend(index, PG_TRE_PAGE_RANGE);
+            BlockNumber next_blk = BufferGetBlockNumber(nextbuf);
+
+            /* Finalize the current page with right_link = next. */
+            finalize_range_page(index, rangebuf, entry_offset,
+                                entries_on_page, next_blk);
+
+            /* Move on to the new tail page. */
+            rangebuf = nextbuf;
+            rangepage = BufferGetPage(rangebuf);
+            content   = (char *) PageGetContents(rangepage);
+            capacity  = range_page_content_capacity(rangepage);
+
+            {
+                PgTreRangeHeader *hdr = (PgTreRangeHeader *) content;
+                hdr->right_link = InvalidBlockNumber;
+                hdr->n_entries  = 0;
+                hdr->_pad       = 0;
+            }
+            entry_offset    = sizeof(PgTreRangeHeader);
+            entries_on_page = 0;
+            n_pages++;
         }
 
-        entry = (PgTreRangeLeafEntry *) (entry_area + entry_offset);
+        entry = (PgTreRangeLeafEntry *) (content + entry_offset);
         entry->range_start_blk = ranges[i].range_start;
-        entry->range_end_blk = ranges[i].range_end;
-        entry->bloom_bytes = bloom_bytes;
+        entry->range_end_blk   = ranges[i].range_end;
+        entry->bloom_bytes     = bloom_bytes;
 
         /* Copy bloom bits inline. */
         memcpy((uint8 *) entry + sizeof(PgTreRangeLeafEntry),
@@ -251,23 +365,12 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
                bloom_bytes);
 
         entry_offset += entry_size;
+        entries_on_page++;
     }
 
-    ((PageHeader) rangepage)->pd_lower = entry_area + entry_offset - (char *) rangepage;
-
-    MarkBufferDirty(rangebuf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, rangebuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_RANGE_UPDATE);
-        PageSetLSN(rangepage, recptr);
-    }
-
-    UnlockReleaseBuffer(rangebuf);
+    /* Finalize the tail page (no successor). */
+    finalize_range_page(index, rangebuf, entry_offset, entries_on_page,
+                        InvalidBlockNumber);
 
     /* Clean up. */
     for (i = 0; i < n_ranges; i++)
@@ -278,9 +381,10 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
     MemoryContextDelete(range_cxt);
 
     ereport(NOTICE,
-            (errmsg("pg_tre: built range tier with %d ranges", n_ranges)));
+            (errmsg("pg_tre: built range tier with %d ranges across %d pages",
+                    n_ranges, n_pages)));
 
-    return rangeblk;
+    return root_blk;
 }
 
 /*
@@ -295,12 +399,9 @@ bool
 pg_tre_range_lookup(Relation index, BlockNumber heap_blk, PgTreBloom **out_bloom)
 {
     PgTreMetaPageData meta;
-    Buffer rangebuf;
-    Page rangepage;
-    char *entry_area;
-    Size entry_offset;
     int range_size;
     BlockNumber target_range_start;
+    BlockNumber blk;
 
     pg_tre_meta_read(index, &meta);
 
@@ -310,39 +411,84 @@ pg_tre_range_lookup(Relation index, BlockNumber heap_blk, PgTreBloom **out_bloom
     range_size = pg_tre_range_size_blocks;
     target_range_start = (heap_blk / range_size) * range_size;
 
-    rangebuf = pg_tre_read(index, meta.root_range, PG_TRE_PAGE_RANGE,
-                           BUFFER_LOCK_SHARE);
-    rangepage = BufferGetPage(rangebuf);
-    entry_area = (char *) PageGetContents(rangepage);
-    entry_offset = 0;
-
-    /* Linear scan for target range (Phase 8 will binary search). */
-    while (entry_offset < ((PageHeader) rangepage)->pd_lower -
-                          ((char *) rangepage - entry_area))
+    /*
+     * Walk the right-link chain starting at meta.root_range.  Within
+     * each page we linear-scan; ranges are stored in ascending
+     * range_start order across the entire chain so we can stop as soon
+     * as we pass the target.
+     */
+    blk = meta.root_range;
+    while (blk != InvalidBlockNumber)
     {
-        PgTreRangeLeafEntry *entry =
-            (PgTreRangeLeafEntry *) (entry_area + entry_offset);
+        Buffer rangebuf;
+        Page rangepage;
+        char *content;
+        Size entries_offset;
+        Size entries_end;
+        BlockNumber next_blk = InvalidBlockNumber;
+        uint32 page_format;
 
-        if (entry->range_start_blk == target_range_start)
+        rangebuf = pg_tre_read(index, blk, PG_TRE_PAGE_RANGE,
+                               BUFFER_LOCK_SHARE);
+        rangepage = BufferGetPage(rangebuf);
+        content   = (char *) PageGetContents(rangepage);
+        page_format = PageTreGetOpaque(rangepage)->format_version;
+
+        if (page_format >= 5)
         {
-            /* Found: allocate bloom and copy bits. */
-            Size bloom_size = pg_tre_bloom_size_bytes(meta.bloom_range_m_bits);
-            PgTreBloom *bloom = (PgTreBloom *) palloc(bloom_size);
-
-            pg_tre_bloom_init(bloom, meta.bloom_range_m_bits, meta.bloom_range_k);
-            memcpy(pg_tre_bloom_bits(bloom),
-                   (uint8 *) entry + sizeof(PgTreRangeLeafEntry),
-                   entry->bloom_bytes);
-
-            *out_bloom = bloom;
-            UnlockReleaseBuffer(rangebuf);
-            return true;
+            const PgTreRangeHeader *hdr = (const PgTreRangeHeader *) content;
+            next_blk       = hdr->right_link;
+            entries_offset = sizeof(PgTreRangeHeader);
+        }
+        else
+        {
+            /* v3 / v4: no header, single page. */
+            entries_offset = 0;
         }
 
-        entry_offset += sizeof(PgTreRangeLeafEntry) + entry->bloom_bytes;
+        entries_end = (Size) (((PageHeader) rangepage)->pd_lower) -
+                      MAXALIGN(SizeOfPageHeaderData);
+
+        while (entries_offset < entries_end)
+        {
+            const PgTreRangeLeafEntry *entry =
+                (const PgTreRangeLeafEntry *) (content + entries_offset);
+
+            if (entry->range_start_blk == target_range_start)
+            {
+                Size bloom_size = pg_tre_bloom_size_bytes(meta.bloom_range_m_bits);
+                PgTreBloom *bloom;
+
+                /* Copy bloom bits while we still hold the page lock. */
+                bloom = (PgTreBloom *) palloc(bloom_size);
+                pg_tre_bloom_init(bloom, meta.bloom_range_m_bits,
+                                  meta.bloom_range_k);
+                memcpy(pg_tre_bloom_bits(bloom),
+                       (const uint8 *) entry + sizeof(PgTreRangeLeafEntry),
+                       entry->bloom_bytes);
+
+                UnlockReleaseBuffer(rangebuf);
+                *out_bloom = bloom;
+                return true;
+            }
+
+            /*
+             * Ranges are sorted ascending across the chain.  Once we
+             * pass the target we can stop the whole scan.
+             */
+            if (entry->range_start_blk > target_range_start)
+            {
+                UnlockReleaseBuffer(rangebuf);
+                return false;
+            }
+
+            entries_offset += sizeof(PgTreRangeLeafEntry) + entry->bloom_bytes;
+        }
+
+        UnlockReleaseBuffer(rangebuf);
+        blk = next_blk;
     }
 
-    UnlockReleaseBuffer(rangebuf);
     return false;
 }
 
@@ -357,46 +503,72 @@ void
 pg_tre_range_scan(Relation index, PgTreRangeScanCallback callback, void *ctx)
 {
     PgTreMetaPageData meta;
-    Buffer rangebuf;
-    Page rangepage;
-    char *entry_area;
-    Size entry_offset;
+    BlockNumber blk;
 
     pg_tre_meta_read(index, &meta);
 
     if (meta.root_range == InvalidBlockNumber)
         return;  /* No ranges */
 
-    rangebuf = pg_tre_read(index, meta.root_range, PG_TRE_PAGE_RANGE,
-                           BUFFER_LOCK_SHARE);
-    rangepage = BufferGetPage(rangebuf);
-    entry_area = (char *) PageGetContents(rangepage);
-    entry_offset = 0;
-
-    /* Iterate all entries. */
-    while (entry_offset < ((PageHeader) rangepage)->pd_lower -
-                          ((char *) rangepage - entry_area))
+    /* Walk the right-link chain. */
+    blk = meta.root_range;
+    while (blk != InvalidBlockNumber)
     {
-        PgTreRangeLeafEntry *entry =
-            (PgTreRangeLeafEntry *) (entry_area + entry_offset);
-        PgTreBloom *bloom;
-        Size bloom_size;
+        Buffer rangebuf;
+        Page rangepage;
+        char *content;
+        Size entries_offset;
+        Size entries_end;
+        BlockNumber next_blk = InvalidBlockNumber;
+        uint32 page_format;
 
-        /* Reconstruct bloom for callback. */
-        bloom_size = pg_tre_bloom_size_bytes(meta.bloom_range_m_bits);
-        bloom = (PgTreBloom *) palloc(bloom_size);
-        pg_tre_bloom_init(bloom, meta.bloom_range_m_bits, meta.bloom_range_k);
-        memcpy(pg_tre_bloom_bits(bloom),
-               (uint8 *) entry + sizeof(PgTreRangeLeafEntry),
-               entry->bloom_bytes);
+        rangebuf = pg_tre_read(index, blk, PG_TRE_PAGE_RANGE,
+                               BUFFER_LOCK_SHARE);
+        rangepage = BufferGetPage(rangebuf);
+        content   = (char *) PageGetContents(rangepage);
+        page_format = PageTreGetOpaque(rangepage)->format_version;
 
-        callback(entry->range_start_blk, entry->range_end_blk, bloom, ctx);
+        if (page_format >= 5)
+        {
+            const PgTreRangeHeader *hdr = (const PgTreRangeHeader *) content;
+            next_blk       = hdr->right_link;
+            entries_offset = sizeof(PgTreRangeHeader);
+        }
+        else
+        {
+            /* v3 / v4: no header, single page (root only). */
+            entries_offset = 0;
+        }
 
-        pfree(bloom);
-        entry_offset += sizeof(PgTreRangeLeafEntry) + entry->bloom_bytes;
+        entries_end = (Size) (((PageHeader) rangepage)->pd_lower) -
+                      MAXALIGN(SizeOfPageHeaderData);
+
+        while (entries_offset < entries_end)
+        {
+            const PgTreRangeLeafEntry *entry =
+                (const PgTreRangeLeafEntry *) (content + entries_offset);
+            BlockNumber range_start = entry->range_start_blk;
+            BlockNumber range_end   = entry->range_end_blk;
+            Size bloom_size = pg_tre_bloom_size_bytes(meta.bloom_range_m_bits);
+            PgTreBloom *bloom;
+
+            /* Reconstruct bloom for callback while we hold the lock. */
+            bloom = (PgTreBloom *) palloc(bloom_size);
+            pg_tre_bloom_init(bloom, meta.bloom_range_m_bits,
+                              meta.bloom_range_k);
+            memcpy(pg_tre_bloom_bits(bloom),
+                   (const uint8 *) entry + sizeof(PgTreRangeLeafEntry),
+                   entry->bloom_bytes);
+
+            entries_offset += sizeof(PgTreRangeLeafEntry) + entry->bloom_bytes;
+
+            callback(range_start, range_end, bloom, ctx);
+            pfree(bloom);
+        }
+
+        UnlockReleaseBuffer(rangebuf);
+        blk = next_blk;
     }
-
-    UnlockReleaseBuffer(rangebuf);
 }
 
 /*

@@ -133,15 +133,26 @@ pg_tre_upgrade_page_to_latest(Page page)
                         (uint32) PG_TRE_FORMAT_VERSION_LATEST)));
 
     /*
-     * Per-version dispatch goes here.  Today v3 -> v4 is identity;
-     * we only need to flip the per-page version stamp.  Keep this
-     * switch even though it is currently a no-op so future arms can
-     * land without restructuring the upgrade walk.
+     * Per-version dispatch goes here.  v3 -> v4 is byte-identical for
+     * every page kind.  v4 -> v5 is byte-identical for every page kind
+     * EXCEPT PG_TRE_PAGE_RANGE, which gained a PgTreRangeHeader at the
+     * start of its content area.  We can't manufacture that header
+     * from a legacy single-page range layout without rewriting offsets
+     * (and pre-v5 range pages are guaranteed to be the only page in
+     * the chain), so we leave them at their existing format and let
+     * the read paths handle them via the v<5 back-compat branch.
      */
+    if (opq->page_kind == (uint16) PG_TRE_PAGE_RANGE && from < 5)
+        return false;
+
     switch (from)
     {
         case 3:
-            /* v3 -> v4 is byte-identical; fall through */
+        case 4:
+            /*
+             * Non-range pages: byte-identical across v3, v4, v5.  We
+             * just need to flip the per-page version stamp below.
+             */
             break;
         default:
             elog(ERROR, "pg_tre: page format upgrade from v%u not implemented",

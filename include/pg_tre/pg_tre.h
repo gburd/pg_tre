@@ -21,6 +21,12 @@
  *            today; the bump exists so the in-place upgrade machinery
  *            (pg_tre_upgrade_index) has a target version to walk to
  *            once a real format change lands.
+ *   v5     - multi-leaf range tier (Phase 8).  Range pages now carry
+ *            a PgTreRangeHeader at the start of their content area
+ *            with a right_link to the next range page in the chain.
+ *            Only RANGE pages differ between v4 and v5; other page
+ *            kinds are byte-identical.  Readers handle v<5 range
+ *            pages (no header) for back-compat with 1.4.x indexes.
  *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
  *
@@ -30,7 +36,7 @@
  * index; pg_tre_upgrade_index() rewrites pages forward and bumps that
  * field when every page is at LATEST.  See doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 4
+#define PG_TRE_FORMAT_VERSION_LATEST 5
 #define PG_TRE_FORMAT_VERSION_MIN    3
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the

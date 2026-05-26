@@ -38,7 +38,7 @@ INSERT 0 200
 CREATE INDEX ob_idx ON ob_t USING tre (body);
 psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: collected 6303 trigram entries from 210 heap tuples
 psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: built 412 posting trees
-psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: built range tier with 1 ranges
+psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: build complete, indexed 210 heap tuples into 412 trigrams
 CREATE INDEX
 ANALYZE ob_t;
