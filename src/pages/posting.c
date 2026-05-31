@@ -1380,12 +1380,316 @@ typedef struct PgTreVacUpperInternalEntry
  *
  * Residual gap (documented for the orchestrator): postings stored
  * INLINE in the upper-tree leaf entry (posting_root ==
- * InvalidBlockNumber, inline_bytes > 0) are NOT cleaned here -- doing so
- * would require rewriting upper-tree leaf pages, which this module does
- * not own.  Such inline postings are small (< PG_TRE_INLINE_POSTING_MAX
- * bytes) and their dead TIDs remain correctly filtered by the
- * executor's heap MVCC recheck; they are reclaimed on the next REINDEX.
+ * InvalidBlockNumber, inline_bytes > 0) ARE now cleaned as of 1.5.4:
+ * the upper-tree leaf page is taken EXCLUSIVE, every inline blob is
+ * repacked (dead TIDs stripped from its sparsemap and parallel payload),
+ * the entry array's inline_bytes fields are refreshed, the whole inline
+ * region is rewritten in place (it only ever shrinks), and the page is
+ * WAL-logged as a full-page image (XLOG_PTRE_VACUUM).
  */
+
+/*
+ * Repack a single inline posting blob, dropping dead TIDs.  The blob is
+ * laid out exactly like pg_tre_posting_build_finish() produces it:
+ *   [ serialized sparsemap ][ optional payload stream ]
+ * where the sparsemap's own serialized length is self-describing (so we
+ * split the payload off after sm_open_copy).  Payload entries are in
+ * sparsemap rank order, identical to an on-disk leaf.
+ *
+ * Writes the repacked blob into out_buf (which must be at least
+ * in_bytes large -- output never exceeds input) and returns its length
+ * via *out_len.  Returns the number of TIDs removed; *out_remaining
+ * receives the surviving count.
+ */
+static uint64
+repack_inline_posting(const uint8 *in, Size in_bytes,
+                      uint8 *out_buf, Size *out_len,
+                      IndexBulkDeleteCallback callback, void *callback_state,
+                      uint64 *out_remaining)
+{
+    Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+    sparsemap_t *smap;
+    Size    sm_size;
+    bool    has_payload;
+    const uint8 *payload_base = NULL;
+    const uint8 *payload_end = NULL;
+    const uint8 *entry_ptr = NULL;
+
+    uint64 *keep_tids = NULL;
+    int     keep_n = 0;
+    int     keep_cap = 0;
+    uint64  removed = 0;
+    uint64  member;
+
+    uint8  *new_payload = NULL;
+    Size    new_payload_used = 0;
+
+    /* Open a copy so we can read members; sm_get_size() on the copy
+     * yields the true serialized sparsemap prefix length. */
+    smap = sm_open_copy(in, in_bytes, 64);
+    if (smap == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("pg_tre: corrupt inline posting (sparsemap open failed)")));
+    sm_size = sm_get_size(smap);
+    if (sm_size > in_bytes)
+    {
+        sm_free(smap);
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("pg_tre: corrupt inline posting (sparsemap > blob)")));
+    }
+
+    has_payload = (in_bytes > sm_size);
+    if (has_payload)
+    {
+        payload_base = in + sm_size;
+        payload_end  = in + in_bytes;
+        entry_ptr    = payload_base;
+        new_payload  = (uint8 *) palloc(in_bytes - sm_size);
+    }
+
+    member = SM_IDX_MAX;
+    while ((member = sm_next_member(smap, member)) != SM_IDX_MAX)
+    {
+        ItemPointerData iptr;
+        bool    dead;
+        const uint8 *this_entry = NULL;
+        Size    this_entry_len = 0;
+
+        CHECK_FOR_INTERRUPTS();
+
+        if (has_payload)
+        {
+            uint16 n_pos;
+            Size   step;
+
+            if (entry_ptr + sizeof(uint16) > payload_end)
+                goto corrupt;
+            memcpy(&n_pos, entry_ptr, sizeof(uint16));
+            step = sizeof(uint16) + (Size) n_pos * sizeof(uint32) + bloom_bytes;
+            if (step > (Size) (payload_end - entry_ptr))
+                goto corrupt;
+            this_entry = entry_ptr;
+            this_entry_len = step;
+            entry_ptr += step;
+        }
+
+        pg_tre_unpack_tid(member, &iptr);
+        dead = callback(&iptr, callback_state);
+
+        if (dead)
+        {
+            removed++;
+            continue;
+        }
+
+        if (keep_n >= keep_cap)
+        {
+            keep_cap = keep_cap ? keep_cap * 2 : 64;
+            keep_tids = (uint64 *) (keep_tids
+                ? repalloc(keep_tids, (Size) keep_cap * sizeof(uint64))
+                : palloc((Size) keep_cap * sizeof(uint64)));
+        }
+        keep_tids[keep_n++] = member;
+
+        if (has_payload)
+        {
+            memcpy(new_payload + new_payload_used, this_entry, this_entry_len);
+            new_payload_used += this_entry_len;
+        }
+    }
+
+    sm_free(smap);
+
+    if (out_remaining)
+        *out_remaining = (uint64) keep_n;
+
+    /* Nothing dead: hand back the original blob verbatim. */
+    if (removed == 0)
+    {
+        memcpy(out_buf, in, in_bytes);
+        *out_len = in_bytes;
+        if (keep_tids)
+            pfree(keep_tids);
+        if (new_payload)
+            pfree(new_payload);
+        return 0;
+    }
+
+    /* Rebuild the sparsemap from survivors. */
+    {
+        sparsemap_t *fresh;
+        Size    new_sm_size;
+        int     k;
+
+        fresh = sm_create((size_t) keep_n * 16 + 1024);
+        if (fresh == NULL)
+            ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                errmsg("pg_tre: failed to allocate sparsemap for inline vacuum repack")));
+        for (k = 0; k < keep_n; k++)
+        {
+            int retries = 0;
+            CHECK_FOR_INTERRUPTS();
+            while (sm_add_grow(&fresh, keep_tids[k]) == SM_IDX_MAX)
+            {
+                if (++retries > 16)
+                {
+                    sm_free(fresh);
+                    ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                        errmsg("pg_tre: inline vacuum repack sm_add_grow exhausted retries")));
+                }
+            }
+        }
+        new_sm_size = sm_get_size(fresh);
+
+        if (new_sm_size + new_payload_used > in_bytes)
+        {
+            sm_free(fresh);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: inline vacuum repack overflow")));
+        }
+
+        memcpy(out_buf, sm_get_data(fresh), new_sm_size);
+        if (new_payload_used > 0)
+            memcpy(out_buf + new_sm_size, new_payload, new_payload_used);
+        *out_len = new_sm_size + new_payload_used;
+        sm_free(fresh);
+    }
+
+    if (keep_tids)
+        pfree(keep_tids);
+    if (new_payload)
+        pfree(new_payload);
+    return removed;
+
+corrupt:
+    sm_free(smap);
+    if (keep_tids)
+        pfree(keep_tids);
+    if (new_payload)
+        pfree(new_payload);
+    ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("pg_tre: corrupt inline posting payload")));
+    return 0;                   /* unreachable */
+}
+
+/*
+ * Repack all inline postings on one upper-tree leaf page, dropping dead
+ * TIDs.  The caller holds an EXCLUSIVE lock on buf.  Rewrites the inline
+ * region (concatenated blobs after the entry array) in place -- output
+ * is always <= input since we only remove -- refreshes each entry's
+ * inline_bytes, fixes pd_lower, WAL-logs the page, and leaves the lock
+ * held (caller releases).  Returns the number of TIDs removed across all
+ * inline entries; accumulates surviving inline TIDs into *out_remaining.
+ */
+static uint64
+posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
+                           IndexBulkDeleteCallback callback,
+                           void *callback_state, uint64 *out_remaining)
+{
+    Page    page = BufferGetPage(buf);
+    PageTreOpaque opq = PageTreGetOpaque(page);
+    PgTreUpperLeafEntry *entries =
+        (PgTreUpperLeafEntry *) PageGetContents(page);
+    int     n_entries = opq->flags;
+    uint8  *inline_region;
+    Size    old_region_used = 0;
+    Size    new_region_used = 0;
+    uint8  *new_region = NULL;
+    uint64  removed = 0;
+    int     i;
+    bool    any_inline = false;
+
+    if (n_entries == 0)
+        n_entries = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
+                  / sizeof(PgTreUpperLeafEntry);
+    if (n_entries <= 0)
+        return 0;
+
+    for (i = 0; i < n_entries; i++)
+    {
+        if (entries[i].inline_bytes > 0)
+        {
+            any_inline = true;
+            old_region_used += entries[i].inline_bytes;
+        }
+    }
+    if (!any_inline)
+        return 0;
+
+    /* Inline region begins immediately after the entry array. */
+    inline_region = (uint8 *) &entries[n_entries];
+
+    /*
+     * Bounds-check the region against pd_lower before touching it.  The
+     * entry array + inline region together end at pd_lower.
+     */
+    {
+        Size content_off = (char *) inline_region - (char *) page;
+        if (content_off + old_region_used > (Size) ((PageHeader) page)->pd_lower)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt upper leaf inline region at block %u",
+                            blkno)));
+    }
+
+    /* Repack each blob into a fresh contiguous region (<= old size). */
+    new_region = (uint8 *) palloc(old_region_used);
+    {
+        Size    in_off = 0;
+        for (i = 0; i < n_entries; i++)
+        {
+            Size    blob_in = entries[i].inline_bytes;
+            Size    blob_out = 0;
+            uint64  blob_remaining = 0;
+
+            if (blob_in == 0)
+                continue;
+
+            removed += repack_inline_posting(inline_region + in_off, blob_in,
+                                             new_region + new_region_used,
+                                             &blob_out, callback,
+                                             callback_state, &blob_remaining);
+            entries[i].inline_bytes = (uint32) blob_out;
+            new_region_used += blob_out;
+            in_off += blob_in;
+            if (out_remaining)
+                *out_remaining += blob_remaining;
+        }
+    }
+
+    /* Nothing actually removed: drop the rebuilt copy, leave page as-is. */
+    if (removed == 0)
+    {
+        /* entries[].inline_bytes are unchanged on the no-removal path
+         * (repack_inline_posting copies the blob verbatim and returns the
+         * same length), so the page content is byte-identical. */
+        pfree(new_region);
+        return 0;
+    }
+
+    /* Write the repacked inline region back in place and shrink pd_lower. */
+    memcpy(inline_region, new_region, new_region_used);
+    ((PageHeader) page)->pd_lower =
+        ((char *) inline_region + new_region_used) - (char *) page;
+    pfree(new_region);
+
+    MarkBufferDirty(buf);
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_VACUUM);
+        PageSetLSN(page, recptr);
+    }
+
+    return removed;
+}
 
 /*
  * Repack one posting leaf, dropping dead TIDs.  Returns the number of
@@ -1717,11 +2021,9 @@ posting_tree_delete(Relation index, BlockNumber root,
  * pages dispatch to children; leaf pages enumerate their entries.
  *
  * Inline postings (posting_root == InvalidBlockNumber, inline_bytes > 0)
- * are skipped (see the residual-gap note at the top of this section);
- * their count of surviving TIDs is not added to *tuples_remaining, so
- * the reported num_index_tuples slightly undercounts when inline
- * postings are present -- this is honest (it never reports the false
- * zero the old no-op did) and conservative.
+ * are repacked in place on the leaf page itself (see
+ * posting_leaf_inline_delete); their surviving TIDs are counted into
+ * *tuples_remaining, so num_index_tuples is now exact.
  */
 static void
 posting_upper_walk(Relation index, BlockNumber blk,
@@ -1735,7 +2037,14 @@ posting_upper_walk(Relation index, BlockNumber blk,
 
     CHECK_FOR_INTERRUPTS();
 
-    buf = pg_tre_read(index, blk, PG_TRE_PAGE_INVALID, BUFFER_LOCK_SHARE);
+    /*
+     * Lock EXCLUSIVE up front: internal pages downgrade-by-releasing
+     * before recursing, but leaf pages may need to rewrite inline blobs
+     * in place, so we cannot use a SHARE lock for them.  We do not know
+     * the page kind until we read it; taking EXCLUSIVE unconditionally is
+     * simplest and the upper tree is tiny relative to posting trees.
+     */
+    buf = pg_tre_read(index, blk, PG_TRE_PAGE_INVALID, BUFFER_LOCK_EXCLUSIVE);
     page = BufferGetPage(buf);
     opq = PageTreGetOpaque(page);
 
@@ -1769,12 +2078,15 @@ posting_upper_walk(Relation index, BlockNumber blk,
 
     if (opq->page_kind == PG_TRE_PAGE_UPPER_L)
     {
-        /* Leaf node: collect posting roots, then release before deleting. */
+        /* Leaf node: collect posting roots, repack inline postings in
+         * place (while we still hold the exclusive lock), then release
+         * before descending into the out-of-line posting trees. */
         PgTreUpperLeafEntry *entries =
             (PgTreUpperLeafEntry *) PageGetContents(page);
         int n = opq->flags;
         BlockNumber *roots = NULL;
         int roots_n = 0;
+        uint64 inline_removed;
         int i;
 
         if (n == 0)
@@ -1786,11 +2098,19 @@ posting_upper_walk(Relation index, BlockNumber blk,
             roots = (BlockNumber *) palloc((Size) n * sizeof(BlockNumber));
             for (i = 0; i < n; i++)
             {
-                /* Skip inline postings (no separate root page). */
+                /* Out-of-line posting trees are handled after release. */
                 if (BlockNumberIsValid(entries[i].posting_root))
                     roots[roots_n++] = entries[i].posting_root;
             }
         }
+
+        /* Repack inline postings in place under the exclusive lock. */
+        inline_removed = posting_leaf_inline_delete(index, buf, blk, callback,
+                                                    callback_state,
+                                                    tuples_remaining);
+        if (tuples_removed)
+            *tuples_removed += inline_removed;
+
         UnlockReleaseBuffer(buf);
 
         for (i = 0; i < roots_n; i++)

@@ -6,6 +6,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.4] - 2026-05-31 - inline-posting vacuum cleanup, NFA-count hardening
+
+Correctness/hardening release on the 1.5.0 lineage.  No
+on-disk format change (remains v5); no REINDEX required.
+Upgrade script `1.5.3--1.5.4` is a no-op stub that only bumps
+the recorded extension version.
+
+### Fixed
+
+- **`ambulkdelete` now cleans INLINE postings** (C2 residual):
+  small posting lists stored directly in upper-tree leaf
+  entries (rather than out-of-line posting trees) were
+  previously skipped by `VACUUM`, leaving their dead TIDs to be
+  filtered only by heap MVCC recheck until the next `REINDEX`.
+  The leaf's inline region (concatenated sparsemap + payload
+  blobs) is now repacked in place under an exclusive lock, each
+  entry's `inline_bytes` is refreshed, `pd_lower` is shrunk, and
+  the page is WAL-logged as a full-page image (`XLOG_PTRE_VACUUM`).
+- **Exact `num_index_tuples`**: because both out-of-line posting
+  trees and inline postings are now fully traversed during
+  `ambulkdelete`, the reported live-tuple count is exact;
+  `estimated_count` is no longer set on the bulkdelete path.
+- **NFA-state-count guard** (H5): `pattern_cache` now rejects a
+  compiled regex whose internal NFA state count reads back
+  negative (corruption / overflow), which would otherwise slip
+  past the `pg_tre.max_nfa_states` `>` comparison and silently
+  disable the DoS cap.
+
+### Added
+
+- `test/sql/vacuum_inline.sql` regression: deletes rows from a
+  table whose postings stay inline, `VACUUM`s, and verifies the
+  index-scan row set still equals the seq-scan row set (including
+  a fully-emptied inline posting), guarding the in-place inline
+  rewrite against corruption.
+
+### Build
+
+- Bumped the vendored `lime` parser-generator submodule to
+  `v0.8.7`.  The generator (build-time LALR(1) codegen only; not
+  linked into `pg_tre.so`) was restructured upstream so the Rust
+  output feature now lives in `src/emit_rust.c`; the `lime`
+  binary build rule now compiles that translation unit alongside
+  `lime.c`.  Regenerates `src/query/tre_grammar.c`; verified by a
+  full clean rebuild + 18/18 regression pass.
+
+### Known limitations
+
+- Emptied posting leaves are repacked but **not** physically
+  freed to the free-space map.  Safe physical reclaim requires
+  an nbtree-style page deletion / recycle protocol (half-dead
+  marking, right-link re-routing, XID-gated recycling) because
+  `VACUUM` runs concurrently with lock-coupling-free right-link
+  scans.  Tracked as future work; `pages_deleted` / `pages_free`
+  remain 0.
+
 ## [1.5.3] - 2026-05-31 - version-consistency patch
 
 Documentation/version-consistency patch.  No on-disk format

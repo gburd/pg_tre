@@ -1,0 +1,134 @@
+-- C2 residual (1.5.4): ambulkdelete cleans INLINE postings.
+--
+-- Small posting lists (< PG_TRE_INLINE_POSTING_MAX TIDs per trigram)
+-- are stored inline in the upper-tree leaf entry rather than in an
+-- out-of-line posting tree.  Before 1.5.4 ambulkdelete skipped inline
+-- postings; now it repacks the leaf's inline region in place.  This
+-- test deletes rows, VACUUMs (driving ambulkdelete over inline
+-- postings), and verifies (a) the index-scan row set still equals the
+-- seq-scan row set, (b) deleted rows are gone, and (c) the in-place
+-- inline rewrite did not corrupt the index (subsequent scans succeed).
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/vacuum_inline.sql:12: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS vinl;
+psql:test/sql/vacuum_inline.sql:14: NOTICE:  table "vinl" does not exist, skipping
+DROP TABLE
+CREATE TABLE vinl (id serial PRIMARY KEY, body text);
+CREATE TABLE
+-- A modest row count keeps every trigram's posting list inline.
+INSERT INTO vinl(body)
+SELECT (ARRAY['apple pie','cherry tart','apple fritter','banana split',
+              'apple cobbler','grape jelly','cherry cordial','plum cake'])[1 + (g % 8)]
+FROM generate_series(1, 400) g;
+INSERT 0 400
+SET client_min_messages = 'warning';
+SET
+CREATE INDEX vinl_idx ON vinl USING tre (body);
+CREATE INDEX
+RESET client_min_messages;
+RESET
+-- Drain anything pending into the inline postings first.
+VACUUM vinl;
+VACUUM
+CREATE OR REPLACE FUNCTION vinl_diff(pat text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE seq_ids int[]; idx_ids int[];
+BEGIN
+  SET LOCAL enable_indexscan=off;
+  SET LOCAL enable_bitmapscan=off;
+  SET LOCAL enable_seqscan=on;
+  EXECUTE format('SELECT array_agg(id ORDER BY id) FROM vinl '
+                 'WHERE tre_amatch(body, %L, 0)', pat) INTO seq_ids;
+  SET LOCAL enable_seqscan=off;
+  SET LOCAL enable_indexscan=on;
+  SET LOCAL enable_bitmapscan=on;
+  EXECUTE format('SELECT array_agg(id ORDER BY id) FROM vinl '
+                 'WHERE body %%~~ tre_pattern(%L, 0)', pat) INTO idx_ids;
+  IF seq_ids IS NOT DISTINCT FROM idx_ids THEN
+    RETURN 'OK  ' || pat;
+  END IF;
+  RETURN format('BAD %s  seq=%s  idx=%s', pat, seq_ids, idx_ids);
+END$$;
+CREATE FUNCTION
+-- Baseline: index agrees with the heap.
+SELECT vinl_diff('apple');
+ vinl_diff 
+-----------
+ OK  apple
+(1 row)
+
+SELECT vinl_diff('cherry');
+ vinl_diff  
+------------
+ OK  cherry
+(1 row)
+
+SELECT vinl_diff('grape');
+ vinl_diff 
+-----------
+ OK  grape
+(1 row)
+
+-- Delete a large fraction of rows, then VACUUM: ambulkdelete must strip
+-- the dead TIDs from the inline postings.
+DELETE FROM vinl WHERE id % 2 = 0;
+DELETE 200
+VACUUM vinl;
+VACUUM
+-- After the inline rewrite, the index still agrees with the heap and
+-- the deleted (even-id) rows are absent from both sides.
+SELECT vinl_diff('apple');
+ vinl_diff 
+-----------
+ OK  apple
+(1 row)
+
+SELECT vinl_diff('cherry');
+ vinl_diff  
+------------
+ OK  cherry
+(1 row)
+
+SELECT vinl_diff('grape');
+ vinl_diff 
+-----------
+ OK  grape
+(1 row)
+
+SELECT vinl_diff('banana');
+ vinl_diff  
+------------
+ OK  banana
+(1 row)
+
+SELECT vinl_diff('plum');
+ vinl_diff 
+-----------
+ OK  plum
+(1 row)
+
+-- Delete everything matching one term, VACUUM, and confirm the emptied
+-- inline posting matches nothing (and does not error).
+DELETE FROM vinl WHERE body LIKE 'grape%';
+DELETE 50
+VACUUM vinl;
+VACUUM
+SELECT vinl_diff('grape');   -- both sides empty
+ vinl_diff 
+-----------
+ OK  grape
+(1 row)
+
+SELECT vinl_diff('apple');   -- unaffected term still consistent
+ vinl_diff 
+-----------
+ OK  apple
+(1 row)
+
+DROP FUNCTION vinl_diff(text);
+DROP FUNCTION
+DROP INDEX vinl_idx;
+DROP INDEX
+DROP TABLE vinl;
+DROP TABLE

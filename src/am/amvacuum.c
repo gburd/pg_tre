@@ -10,11 +10,16 @@
  *   - amvacuumcleanup: merge the pending list into posting trees and
  *     report index-size statistics.
  *
- * Residual gap: postings stored INLINE in the upper-tree leaf entries
- * are not cleaned (rewriting upper-tree pages is outside the posting
- * module's ownership); their dead TIDs remain correctly filtered by the
- * executor's heap MVCC recheck and are reclaimed on the next REINDEX.
- * See pg_tre_posting_bulk_delete() in src/pages/posting.c.
+ * INLINE postings stored directly in upper-tree leaf entries are also
+ * cleaned as of 1.5.4 (posting_leaf_inline_delete in posting.c rewrites
+ * the leaf's inline region in place), so num_index_tuples is exact.
+ *
+ * Residual gap: emptied posting leaves are repacked but not physically
+ * freed to the free-space map.  Safe reclaim would require an
+ * nbtree-style page deletion / recycle protocol (half-dead marking,
+ * right-link re-routing, XID-gated recycling) because VACUUM runs
+ * concurrently with lock-coupling-free right-link scans; that is tracked
+ * future work.  pages_deleted / pages_free therefore stay 0 (honest).
  */
 
 #include "postgres.h"
@@ -56,13 +61,14 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
     /*
      * Accumulate across the (possibly multiple) ambulkdelete calls VACUUM
      * makes for one index.  tuples_removed is additive; num_index_tuples
-     * tracks the most recent surviving-count observation.  num_index_tuples
-     * is an estimate because INLINE postings (see file header) are not
-     * traversed, so the true remaining count may be slightly higher.
+     * tracks the most recent surviving-count observation.  Each call
+     * re-walks the whole index (out-of-line posting trees AND inline
+     * postings), so the latest `remaining` is the authoritative exact
+     * live-tuple count -- num_index_tuples is no longer an estimate.
      */
     stats->tuples_removed += (double) removed;
     stats->num_index_tuples = (double) remaining;
-    stats->estimated_count = true;
+    stats->estimated_count = false;
 
     /* Total physical pages in the index relation's main fork. */
     stats->num_pages = RelationGetNumberOfBlocks(info->index);

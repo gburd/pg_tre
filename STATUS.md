@@ -1,8 +1,20 @@
 # pg_tre status
 
-Released: **1.5.2** (2026-05).  See `CHANGELOG.md` for full
+Released: **1.5.4** (2026-05).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+1.5.4 is a correctness/hardening release on the 1.5.0
+lineage: same on-disk format (v5), no re-index required.
+Headline fixes: `ambulkdelete` now also cleans INLINE
+postings stored directly in upper-tree leaf entries (it
+rewrites the leaf's inline region in place), so `num_index_tuples`
+is reported exactly; the compiled-NFA state count is guarded
+against a corrupt/negative value that could otherwise bypass
+the `pg_tre.max_nfa_states` DoS cap.  Known residual: emptied
+posting leaves are repacked but not yet physically freed to the
+free-space map (safe reclaim needs an nbtree-style page
+deletion/recycle protocol; tracked as future work).
 
 1.5.2 is a production-readiness audit patch on the 1.5.0
 lineage: same on-disk format (v5), no re-index required.

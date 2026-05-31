@@ -1,0 +1,7 @@
+-- pg_tre 1.5.3 -> 1.5.4 upgrade.
+--
+-- No catalog changes: 1.5.4 is a C-level correctness/hardening release
+-- (ambulkdelete now cleans INLINE postings stored in upper-tree leaves,
+-- exact num_index_tuples reporting, and a defensive guard on the
+-- compiled-NFA state count).  This upgrade script is an intentional
+-- no-op.

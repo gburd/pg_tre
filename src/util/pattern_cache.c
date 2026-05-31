@@ -134,6 +134,23 @@ tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
     {
         int nstates = tre_pattern_num_states(compiled);
 
+        /*
+         * H5 hardening: num_states is a plain int read out of TRE's
+         * internal tnfa.  A healthy compile yields a small non-negative
+         * count, but treat a negative value (which would otherwise slip
+         * past the `>` guard and disable the DoS cap) as corruption and
+         * refuse the pattern.  -1 specifically means "no internal NFA",
+         * which should never happen for a successfully compiled handle.
+         */
+        if (nstates < 0)
+        {
+            tre_free_pattern(compiled);
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
+                     errmsg("pg_tre: compiled regex reported an invalid "
+                            "NFA state count (%d)", nstates)));
+        }
+
         if (nstates > pg_tre_max_nfa_states)
         {
             tre_free_pattern(compiled);
