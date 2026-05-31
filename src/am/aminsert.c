@@ -10,6 +10,8 @@
 
 #include <string.h>
 
+#include "varatt.h"
+
 #include "access/amapi.h"
 #include "access/genam.h"
 #include "nodes/execnodes.h"

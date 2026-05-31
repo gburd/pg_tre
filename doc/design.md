@@ -98,7 +98,8 @@ carries the format version of the entire index.
 
 ### 3.4 Trigram extraction (Phase 3.5: codepoint-based)
 
-**BREAKING CHANGE (v2 format):** pg_tre indexes text using **Unicode
+**Codepoint trigrams (introduced in format v2; current on-disk
+format is v5):** pg_tre indexes text using **Unicode
 codepoint trigrams**, not byte trigrams.
 
 Each trigram is a sequence of 3 consecutive Unicode codepoints (int32

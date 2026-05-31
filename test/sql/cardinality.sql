@@ -10,6 +10,11 @@
 
 CREATE EXTENSION IF NOT EXISTS pg_tre;
 
+-- Force the shared library (and thus its custom GUCs) to load so that
+-- SHOW pg_tre.min_trigram_freq below is recognized even in a backend
+-- that has not yet touched a pg_tre index.
+LOAD 'pg_tre';
+
 DROP TABLE IF EXISTS card_t CASCADE;
 CREATE TABLE card_t (id serial, body text);
 

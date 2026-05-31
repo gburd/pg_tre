@@ -15,7 +15,9 @@
  *     rebuild; page reuse lands with the Lehman-Yao insert in Phase 8.
  *
  * WAL records emitted:
- *   - XLOG_PTRE_PENDING_INSERT (FPI on the tail page + meta page)
+ *   - XLOG_PTRE_PENDING_INSERT (FPI on the tail page + meta page; when
+ *     a full tail page was just linked to a new one, the old tail is
+ *     carried as a third FPI block so the next_page link replays)
  *   - XLOG_PTRE_PENDING_MERGE_BEGIN / _COMMIT (FPI framing)
  * Merge-produced posting / upper pages use the Phase 2 INSERT records.
  */
@@ -104,7 +106,7 @@ pending_page_init(Page page)
  */
 static void
 acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
-             bool *tail_is_new)
+             Buffer *prev_tail_buf_out, bool *tail_is_new)
 {
     Buffer   metabuf;
     Page     metapage;
@@ -117,6 +119,7 @@ acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
     meta = PgTreMetaPageGet(metapage);
 
     *tail_is_new = false;
+    *prev_tail_buf_out = InvalidBuffer;
 
     if (meta->pending_tail == InvalidBlockNumber)
     {
@@ -141,7 +144,18 @@ acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
             pending_header(BufferGetPage(tailbuf))->next_page =
                 BufferGetBlockNumber(newbuf);
             MarkBufferDirty(tailbuf);
-            UnlockReleaseBuffer(tailbuf);
+
+            /*
+             * Hand the old tail back to the caller *still locked* so the
+             * next_page link mutation can be WAL-logged in the same
+             * record that initializes the new tail.  Releasing it here
+             * (as a prior version did) left the link change un-logged:
+             * the append record only covered meta + the new tail, so a
+             * standby/crash-recovery replay never learned that the old
+             * tail points at the new one, silently breaking the chain
+             * and dropping every entry past the old tail on scan.
+             */
+            *prev_tail_buf_out = tailbuf;
 
             meta->pending_tail = BufferGetBlockNumber(newbuf);
             tailbuf = newbuf;
@@ -158,7 +172,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
                             const ItemPointerData *tids,
                             const uint32 *positions, int n)
 {
-    Buffer  metabuf, tailbuf;
+    Buffer  metabuf, tailbuf, prev_tailbuf;
     bool    tail_is_new;
     PgTrePendingHeader *hdr;
     PgTrePendingEntry  *entries;
@@ -175,7 +189,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
 
     while (n > 0)
     {
-        acquire_tail(index, &metabuf, &tailbuf, &tail_is_new);
+        acquire_tail(index, &metabuf, &tailbuf, &prev_tailbuf, &tail_is_new);
         tailpage = BufferGetPage(tailbuf);
         metapage = BufferGetPage(metabuf);
         hdr     = pending_header(tailpage);
@@ -185,6 +199,8 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
         if (room <= 0)
         {
             /* Shouldn't happen: acquire_tail just checked.  Defensive. */
+            if (BufferIsValid(prev_tailbuf))
+                UnlockReleaseBuffer(prev_tailbuf);
             UnlockReleaseBuffer(tailbuf);
             UnlockReleaseBuffer(metabuf);
             continue;
@@ -227,6 +243,15 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
                                    REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
                 XLogRegisterBuffer(1, tailbuf,
                                    REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+                /*
+                 * When the previous tail was full we just linked it to
+                 * this new page.  That next_page mutation MUST travel in
+                 * the same record, or recovery/standby loses the chain
+                 * link.  Ship it as a full-page image (block 2).
+                 */
+                if (BufferIsValid(prev_tailbuf))
+                    XLogRegisterBuffer(2, prev_tailbuf,
+                                       REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
                 recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_INSERT);
             }
             else
@@ -264,8 +289,12 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
             }
             PageSetLSN(tailpage, recptr);
             PageSetLSN(metapage, recptr);
+            if (BufferIsValid(prev_tailbuf))
+                PageSetLSN(BufferGetPage(prev_tailbuf), recptr);
         }
 
+        if (BufferIsValid(prev_tailbuf))
+            UnlockReleaseBuffer(prev_tailbuf);
         UnlockReleaseBuffer(tailbuf);
         UnlockReleaseBuffer(metabuf);
 
@@ -757,27 +786,32 @@ snapshot_existing_upper(Relation index, RebuildState *r,
         r->existing_inline = MemoryContextAllocZero(mcxt,
                                n * sizeof(uint8 *));
 
-        for (i = 0; i < n; i++)
+        /*
+         * Inline blobs are concatenated after the entry array, in entry
+         * order, without per-entry offsets (see pg_tre_upper_lookup).
+         * We already hold a SHARE lock on this leaf page, so we MUST NOT
+         * call pg_tre_upper_lookup() here -- it would re-read and re-lock
+         * the same buffer, tripping the bufmgr "already locked" assert
+         * under VACUUM.  Instead we copy the blob straight out of the
+         * page we hold, tracking the running offset just as the lookup
+         * path does.
+         */
         {
-            r->existing[i] = src[i];
-            if (src[i].inline_bytes > 0)
+            Size  inline_offset = 0;
+            const uint8 *blob_base = (const uint8 *) &src[n];
+
+            for (i = 0; i < n; i++)
             {
-                /* Inline data follows the entry array; but Agent B's
-                 * upper.c stores it differently.  For Phase 4 we rely
-                 * on pg_tre_upper_lookup to fetch inline bytes on
-                 * demand rather than coping from the buffer layout. */
-                PgTreUpperRef ref;
-                if (pg_tre_upper_lookup(index, src[i].trigram_hash, &ref))
+                r->existing[i] = src[i];
+                if (src[i].inline_bytes > 0)
                 {
-                    if (ref.inline_bytes > 0 && ref.inline_data != NULL)
-                    {
-                        uint8 *copy = MemoryContextAlloc(mcxt,
-                                         ref.inline_bytes);
-                        memcpy(copy, ref.inline_data, ref.inline_bytes);
-                        r->existing_inline[i]    = copy;
-                        r->existing[i].inline_bytes = ref.inline_bytes;
-                    }
-                    pg_tre_upper_release(&ref);
+                    uint8 *copy = MemoryContextAlloc(mcxt,
+                                     src[i].inline_bytes);
+                    memcpy(copy, blob_base + inline_offset,
+                           src[i].inline_bytes);
+                    r->existing_inline[i]       = copy;
+                    r->existing[i].inline_bytes = src[i].inline_bytes;
+                    inline_offset += src[i].inline_bytes;
                 }
             }
         }

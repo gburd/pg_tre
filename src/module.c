@@ -15,6 +15,7 @@
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/tuplestore.h"
 
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/amapi.h"

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "tre.h"
+#include "tre-internal.h"
 #include "pg_tre/tre_match.h"
 
 void *
@@ -44,6 +45,25 @@ tre_free_pattern(void *compiled)
     free(compiled);
 }
 
+/*
+ * Return the number of states in the compiled NFA, or -1 if the handle
+ * is NULL or carries no internal NFA.  Used by the caller to reject
+ * patterns whose compiled automaton is large enough to make matching
+ * pathologically slow (the per-string match cost is roughly
+ * O(num_states * string_len * max_cost)).
+ */
+int
+tre_pattern_num_states(void *compiled)
+{
+    regex_t *preg = (regex_t *) compiled;
+    tre_tnfa_t *tnfa;
+
+    if (preg == NULL || preg->value == NULL)
+        return -1;
+    tnfa = (tre_tnfa_t *) preg->value;
+    return tnfa->num_states;
+}
+
 TreMatchResult
 tre_do_match(void *compiled, const char *str, int str_len,
              int max_cost, int cost_ins, int cost_del,
@@ -68,6 +88,26 @@ tre_do_match(void *compiled, const char *str, int str_len,
     params.max_del   = max_del;
     params.max_subst = max_subst;
     params.max_err   = max_err;
+
+    /*
+     * Bound the edit-distance search space by max_cost.  Callers pass
+     * INT_MAX for the individual max_ins/max_del/max_subst/max_err
+     * limits, relying on max_cost alone; but leaving them at INT_MAX
+     * makes TRE allocate and explore a far larger reach space than the
+     * cost ceiling can ever accept.  When max_cost is finite and edit
+     * operations have unit (>=1) cost, no individual edit count can
+     * exceed max_cost, so clamp the per-operation limits down to it.
+     * This is the practical DoS bound on match work: with the NFA-state
+     * cap (pattern_cache.c) and this cost clamp, per-string match cost
+     * is O(num_states * str_len * max_cost), all three bounded.
+     */
+    if (max_cost >= 0 && max_cost != INT_MAX)
+    {
+        if (params.max_err > max_cost)   params.max_err = max_cost;
+        if (params.max_ins > max_cost)   params.max_ins = max_cost;
+        if (params.max_del > max_cost)   params.max_del = max_cost;
+        if (params.max_subst > max_cost) params.max_subst = max_cost;
+    }
 
     memset(&amatch, 0, sizeof(amatch));
     amatch.nmatch = 1;

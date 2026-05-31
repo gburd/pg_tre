@@ -85,7 +85,7 @@ EXPLAIN (COSTS ON)
     SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0);
                                          QUERY PLAN                                         
 --------------------------------------------------------------------------------------------
- Index Scan using idx_auto_small on planner_auto_small  (cost=18.00..52.04 rows=1 width=48)
+ Index Scan using idx_auto_small on planner_auto_small  (cost=18.00..52.06 rows=1 width=48)
    Index Cond: (body %~~ 'approximate'::tre_pattern)
 (2 rows)
 

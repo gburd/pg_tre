@@ -2,7 +2,7 @@
 
 **PostgreSQL 18+ native index access method for approximate regex matching.**
 
-[![Status](https://img.shields.io/badge/status-1.2.1_released-green)](STATUS.md)
+[![Status](https://img.shields.io/badge/status-1.5.0_released-green)](STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
 
@@ -547,10 +547,11 @@ Packaging templates for Debian (`debian/`), RPM
 ## Status and roadmap
 
 See [STATUS.md](STATUS.md) for the release-state tracker.
-Current state is **1.2.1** — production release with the
-`<@>` similarity operator, replication-correctness fixes,
-and a full Tier-3 testing apparatus (sanitizer CI, shell
-test scripts for `wal_audit`, `replication`, `stress`).
+Current state is **1.5.0** — production release with the
+`<@>` similarity operator, multi-leaf right-link-chained
+range tier (on-disk format v5), replication-correctness
+fixes, and a full Tier-3 testing apparatus (sanitizer CI,
+shell test scripts for `wal_audit`, `replication`, `stress`).
 
 - **Feature-complete**: build, scan, incremental writes,
   crash recovery (single-node), approximate regex k≤2,

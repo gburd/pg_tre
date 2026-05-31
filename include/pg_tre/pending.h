@@ -17,6 +17,7 @@
 #include "postgres.h"
 
 #include "storage/itemptr.h"
+#include "storage/bufpage.h"
 #include "utils/rel.h"
 
 /*

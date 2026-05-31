@@ -26,6 +26,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "executor/tuptable.h"
+#include "miscadmin.h"
 #include "nodes/tidbitmap.h"
 #include "storage/bufmgr.h"
 #include "utils/elog.h"
@@ -547,6 +548,20 @@ typedef struct TriUpperCache
 } TriUpperCache;
 
 /*
+ * Compare two cache entries by hash; used to sort the cache after build
+ * so lookups can binary-search instead of linear-scanning.  At T query
+ * trigrams the old linear lookup made the C-candidate filter loops
+ * O(C*T^2); bsearch makes them O(C*T*log T).
+ */
+static int
+tri_upper_entry_cmp(const void *a, const void *b)
+{
+    uint64 x = ((const TriUpperCacheEntry *) a)->hash;
+    uint64 y = ((const TriUpperCacheEntry *) b)->hash;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+/*
  * Look up a trigram_hash in the cache.  Returns true iff a cache
  * entry exists AND the upper-tree lookup found the trigram (i.e.
  * pg_tre_upper_lookup would have returned true).  When true, *out is
@@ -554,27 +569,40 @@ typedef struct TriUpperCache
  * InvalidBuffer; the caller must NOT call pg_tre_upper_release on
  * it (and doing so would be a no-op anyway since BufferIsValid is
  * false).
+ *
+ * Entries are kept sorted by hash (see tri_upper_cache_build), so this
+ * is a binary search.
  */
 static inline bool
 tri_upper_cache_lookup(const TriUpperCache *cache, uint64 hash,
                        PgTreUpperRef *out)
 {
-    int i;
+    int lo, hi;
 
-    if (cache == NULL)
+    if (cache == NULL || cache->n <= 0)
         return false;
-    for (i = 0; i < cache->n; i++)
+
+    lo = 0;
+    hi = cache->n - 1;
+    while (lo <= hi)
     {
-        if (cache->entries[i].hash == hash)
+        int           mid = lo + (hi - lo) / 2;
+        uint64        h = cache->entries[mid].hash;
+
+        if (h == hash)
         {
-            if (!cache->entries[i].present)
+            if (!cache->entries[mid].present)
                 return false;
             out->upper_buf = InvalidBuffer;
-            out->root = cache->entries[i].root;
-            out->inline_data = cache->entries[i].inline_data;
-            out->inline_bytes = cache->entries[i].inline_bytes;
+            out->root = cache->entries[mid].root;
+            out->inline_data = cache->entries[mid].inline_data;
+            out->inline_bytes = cache->entries[mid].inline_bytes;
             return true;
         }
+        else if (h < hash)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
     }
     return false;
 }
@@ -670,6 +698,16 @@ tri_upper_cache_build(TriUpperCache *cache, Relation index,
             cache->n++;
         }
     }
+
+    /*
+     * Sort entries by hash so tri_upper_cache_lookup() can binary-search.
+     * Build-time dedup above stays a linear scan (it runs O(T) times over
+     * a growing list of <= T distinct entries, off the per-candidate hot
+     * path), but the lookup is called C*T times during filtering.
+     */
+    if (cache->n > 1)
+        qsort(cache->entries, cache->n, sizeof(TriUpperCacheEntry),
+              tri_upper_entry_cmp);
 }
 
 /*
@@ -749,7 +787,13 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
             bloom_bytes = sizeof(bloom_buf) - header_bytes;
     }
 
-    refined = sm_create(sm_get_capacity(candidates) * 2 + 256);
+    /*
+     * The refined map is always a subset of the candidates, so it can
+     * never need more capacity than the candidate map.  sm_add_grow()
+     * handles any incremental growth, so size at 1x (matching the
+     * positional filter below) instead of over-allocating 2x+256.
+     */
+    refined = sm_create(sm_get_capacity(candidates));
     if (refined == NULL)
         return candidates;  /* OOM; fall back to unrefined */
 
@@ -1261,16 +1305,30 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
     if (result != NULL)
     {
-        if (sm_cardinality(result) > 0)
+        uint64 card = sm_cardinality(result);
+
+        if (card > 0)
         {
+            /*
+             * Emit all candidate TIDs in a single tbm_add_tuples() call
+             * rather than one per TID.  The 'recheck' flag is true
+             * because the index's trigram / bloom / positional filters
+             * are approximate: the executor must recheck the WHERE
+             * clause per row.  (This is recheck, NOT lossy block-level
+             * matching - the bitmap stays exact at the TID level until
+             * it overflows work_mem.)
+             */
+            ItemPointer tids = (ItemPointer)
+                palloc(sizeof(ItemPointerData) * card);
             uint64 i = SM_IDX_MAX;
+            int n = 0;
+
             while ((i = sm_next_member(result, i)) != SM_IDX_MAX)
-            {
-                ItemPointerData tid;
-                pg_tre_unpack_tid(i, &tid);
-                tbm_add_tuples(tbm, &tid, 1, true /* lossy */);
-                ntids++;
-            }
+                pg_tre_unpack_tid(i, &tids[n++]);
+
+            tbm_add_tuples(tbm, tids, n, true /* recheck */);
+            ntids += n;
+            pfree(tids);
         }
 
         free(result);
@@ -1439,6 +1497,8 @@ knn_build(IndexScanDesc scan, TreScanState *st)
             int32     dist = 0;
             ItemPointerData tid;
 
+            CHECK_FOR_INTERRUPTS();
+
             if (have_orderby)
             {
                 TreMatchResult r;
@@ -1477,6 +1537,8 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         {
             ItemPointerData tid;
             int32           dist = 0;
+
+            CHECK_FOR_INTERRUPTS();
 
             pg_tre_unpack_tid(idx, &tid);
 

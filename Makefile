@@ -90,6 +90,11 @@ src/util/sparsemap.o: CFLAGS += -Wno-missing-prototypes
 # Grammar-generated files may have warnings; disable pedantic checks.
 src/query/tre_grammar.o: CFLAGS += -Wno-unused-parameter -Wno-missing-prototypes
 
+# tre_match.c reaches into TRE's internal tre_tnfa_t (num_states) to
+# enforce pg_tre.max_nfa_states, so it needs the lib/ include dir and
+# the generated config.h the way TRE's own sources are compiled.
+src/util/tre_match.o: CFLAGS += -I$(srcdir)/$(TRE_DIR)/lib -I$(srcdir)/$(TRE_DIR)
+
 # ------------------------------------------------------------------
 # Include paths & compile flags
 # ------------------------------------------------------------------

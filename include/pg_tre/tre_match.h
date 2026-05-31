@@ -31,6 +31,13 @@ void *tre_compile_pattern(const char *pattern, int pattern_len,
 void tre_free_pattern(void *compiled);
 
 /*
+ * Return the number of states in the compiled NFA, or -1 if the handle
+ * is NULL.  Callers use this to reject patterns whose automaton is large
+ * enough to make matching pathologically slow.
+ */
+int tre_pattern_num_states(void *compiled);
+
+/*
  * Run approximate matching of a compiled pattern against a string.
  * All cost and limit parameters correspond to TRE's regaparams_t fields.
  */

@@ -48,6 +48,7 @@
 
 #include <string.h>
 
+#include "miscadmin.h"
 #include "utils/memutils.h"
 
 #include "pg_tre/hash.h"
@@ -195,6 +196,14 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
 {
     if (ast == NULL || lc->acc->overflowed)
         return;
+
+    /*
+     * Bound recursion against the C stack: a pathologically nested
+     * pattern (deeply parenthesized concat/alt/rep) would otherwise
+     * recurse until the backend segfaults.  check_stack_depth() raises
+     * a clean ereport before that happens.
+     */
+    check_stack_depth();
 
     switch (ast->kind)
     {

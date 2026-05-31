@@ -46,14 +46,16 @@ format, no re-index required.  Headline additions:
 plus a multi-leaf right-link `sm_union` reversed-logic fix
 that silently dropped every leaf past the first.
 
-## What ships in 1.2.3
+## What ships in 1.5.0
 
 ### Storage and recovery
 
 - Custom IndexAmRoutine registered as `USING tre`.
-- On-disk format v3: meta page, upper tree, multi-leaf
-  posting trees with Lehman-Yao right-links, pending list,
-  range-bloom tier, payload region.
+- On-disk format v5 (min readable v3): meta page, upper tree,
+  multi-leaf posting trees with Lehman-Yao right-links,
+  pending list, multi-leaf right-link-chained range tier,
+  payload region.  v3/v4 indexes remain readable; use
+  `pg_tre_upgrade_index()` to lazy-rewrite range pages to v5.
 - Custom rmgr (id 140) with full WAL coverage; crash
   recovery and streaming replication validated by
   `test/scripts/replication.sh` (4 tests including catchup
@@ -82,13 +84,14 @@ that silently dropped every leaf past the first.
   `pg_tre.range_size_blocks`, `pg_tre.bloom_tuple_bits`,
   `pg_tre.max_extraction_fanout`, `pg_tre.max_nfa_states`,
   `pg_tre.compile_timeout_ms`, `pg_tre.match_timeout_ms`,
+  `pg_tre.tier3_max_candidates`, `pg_tre.min_trigram_freq`,
   `pg_tre.fastupdate`, `pg_tre.tuple_bloom_enable`.
 - `pg_tre.tuple_bloom_enable = true` by default (1.2.3+):
   the tier-3 per-tuple bloom and positional filter run
   routinely.  The 1.2.2 bloom-header fix and the 1.2.3
   pending-overlay fix together resolved the long-running
   bypass.  Recheck remains authoritative for correctness.
-- Reloptions: `bloom_tuple_bits`, `range_size_blocks`,
+- Reloptions: `q`, `bloom_tuple_bits`, `range_size_blocks`,
   `fastupdate`, `tuple_bloom_enable`, `pending_list_limit`.
 
 ### Testing

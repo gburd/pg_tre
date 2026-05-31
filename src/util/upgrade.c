@@ -50,6 +50,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/tuplestore.h"
 
 #include "pg_tre/buffer.h"
 #include "pg_tre/meta.h"

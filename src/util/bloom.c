@@ -78,19 +78,27 @@ pg_tre_bloom_add_trigram(PgTreBloom *b, uint64 trigram_hash)
     uint32 m = b->m_bits;
     uint8  k = b->k;
     uint8  i;
+    uint32 pos;
+    uint32 step;
 
     /* Avoid h2 == 0 which would cause all positions to be h1. */
     if (h2 == 0)
         h2 = 1;
 
+    /*
+     * Double-hashing formula: pos = (h1 + i*h2) % m.  Reduce both terms
+     * once, then advance with addition + conditional subtraction so the
+     * inner loop avoids a 64-bit modulo on every probe (m is not
+     * necessarily a power of two, so masking is unavailable).
+     */
+    pos  = h1 % m;
+    step = h2 % m;
     for (i = 0; i < k; i++)
     {
-        /*
-         * Double-hashing formula: pos = (h1 + i*h2) % m.
-         * Use 64-bit arithmetic to avoid overflow.
-         */
-        uint64 pos64 = ((uint64) h1 + (uint64) i * (uint64) h2) % m;
-        bloom_set_bit(b, (uint32) pos64);
+        bloom_set_bit(b, pos);
+        pos += step;
+        if (pos >= m)
+            pos -= m;
     }
 }
 
@@ -102,15 +110,21 @@ pg_tre_bloom_contains_trigram(const PgTreBloom *b, uint64 trigram_hash)
     uint32 m = b->m_bits;
     uint8  k = b->k;
     uint8  i;
+    uint32 pos;
+    uint32 step;
 
     if (h2 == 0)
         h2 = 1;
 
+    pos  = h1 % m;
+    step = h2 % m;
     for (i = 0; i < k; i++)
     {
-        uint64 pos64 = ((uint64) h1 + (uint64) i * (uint64) h2) % m;
-        if (!bloom_test_bit(b, (uint32) pos64))
+        if (!bloom_test_bit(b, pos))
             return false;
+        pos += step;
+        if (pos >= m)
+            pos -= m;
     }
     return true;
 }
@@ -118,8 +132,8 @@ pg_tre_bloom_contains_trigram(const PgTreBloom *b, uint64 trigram_hash)
 void
 pg_tre_bloom_union(PgTreBloom *dst, const PgTreBloom *src)
 {
-    uint8 *dst_bits = pg_tre_bloom_bits(dst);
-    const uint8 *src_bits = pg_tre_bloom_bits_const(src);
+    uint8 *restrict dst_bits = pg_tre_bloom_bits(dst);
+    const uint8 *restrict src_bits = pg_tre_bloom_bits_const(src);
     Size bytes = (dst->m_bits + 7) / 8;
     Size i;
 

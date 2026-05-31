@@ -26,6 +26,7 @@
 #include "postgres.h"
 
 #include <inttypes.h>
+#include <limits.h>
 #include <string.h>
 
 #include "access/xlog.h"
@@ -53,6 +54,44 @@ posting_leaf_budget(void)
          - MAXALIGN(SizeOfPageHeaderData)
          - MAXALIGN(sizeof(PgTrePostingLeafHeader))
          - MAXALIGN(sizeof(PageTreOpaqueData));
+}
+
+/*
+ * Validate a posting-leaf header's self-describing size/offset fields
+ * against the physical page budget.  A corrupt or truncated page (e.g.
+ * after a torn write or hostile input) could otherwise drive memcpy /
+ * sparsemap walks past the end of the buffer.  Returns true if the
+ * header is internally consistent and all regions fit within the page.
+ *
+ * Layout invariants (see page.h):
+ *   header end  = MAXALIGN(SizeOfPageHeaderData) + MAXALIGN(sizeof(hdr))
+ *   sparsemap   occupies [header_end, header_end + sparsemap_bytes)
+ *   payload     occupies [payload_offset, payload_offset + payload_bytes)
+ *   everything  must stay below BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData))
+ */
+static inline bool
+posting_leaf_header_valid(const PgTrePostingLeafHeader *hdr)
+{
+    Size header_end = MAXALIGN(SizeOfPageHeaderData)
+                    + MAXALIGN(sizeof(PgTrePostingLeafHeader));
+    Size usable_end = BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData));
+
+    if (hdr->sparsemap_bytes > posting_leaf_budget())
+        return false;
+
+    if (hdr->payload_bytes > 0 || hdr->payload_offset != 0)
+    {
+        /* payload region, when present, must start past the header and
+         * fully fit before the opaque trailer */
+        if (hdr->payload_offset < header_end)
+            return false;
+        if (hdr->payload_offset > usable_end)
+            return false;
+        if (hdr->payload_bytes > usable_end - hdr->payload_offset)
+            return false;
+    }
+
+    return true;
 }
 
 /* ================================================================
@@ -157,9 +196,13 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
     /* Grow the uint64 array if needed (palloc-based, proven reliable). */
     if (b->n_tids >= b->tids_alloced)
     {
+        if (b->tids_alloced > INT_MAX / 2)
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("pg_tre: posting builder TID array too large")));
         b->tids_alloced *= 2;
         b->tids = (uint64 *) repalloc(b->tids,
-                      b->tids_alloced * sizeof(uint64));
+                      (Size) b->tids_alloced * sizeof(uint64));
     }
     b->tids[b->n_tids] = packed;
 
@@ -172,13 +215,32 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
         /* Grow payload array if needed. */
         if (b->payload_count >= b->payload_alloced)
         {
+            if (b->payload_alloced > INT_MAX / 2)
+                ereport(ERROR,
+                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                         errmsg("pg_tre: posting builder payload array too large")));
             b->payload_alloced *= 2;
             b->payload = (PayloadEntry *) repalloc(b->payload,
-                            b->payload_alloced * sizeof(PayloadEntry));
+                            (Size) b->payload_alloced * sizeof(PayloadEntry));
         }
 
         pe = &b->payload[b->payload_count++];
         pe->tid = packed;
+
+        /*
+         * The on-disk payload encodes n_positions as a uint16 (see
+         * serialize_payload / the scan-side walk in
+         * pg_tre_posting_lookup_positions).  Clamp here so a pathological
+         * tuple cannot silently truncate the count on write-back and
+         * desynchronize the payload walk on read.  Positions beyond the
+         * cap are dropped; correctness is preserved because the executor
+         * rechecks every emitted row, and the positional filter only
+         * ever needs one in-range hit.
+         */
+        if (n_positions < 0)
+            n_positions = 0;
+        if (n_positions > UINT16_MAX)
+            n_positions = UINT16_MAX;
         pe->n_positions = n_positions;
 
         /* Copy positions array. */
@@ -329,7 +391,7 @@ serialize_payload(PayloadEntry *payload, int payload_count, Size *out_size)
     for (i = 0; i < payload_count; i++)
     {
         estimate += 2;  /* n_positions */
-        estimate += payload[i].n_positions * sizeof(uint32);
+        estimate += (Size) payload[i].n_positions * sizeof(uint32);
         estimate += bloom_bytes;
     }
 
@@ -744,6 +806,15 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sparsemap_t **out,
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
         uint8  *copy;
 
+        if (!posting_leaf_header_valid(hdr))
+        {
+            UnlockReleaseBuffer(buf);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt posting leaf at block %u",
+                            s->cur_blk)));
+        }
+
         /* Copy bytes out so the caller's sparsemap survives unlock. */
         copy = (uint8 *) palloc(hdr->sparsemap_bytes + 8);
         memcpy(copy, sm_bytes, hdr->sparsemap_bytes);
@@ -805,8 +876,20 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         PgTrePostingLeafHeader *hdr =
             (PgTrePostingLeafHeader *) PageGetContents(page);
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
-        Size    bytes = hdr->sparsemap_bytes;
-        sparsemap_t *sm = sm_open_copy(sm_bytes, bytes, 64);
+        Size    bytes;
+        sparsemap_t *sm;
+
+        if (!posting_leaf_header_valid(hdr))
+        {
+            UnlockReleaseBuffer(buf);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt posting leaf at block %u",
+                            root)));
+        }
+
+        bytes = hdr->sparsemap_bytes;
+        sm = sm_open_copy(sm_bytes, bytes, 64);
 
         if (sm == NULL)
         {
@@ -826,10 +909,23 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             PgTrePostingLeafHeader *next_hdr =
                 (PgTrePostingLeafHeader *) PageGetContents(next_page);
             uint8 *next_sm_bytes = (uint8 *) next_hdr + MAXALIGN(sizeof(*next_hdr));
-            Size next_bytes = next_hdr->sparsemap_bytes;
+            Size next_bytes;
+            sparsemap_t *next_sm;
+
+            if (!posting_leaf_header_valid(next_hdr))
+            {
+                UnlockReleaseBuffer(next_buf);
+                sm_free(sm);
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("pg_tre: corrupt posting leaf at block %u",
+                                next_blk)));
+            }
+
+            next_bytes = next_hdr->sparsemap_bytes;
 
             /* Materialize this leaf's sparsemap. */
-            sparsemap_t *next_sm = sm_open_copy(next_sm_bytes, next_bytes, 64);
+            next_sm = sm_open_copy(next_sm_bytes, next_bytes, 64);
             if (next_sm == NULL)
             {
                 UnlockReleaseBuffer(next_buf);
@@ -953,6 +1049,14 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
             return false;
 
         /* Now buf points to the leaf containing packed_tid */
+        if (!posting_leaf_header_valid(hdr))
+        {
+            UnlockReleaseBuffer(buf);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt posting leaf at block %u",
+                            cur_blk)));
+        }
         sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
 
         /* Check if we have payload data. */
@@ -986,26 +1090,43 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
          * Walk forward 'rank-1' entries to find the target. */
         payload_base = (const uint8 *) page + hdr->payload_offset;
         entry_ptr = payload_base;
-
-        for (size_t i = 0; i + 1 < rank; i++)
         {
-            uint16 n_pos;
-            memcpy(&n_pos, entry_ptr, sizeof(uint16));
-            entry_ptr += sizeof(uint16);
-            entry_ptr += n_pos * sizeof(uint32);
-            entry_ptr += bloom_bytes;
-        }
+            const uint8 *payload_end = payload_base + hdr->payload_bytes;
 
-        /* Now entry_ptr points at the start of the target entry. */
-        {
-            uint16 n_pos;
-            memcpy(&n_pos, entry_ptr, sizeof(uint16));
-            entry_ptr += sizeof(uint16);
-            entry_ptr += n_pos * sizeof(uint32);
+            for (size_t i = 0; i + 1 < rank; i++)
+            {
+                uint16 n_pos;
+                Size   step;
 
-            /* entry_ptr now points at the bloom bits. */
-            memcpy(out_bloom, entry_ptr, bloom_bytes);
-            found = true;
+                if (entry_ptr + sizeof(uint16) > payload_end)
+                    goto corrupt_payload;
+                memcpy(&n_pos, entry_ptr, sizeof(uint16));
+                step = sizeof(uint16)
+                     + (Size) n_pos * sizeof(uint32)
+                     + bloom_bytes;
+                if (step > (Size) (payload_end - entry_ptr))
+                    goto corrupt_payload;
+                entry_ptr += step;
+            }
+
+            /* Now entry_ptr points at the start of the target entry. */
+            {
+                uint16 n_pos;
+                Size   skip;
+
+                if (entry_ptr + sizeof(uint16) > payload_end)
+                    goto corrupt_payload;
+                memcpy(&n_pos, entry_ptr, sizeof(uint16));
+                skip = sizeof(uint16) + (Size) n_pos * sizeof(uint32);
+                if (skip > (Size) (payload_end - entry_ptr)
+                    || bloom_bytes > (Size) (payload_end - entry_ptr) - skip)
+                    goto corrupt_payload;
+                entry_ptr += skip;
+
+                /* entry_ptr now points at the bloom bits. */
+                memcpy(out_bloom, entry_ptr, bloom_bytes);
+                found = true;
+            }
         }
 
         /*
@@ -1018,6 +1139,14 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
 
         UnlockReleaseBuffer(buf);
         return found;
+
+corrupt_payload:
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("pg_tre: corrupt posting payload at block %u",
+                        cur_blk)));
+        return false;           /* unreachable */
     }
 }
 
@@ -1094,6 +1223,14 @@ pg_tre_posting_lookup_positions(Relation index,
             return 0;
 
         /* Now buf points to the leaf containing packed_tid */
+        if (!posting_leaf_header_valid(hdr))
+        {
+            UnlockReleaseBuffer(buf);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt posting leaf at block %u",
+                            cur_blk)));
+        }
 
         /* Check if this leaf has payload */
         if (hdr->payload_offset == 0)
@@ -1102,7 +1239,9 @@ pg_tre_posting_lookup_positions(Relation index,
             return 0;  /* no payload */
         }
 
-        /* Wrap sparsemap */
+        /* Wrap sparsemap.  posting_leaf_header_valid() guarantees
+         * payload_offset >= the (MAXALIGN'd) header end, so this
+         * subtraction cannot underflow. */
         smap_size = hdr->payload_offset - sizeof(PgTrePostingLeafHeader);
         smap = sm_wrap((uint8 *) (hdr + 1), smap_size);
         if (smap != NULL)
@@ -1121,35 +1260,62 @@ pg_tre_posting_lookup_positions(Relation index,
         /* Payload starts at payload_offset from page start */
         payload_base = (const uint8 *) page + hdr->payload_offset;
 
-        /* Walk payload entries to find our rank */
+        /* Walk payload entries to find our rank, bounds-checking every
+         * step against the declared payload region. */
         entry_ptr = payload_base;
         {
+            const uint8 *payload_end = payload_base + hdr->payload_bytes;
             size_t entry_idx;
+            Size   avail;
+
             /* Same fix as in lookup_tuple_bloom: skip (rank-1) entries */
             for (entry_idx = 0; entry_idx + 1 < rank; entry_idx++)
             {
                 uint16 entry_n_positions;
+                Size   step;
+
+                if (entry_ptr + sizeof(uint16) > payload_end)
+                    goto corrupt_positions;
                 memcpy(&entry_n_positions, entry_ptr, sizeof(uint16));
-                entry_ptr += sizeof(uint16);
-                entry_ptr += entry_n_positions * sizeof(uint32);
-                entry_ptr += bloom_bytes;
+                step = sizeof(uint16)
+                     + (Size) entry_n_positions * sizeof(uint32)
+                     + bloom_bytes;
+                if (step > (Size) (payload_end - entry_ptr))
+                    goto corrupt_positions;
+                entry_ptr += step;
             }
+
+            /* Now entry_ptr points at our TID's payload entry */
+            if (entry_ptr + sizeof(uint16) > payload_end)
+                goto corrupt_positions;
+            memcpy(&n_positions, entry_ptr, sizeof(uint16));
+            entry_ptr += sizeof(uint16);
+
+            if (n_positions > 1024)
+                n_positions = 1024;  /* cap at buffer size */
+
+            /* Clamp to what actually remains in the payload region. */
+            avail = (Size) (payload_end - entry_ptr) / sizeof(uint32);
+            if ((Size) n_positions > avail)
+                n_positions = (uint16) avail;
+
+            positions_ptr = (const uint32 *) entry_ptr;
+
+            /* Copy positions to thread-local buffer */
+            memcpy(positions_buf, positions_ptr,
+                   (Size) n_positions * sizeof(uint32));
+            *out_positions = positions_buf;
+
+            UnlockReleaseBuffer(buf);
+            return (int) n_positions;
         }
 
-        /* Now entry_ptr points at our TID's payload entry */
-        memcpy(&n_positions, entry_ptr, sizeof(uint16));
-        entry_ptr += sizeof(uint16);
-
-        if (n_positions > 1024)
-            n_positions = 1024;  /* cap at buffer size */
-
-        positions_ptr = (const uint32 *) entry_ptr;
-
-        /* Copy positions to thread-local buffer */
-        memcpy(positions_buf, positions_ptr, n_positions * sizeof(uint32));
-        *out_positions = positions_buf;
-
+corrupt_positions:
         UnlockReleaseBuffer(buf);
-        return (int) n_positions;
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("pg_tre: corrupt posting payload at block %u",
+                        cur_blk)));
+        return 0;               /* unreachable */
     }
 }

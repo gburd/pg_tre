@@ -10,8 +10,13 @@
 CREATE EXTENSION IF NOT EXISTS pg_tre;
 psql:test/sql/cardinality.sql:11: NOTICE:  extension "pg_tre" already exists, skipping
 CREATE EXTENSION
+-- Force the shared library (and thus its custom GUCs) to load so that
+-- SHOW pg_tre.min_trigram_freq below is recognized even in a backend
+-- that has not yet touched a pg_tre index.
+LOAD 'pg_tre';
+LOAD
 DROP TABLE IF EXISTS card_t CASCADE;
-psql:test/sql/cardinality.sql:13: NOTICE:  table "card_t" does not exist, skipping
+psql:test/sql/cardinality.sql:18: NOTICE:  table "card_t" does not exist, skipping
 DROP TABLE
 CREATE TABLE card_t (id serial, body text);
 CREATE TABLE
@@ -37,10 +42,10 @@ SHOW pg_tre.min_trigram_freq;
 (1 row)
 
 CREATE INDEX card_idx ON card_t USING tre (body);
-psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: collected 3992 trigram entries from 205 heap tuples
-psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: built 241 posting trees
-psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
-psql:test/sql/cardinality.sql:33: NOTICE:  pg_tre: build complete, indexed 205 heap tuples into 241 trigrams
+psql:test/sql/cardinality.sql:38: NOTICE:  pg_tre: collected 3992 trigram entries from 205 heap tuples
+psql:test/sql/cardinality.sql:38: NOTICE:  pg_tre: built 241 posting trees
+psql:test/sql/cardinality.sql:38: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/cardinality.sql:38: NOTICE:  pg_tre: build complete, indexed 205 heap tuples into 241 trigrams
 CREATE INDEX
 -- Differential: index and seq scan must agree on row sets.
 SET enable_seqscan = off;

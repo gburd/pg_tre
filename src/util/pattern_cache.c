@@ -8,12 +8,22 @@
 
 #include "postgres.h"
 
+#include "miscadmin.h"
 #include "utils/memutils.h"
 
 #include "pg_tre/pattern_cache.h"
+#include "pg_tre/pg_tre.h"
 #include "pg_tre/tre_match.h"
 
 #define TRE_CACHE_SLOTS 32
+
+/*
+ * Hard ceiling on the regex pattern length we will even attempt to
+ * compile.  A pattern longer than this is almost certainly an attack or
+ * a mistake; rejecting it early bounds parser-stack and NFA-compile
+ * cost before tre_compile_pattern runs.
+ */
+#define TRE_MAX_PATTERN_LEN (64 * 1024)
 
 typedef struct TreCacheSlot
 {
@@ -68,6 +78,12 @@ tre_cache_lookup(const char *pattern, int pattern_len)
 
     tre_cache_init();
 
+    if (pattern_len < 0 || pattern_len > TRE_MAX_PATTERN_LEN)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("pg_tre: regex pattern length %d exceeds maximum %d",
+                        pattern_len, TRE_MAX_PATTERN_LEN)));
+
     /* Search existing entries */
     for (i = 0; i < TRE_CACHE_SLOTS; i++)
     {
@@ -90,6 +106,30 @@ tre_cache_lookup(const char *pattern, int pattern_len)
                 (errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
                  errmsg("invalid regular expression: %s",
                         tre_errmsg(tre_err))));
+
+    /*
+     * Reject patterns whose compiled automaton is large enough to make
+     * matching pathologically slow.  pg_tre.max_nfa_states is the
+     * documented DoS guardrail; enforce it here, before the pattern can
+     * ever reach the match path or be cached.  Per-string match cost is
+     * roughly O(num_states * string_len * max_cost), so an unbounded
+     * state count is the primary lever an attacker has.
+     */
+    {
+        int nstates = tre_pattern_num_states(compiled);
+
+        if (nstates > pg_tre_max_nfa_states)
+        {
+            tre_free_pattern(compiled);
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("pg_tre: regex compiles to %d NFA states, "
+                            "exceeding pg_tre.max_nfa_states = %d",
+                            nstates, pg_tre_max_nfa_states),
+                     errhint("Simplify the pattern or raise "
+                             "pg_tre.max_nfa_states.")));
+        }
+    }
 
     /* Find an empty slot, or the LRU slot for eviction */
     target = &cache_slots[0];

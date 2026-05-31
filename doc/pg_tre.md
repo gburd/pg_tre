@@ -177,10 +177,14 @@ pattern, or `NULL` if no match exists within the pattern's
 `max_cost`.  Named for its visual cue — an eyeball, looking at how
 close two strings are.
 
-**Not indexable yet** — the operator returns a per-row distance,
-so `ORDER BY ... <@> ...` sorts in the executor after the
-`%~~`-driven candidate retrieval.  Index-side `ORDER BY` is a
-v2.0 followup.
+**Indexable (since 1.4.0).**  The index registers
+`amcanorderbyop` and implements `amgettuple`, so
+`ORDER BY col <@> tre_pattern(...)` is satisfied directly
+by a KNN-style index scan that returns candidates in
+ascending-distance order; the executor recheck still
+confirms each row.  (Prior to 1.4.0 the operator only
+returned a per-row distance and `ORDER BY` sorted in the
+executor after `%~~`-driven candidate retrieval.)
 
 **Idiom:**
 ```sql
@@ -524,8 +528,15 @@ SELECT tre_parse_debug('enviro.{~2}ment');
 
 **Status (Phase 5):** Tier-1 range bloom and positional offsets are implemented but selectivity benefits are less than design intent.
 
-- **Range bloom:** Works; current implementation is a single-leaf page (no binary search yet). For very large indexes (> 100 GB), range bloom lookup becomes linear. Phase 8 will extend to multi-level tree.
-- **Positional filtering:** Positions are stored but not yet used in tier-2 filtering. Phase 5.1 will wire `sparsemap_offset` for +/- k shifts.
+- **Range bloom:** Multi-leaf since 1.5.0 — range pages carry a
+  `PgTreRangeHeader` and chain via `right_link`, so the tier-1
+  summary covers the whole heap instead of just the first page's
+  worth of ranges.  v3/v4 single-page range layouts remain
+  readable (per-page format dispatch).
+- **Positional filtering:** Wired since 1.3.0 (Phase 5.1).
+  Per-trigram positions stored in the posting payload are used
+  by the scan-side positional filter to prune candidates whose
+  trigram offsets are out of range before recheck.
 
 ### DoS Protections
 

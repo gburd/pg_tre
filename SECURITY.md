@@ -46,12 +46,12 @@ server. When deploying:
   `pg_tre.match_timeout_ms` GUC bounds wall-clock time per
   match; do not raise it for untrusted callers.
 - Tier-3 per-tuple bloom and the positional filter are
-  bypassed when `pg_tre.tuple_bloom_enable = off` (default
-  off in 1.1.x). Re-enabling them in environments that build
-  multi-leaf posting trees may change result counts until the
-  chain-rank lookup is repaired (see `STATUS.md` v1.2
-  followups). Recheck remains authoritative for correctness;
-  the filters are CPU optimizations.
+  controlled by `pg_tre.tuple_bloom_enable` (default **on**
+  since 1.2.3). The chain-rank lookup defect that motivated
+  disabling them in the 1.1.x line was fixed in 1.2.3 (it was
+  a bloom-header reconstruction bug, not a posting-tree bug;
+  see `CHANGELOG.md`). Recheck remains authoritative for
+  correctness; the filters are CPU optimizations.
 
 ## Disclosure Acknowledgements
 

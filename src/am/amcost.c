@@ -292,6 +292,26 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 	/* CPU cost: AND/OR merge of sparsemaps. */
 	indexCost += numIndexTuples * cpu_operator_cost;
 
+	/*
+	 * Filter cost: the tier-3 per-tuple bloom and Phase 5.1 positional
+	 * filters walk the candidate set, probing each candidate against the
+	 * query's trigrams via the cached posting lookups before the
+	 * (expensive) executor recheck runs.  Model this as candidates x
+	 * trigrams cheap operations so the planner accounts for the work the
+	 * scan actually does, not just the recheck.  Skipped when there is no
+	 * usable query.
+	 */
+	if (have_query && q.n > 0)
+	{
+		int total_trigrams = 0;
+		int i;
+		for (i = 0; i < q.n; i++)
+			total_trigrams += q.conjuncts[i].n;
+
+		indexCost += numIndexTuples * (double) total_trigrams
+		           * cpu_operator_cost;
+	}
+
 	/* Recheck cost: TRE regex matching is expensive.
 	 * k=0 (exact match): 10x cpu_operator_cost
 	 * k>0 (approximate): 20x cpu_operator_cost (universal-Levenshtein) */
@@ -303,11 +323,6 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 	{
 		indexCost += numIndexTuples * cpu_operator_cost * 10.0;
 	}
-
-	*indexTotalCost = *indexStartupCost + indexCost;
-	*indexSelectivity = sel;
-	*indexCorrelation = 0.0;
-	*indexPages = numIndexPages;
 
 	*indexTotalCost = *indexStartupCost + indexCost;
 	*indexSelectivity = sel;

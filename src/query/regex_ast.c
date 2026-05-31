@@ -8,6 +8,7 @@
 
 #include "postgres.h"
 
+#include "miscadmin.h"
 #include "pg_tre/regex_ast.h"
 #include "utils/memutils.h"
 
@@ -247,6 +248,8 @@ static void
 dump_ast_internal(StringInfo buf, RegexAst *node, int depth)
 {
 	int i;
+
+	check_stack_depth();
 
 	if (node == NULL)
 	{
