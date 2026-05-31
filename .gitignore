@@ -59,3 +59,4 @@ coverage-html/
 coverage.info
 *.gcda
 *.gcno
+vendor/tre/.pg_tre-patched

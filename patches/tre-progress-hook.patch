@@ -1,0 +1,112 @@
+diff --git a/lib/tre-match-approx.c b/lib/tre-match-approx.c
+index 50664ce..2d79c52 100644
+--- a/lib/tre-match-approx.c
++++ b/lib/tre-match-approx.c
+@@ -48,6 +48,29 @@ char *alloca ();
+ #include "tre-match-utils.h"
+ #include "xmalloc.h"
+ 
++/*
++ * pg_tre: progress hook for wall-clock match-timeout enforcement.
++ *
++ * The real implementation lives in src/util/tre_match.c (which is
++ * postgres.h-free); it returns nonzero when the PG-installed deadline
++ * callback wants the match aborted.  Declared here as a plain extern so
++ * no pg_tre/PG headers are pulled into the vendored matcher, and called
++ * periodically from the per-position NFA loop below.
++ *
++ * A __weak__ default is provided so the vendored TRE library and its
++ * stand-alone tools (e.g. agrep) link cleanly on their own; when linked
++ * into pg_tre.so the strong definition in tre_match.c overrides it.  If
++ * the compiler lacks weak-symbol support we fall back to a plain
++ * declaration (pg_tre always supplies the strong definition; only the
++ * never-built-here agrep tool would then fail to link standalone).
++ */
++#if defined(__GNUC__) || defined(__clang__)
++int tre_progress_check(void) __attribute__((weak));
++int tre_progress_check(void) { return 0; }
++#else
++extern int tre_progress_check(void);
++#endif
++
+ #define TRE_M_COST	0
+ #define TRE_M_NUM_INS	1
+ #define TRE_M_NUM_DEL	2
+@@ -321,6 +344,17 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, int len,
+ 
+   while (/*CONSTCOND*/(void)1,1)
+     {
++      /*
++       * pg_tre: enforce the wall-clock match deadline.  This is the
++       * matcher's main driver loop -- one iteration per input position --
++       * so checking here bounds worst-case match time regardless of how
++       * pathological the pattern/input combination is.  On abort we break
++       * out with whatever (possibly empty) match we have; tre_do_match()
++       * sees the abort flag and reports a timeout, not a no-match.
++       */
++      if (tre_progress_check())
++	break;
++
+       DPRINT(("%03d:%2lc/%05d\n", pos, (tre_cint_t)next_c, (int)next_c));
+ 
+       /* Add initial states to `reach_next' if an exact match has not yet
+diff --git a/lib/tre-match-backtrack.c b/lib/tre-match-backtrack.c
+index 7b41e9f..c683a1f 100644
+--- a/lib/tre-match-backtrack.c
++++ b/lib/tre-match-backtrack.c
+@@ -72,6 +72,10 @@ char *alloca ();
+ #include "tre-match-utils.h"
+ #include "xmalloc.h"
+ 
++/* pg_tre: progress hook for wall-clock match-timeout enforcement.  See
++   tre-match-approx.c for the rationale; defined in src/util/tre_match.c. */
++extern int tre_progress_check(void);
++
+ typedef struct {
+   int pos;
+   const char *str_byte;
+@@ -376,6 +380,16 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+       tre_tnfa_transition_t *next_state;
+       int empty_br_match;
+ 
++      /* pg_tre: enforce the wall-clock match deadline.  Bail to the
++         normal error-exit path on abort; the pg_tre wrapper reports a
++         timeout (the specific ret value is irrelevant -- the abort flag
++         set inside tre_progress_check() takes precedence). */
++      if (tre_progress_check())
++	{
++	  ret = REG_NOMATCH;
++	  goto error_exit;
++	}
++
+       DPRINT(("start loop\n"));
+       if (state == tnfa->final)
+ 	{
+diff --git a/lib/tre-match-parallel.c b/lib/tre-match-parallel.c
+index ffc7819..82e5267 100644
+--- a/lib/tre-match-parallel.c
++++ b/lib/tre-match-parallel.c
+@@ -64,6 +64,10 @@ char *alloca ();
+ #include "tre-match-utils.h"
+ #include "xmalloc.h"
+ 
++/* pg_tre: progress hook for wall-clock match-timeout enforcement.  See
++   tre-match-approx.c for the rationale; defined in src/util/tre_match.c. */
++extern int tre_progress_check(void);
++
+ 
+ 
+ typedef struct {
+@@ -270,6 +274,12 @@ tre_tnfa_run_parallel(const tre_tnfa_t *tnfa, const void *string, int len,
+   reach_next_i = reach_next;
+   while (/*CONSTCOND*/(void)1,1)
+     {
++      /* pg_tre: enforce the wall-clock match deadline (one check per
++         input position).  On abort, break with the current match; the
++         pg_tre wrapper reports a timeout rather than a no-match. */
++      if (tre_progress_check())
++	break;
++
+       /* If no match found yet, add the initial states to `reach_next'. */
+       if (match_eo < 0)
+ 	{

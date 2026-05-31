@@ -12,6 +12,40 @@
 #include "tre-internal.h"
 #include "pg_tre/tre_match.h"
 
+/*
+ * Progress-hook plumbing.  The hook is installed by the PG-facing layer
+ * (src/module.c, which owns postgres.h and the deadline logic) and is
+ * invoked periodically from inside the vendored TRE matcher loop via
+ * tre_progress_check().  Keeping the pointer here -- not in vendor/tre --
+ * means the vendored matcher only references the plain extern symbol
+ * tre_progress_check() and stays free of any pg_tre/PG coupling.
+ *
+ * progress_aborted records whether the most recent match was cut short,
+ * so tre_do_match() can distinguish a genuine no-match from a timeout
+ * even though TRE collapses both into a non-REG_OK return.
+ */
+static TreProgressHook progress_hook = NULL;
+static int             progress_aborted = 0;
+
+TreProgressHook
+tre_set_progress_hook(TreProgressHook hook)
+{
+    TreProgressHook prev = progress_hook;
+    progress_hook = hook;
+    return prev;
+}
+
+int
+tre_progress_check(void)
+{
+    if (progress_hook != NULL && progress_hook() != 0)
+    {
+        progress_aborted = 1;
+        return 1;
+    }
+    return 0;
+}
+
 void *
 tre_compile_pattern(const char *pattern, int pattern_len, int *errcode_out)
 {
@@ -113,8 +147,29 @@ tre_do_match(void *compiled, const char *str, int str_len,
     amatch.nmatch = 1;
     amatch.pmatch = &pmatch;
 
+    /*
+     * Reset the per-match abort flag.  The vendored matcher calls
+     * tre_progress_check() once per input position; if the installed
+     * hook (a deadline check in module.c) fires, the matcher unwinds
+     * and returns non-REG_OK, and progress_aborted is left set.
+     */
+    progress_aborted = 0;
+
     ret = tre_reganexec(preg, str, (size_t) str_len,
                         &amatch, params, 0);
+
+    if (progress_aborted)
+    {
+        /*
+         * The match was cut short by the progress hook (wall-clock
+         * deadline).  Report a clean timeout; the PG caller turns this
+         * into an ereport(ERROR) and must not treat it as "no match".
+         */
+        result.timed_out = 1;
+        progress_aborted = 0;
+        return result;
+    }
+
     if (ret == REG_OK)
     {
         result.matched     = 1;

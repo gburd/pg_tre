@@ -81,6 +81,14 @@ pg_tre_bloom_add_trigram(PgTreBloom *b, uint64 trigram_hash)
     uint32 pos;
     uint32 step;
 
+    /*
+     * Guard against a corrupt on-disk header reporting m_bits == 0, which
+     * would make the `% m` reductions below divide by zero.  A zero-width
+     * filter holds no bits, so there is nothing to set: return early.
+     */
+    if (m == 0)
+        return;
+
     /* Avoid h2 == 0 which would cause all positions to be h1. */
     if (h2 == 0)
         h2 = 1;
@@ -112,6 +120,16 @@ pg_tre_bloom_contains_trigram(const PgTreBloom *b, uint64 trigram_hash)
     uint8  i;
     uint32 pos;
     uint32 step;
+
+    /*
+     * Guard against a corrupt on-disk header reporting m_bits == 0, which
+     * would make the `% m` reductions below divide by zero.  The bloom is a
+     * candidate prefilter: a degenerate/empty filter must never eliminate a
+     * candidate (that would be a false negative), so conservatively report
+     * "might contain" and force a recheck.
+     */
+    if (m == 0)
+        return true;
 
     if (h2 == 0)
         h2 = 1;

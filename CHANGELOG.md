@@ -6,6 +6,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.2] - 2026-05-31 - production-readiness audit hardening
+
+Patch release addressing findings from three independent
+code-review audits.  No on-disk format change (format
+remains v5); no REINDEX required.  Upgrade scripts
+`1.5.0--1.5.1` and `1.5.1--1.5.2` are no-op stubs that
+only bump the recorded extension version.
+
+### Security
+
+- **`pg_tre.match_timeout_ms` is now enforced** (was defined
+  but never read).  A plain-C progress hook is compiled into
+  the vendored TRE matcher loops (approx, parallel, and
+  backtrack paths) via `patches/tre-progress-hook.patch`,
+  applied idempotently at build time.  The hook compares
+  `GetCurrentTimestamp()` against a per-query deadline armed
+  around each match and aborts pathological matches that
+  would otherwise hang a backend uninterruptibly.  `SECURITY.md`
+  rewritten to describe the actual guarantees.
+  `compile_timeout_ms` remains advisory-only (bounded by the
+  64KB pattern-length ceiling and `max_nfa_states`), now
+  documented honestly.
+
+### Fixed
+
+- **`ambulkdelete` no longer a no-op** (C2): posting trees are
+  now walked from the upper tree and dead TIDs removed in
+  place, with real `tuples_removed` / `num_index_tuples` /
+  `num_pages` statistics reported.  Indexes reclaim space on
+  `VACUUM` instead of growing until `REINDEX`.  (Residual:
+  INLINE postings are still reclaimed only by `REINDEX`.)
+- **Atomic pending-list merge** (C3): merge captures a
+  watermark and finalizes under a single WAL record in one
+  critical section, eliminating a torn-merge window.
+- **WAL record ordering** (H1): `MarkBufferDirty` now precedes
+  `XLogRegisterBuffer` in `upper.c` (2 sites) and `meta.c`.
+- **Scan-path memory safety** (H2/H3/H4): pattern cache
+  entries are pinned/refcounted across a scan with
+  `longjmp`-safe release; per-call position buffers are
+  `palloc`'d instead of using a shared static buffer.
+- **Bloom filter guards** against `m_bits == 0`.
+
+### Changed
+
+- All version strings unified at **1.5.2** (control,
+  `META.json`, `README`, spec, `Makefile`).  Note: v1.5.1
+  shipped with `default_version` still at 1.5.0; the full
+  upgrade-script chain is now consistent through 1.5.2.
+
 ## [1.5.0] - 2026-05-26 - range-tier multi-leaf, query-time hoist
 
 Minor release on the 1.x line.  On-disk format bump from

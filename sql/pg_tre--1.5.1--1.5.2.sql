@@ -1,0 +1,7 @@
+-- pg_tre 1.5.1 -> 1.5.2 upgrade.
+--
+-- No catalog changes: 1.5.2 is a C-level security/correctness
+-- hardening release (WAL-ordering fixes, enforced match timeout,
+-- atomic pending-list merge, posting-tree bulk delete, pattern-cache
+-- pinning, and assorted memory-safety fixes).  This upgrade script is
+-- an intentional no-op.

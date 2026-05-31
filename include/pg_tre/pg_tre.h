@@ -11,6 +11,8 @@
 #include "postgres.h"
 #include "fmgr.h"
 
+#include "pg_tre/tre_match.h"  /* for TreMatchResult */
+
 /* On-disk format version advertised by meta page.
  *
  * History:
@@ -47,7 +49,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.5.0"
+#define PG_TRE_VERSION_STRING "pg_tre 1.5.2"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;
@@ -66,6 +68,26 @@ extern int  pg_tre_tier3_max_candidates;
 /* Initialization entry points. */
 extern void pg_tre_init_guc(void);
 extern void pg_tre_init_rmgr(void);
+
+/*
+ * Match-timeout enforcement (defined in src/module.c).
+ *
+ * pg_tre_arm_match_deadline() installs a progress hook in the TRE
+ * matcher and arms a wall-clock deadline of pg_tre_match_timeout_ms
+ * milliseconds from now (or the supplied override).  Any tre_do_match()
+ * call made while the deadline is armed will abort once the deadline is
+ * exceeded, returning TreMatchResult.timed_out = 1.  Callers must invoke
+ * pg_tre_check_match_timeout() after the match and pair every arm with a
+ * pg_tre_disarm_match_deadline() (use PG_TRY/PG_FINALLY around the match
+ * loop so the hook is cleared even on error).
+ *
+ * The legacy UDFs in src/module.c already arm/disarm internally.  The
+ * scan path (src/am/amscan.c) must wrap its tre_do_match() loop with
+ * these calls -- see that file's match driver.
+ */
+extern void pg_tre_arm_match_deadline(int timeout_ms);
+extern void pg_tre_disarm_match_deadline(void);
+extern void pg_tre_check_match_timeout(const TreMatchResult *r);
 
 /* Legacy UDF exports (for internal use). */
 extern Datum pg_tre_amatch(PG_FUNCTION_ARGS);

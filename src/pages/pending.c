@@ -349,6 +349,108 @@ pg_tre_pending_scan(Relation index, PgTrePendingCallback callback, void *ctx)
 }
 
 /* --------------------------------------------------------------------
+ * Watermark-bounded scan (merge ingest)
+ * --------------------------------------------------------------------
+ *
+ * A merge must consume only the entries that existed in the pending
+ * list when the merge began, and truncate exactly that prefix -- no
+ * more, no less.  Anything a concurrent aminsert appends while the
+ * (long-running) merge rebuilds the upper tree must survive into the
+ * next merge.
+ *
+ * The append path only ever *grows* the list: it appends entries to
+ * the tail page, or links a fresh tail page off the old tail's
+ * next_page and advances meta->pending_tail.  The head never moves
+ * except when the list is finalized (here).  So a stable "high water
+ * mark" of the consumed region is fully described by:
+ *
+ *     (watermark_tail, watermark_tail_n)
+ *
+ * meaning "consume every entry on every page from pending_head up to
+ * and including watermark_tail, but on watermark_tail only the first
+ * watermark_tail_n entries."  Entries at index >= watermark_tail_n on
+ * watermark_tail, and any entries on pages linked after it, are
+ * concurrent appends that are left untouched.
+ *
+ * pg_tre_pending_scan_watermark captures the watermark from the meta +
+ * tail page under share locks at scan start, then walks the chain
+ * stopping at the watermark.  Because the scan is lock-coupled per
+ * page with the exclusive-locked append path, and the head/tail are
+ * read from the meta under its buffer lock, the captured watermark is
+ * a consistent snapshot of a prefix that was fully present.
+ */
+static void
+pg_tre_pending_scan_watermark(Relation index, PgTrePendingCallback callback,
+                              void *ctx, BlockNumber *watermark_tail_out,
+                              uint32 *watermark_tail_n_out,
+                              BlockNumber *head_out)
+{
+    PgTreMetaPageData meta;
+    BlockNumber blk;
+    BlockNumber wm_tail;
+    uint32      wm_tail_n = 0;
+
+    pg_tre_meta_read(index, &meta);
+    *head_out = meta.pending_head;
+    wm_tail = meta.pending_tail;
+
+    if (meta.pending_head == InvalidBlockNumber)
+    {
+        *watermark_tail_out   = InvalidBlockNumber;
+        *watermark_tail_n_out = 0;
+        return;
+    }
+
+    /*
+     * Snapshot the number of entries on the watermark tail page now,
+     * under its share lock.  Any append that lands after this point
+     * either bumps n_entries on this same page (entries we will not
+     * consume) or links a new tail past it (pages we will not visit),
+     * so both survive the truncate.
+     */
+    {
+        Buffer  tbuf = pg_tre_read(index, wm_tail, PG_TRE_PAGE_PENDING,
+                                   BUFFER_LOCK_SHARE);
+        wm_tail_n = pending_header(BufferGetPage(tbuf))->n_entries;
+        UnlockReleaseBuffer(tbuf);
+    }
+
+    blk = meta.pending_head;
+    while (blk != InvalidBlockNumber)
+    {
+        Buffer  buf = pg_tre_read(index, blk, PG_TRE_PAGE_PENDING,
+                                  BUFFER_LOCK_SHARE);
+        Page    page = BufferGetPage(buf);
+        PgTrePendingHeader *hdr = pending_header(page);
+        PgTrePendingEntry  *ent = pending_entries(page);
+        BlockNumber next = hdr->next_page;
+        int n = hdr->n_entries;
+        int i;
+
+        /* On the watermark tail page, consume only the snapshotted prefix. */
+        if (blk == wm_tail && (uint32) n > wm_tail_n)
+            n = (int) wm_tail_n;
+
+        for (i = 0; i < n; i++)
+        {
+            ItemPointerData tid;
+            pg_tre_unpack_tid(ent[i].tid, &tid);
+            callback(ent[i].trigram_hash, &tid, ent[i].position, ctx);
+        }
+
+        UnlockReleaseBuffer(buf);
+
+        /* Stop at the watermark tail; pages past it are concurrent appends. */
+        if (blk == wm_tail)
+            break;
+        blk = next;
+    }
+
+    *watermark_tail_out   = wm_tail;
+    *watermark_tail_n_out = wm_tail_n;
+}
+
+/* --------------------------------------------------------------------
  * Merge path
  * --------------------------------------------------------------------
  *
@@ -820,19 +922,155 @@ snapshot_existing_upper(Relation index, RebuildState *r,
     UnlockReleaseBuffer(buf);
 }
 
-/* Truncate the pending list (unlink pages from meta, rely on VACUUM
- * to reclaim -- we simply set head=tail=invalid). */
+/*
+ * Finalize a merge atomically: swap in the new upper-tree root AND
+ * truncate the consumed prefix of the pending list in a SINGLE meta
+ * page write / SINGLE WAL record, inside one critical section.
+ *
+ * Prior to this the root swap (pg_tre_meta_set_roots) and the list
+ * truncate were two independent WAL records.  A crash between them
+ * left the index with the merged roots but a non-truncated pending
+ * list, so the next merge re-consumed (double-counted) the same
+ * entries.  Folding both mutations into the meta page under one
+ * record makes replay all-or-nothing: recovery either sees the
+ * pre-merge state (old root + full list) or the post-merge state
+ * (new root + rewound list), never a torn mix.
+ *
+ * Truncation is bounded by the watermark captured at scan start
+ * (watermark_tail / watermark_tail_n):
+ *
+ *   - If the consumed prefix is the entire list (the watermark tail
+ *     is still the meta tail and held no entries past the watermark,
+ *     and no newer page was linked), reset head=tail=invalid.
+ *
+ *   - Otherwise concurrent inserts appended after the scan.  The
+ *     surviving entries -- those at index >= watermark_tail_n on the
+ *     watermark tail page, plus every page linked after it -- must be
+ *     preserved.  We compact the watermark tail page in place,
+ *     shifting the survivors down to slot 0, and re-point
+ *     pending_head at the watermark tail.  Pages strictly before the
+ *     watermark tail are unlinked (orphaned until REINDEX, matching
+ *     the pre-existing reclaim policy).
+ *
+ * pending_n_entries is recomputed from the surviving chain so the
+ * counter stays exact.  The number of entries actually consumed is
+ * returned via *consumed_out.
+ *
+ * Caller passes the new upper-tree root and the n_trigrams /
+ * n_tuples_indexed stats that pg_tre_meta_set_roots would have set.
+ */
 static void
-truncate_pending_list(Relation index)
+finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
+               uint64 n_trigrams, uint64 n_tuples_indexed,
+               BlockNumber watermark_tail, uint32 watermark_tail_n,
+               uint64 *consumed_out)
 {
-    Buffer metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
-                                  BUFFER_LOCK_EXCLUSIVE);
-    Page   page = BufferGetPage(metabuf);
-    PgTreMetaPage m = PgTreMetaPageGet(page);
+    Buffer  metabuf;
+    Page    metapage;
+    PgTreMetaPage m;
+    Buffer  tailbuf = InvalidBuffer;
+    Page    tailpage = NULL;
+    PgTrePendingHeader *thdr = NULL;
+    bool    rewind_tail = false;
+    uint64  consumed = 0;
+    uint32  survive = 0;
+    uint64  surviving_total = 0;
 
-    m->pending_head       = InvalidBlockNumber;
-    m->pending_tail       = InvalidBlockNumber;
-    m->pending_n_entries  = 0;
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    m = PgTreMetaPageGet(metapage);
+
+    /*
+     * Re-examine the watermark tail under the meta exclusive lock.  If
+     * it now holds more entries than the watermark, or it is no longer
+     * the list tail, concurrent inserts ran and we must preserve the
+     * survivors rather than blow the whole list away.
+     */
+    if (watermark_tail != InvalidBlockNumber)
+    {
+        tailbuf = pg_tre_read(index, watermark_tail, PG_TRE_PAGE_PENDING,
+                              BUFFER_LOCK_EXCLUSIVE);
+        tailpage = BufferGetPage(tailbuf);
+        thdr = pending_header(tailpage);
+
+        if ((uint32) thdr->n_entries > watermark_tail_n ||
+            thdr->next_page != InvalidBlockNumber ||
+            m->pending_tail != watermark_tail)
+            rewind_tail = true;
+    }
+
+    /*
+     * When concurrent appends survived, tally them up FIRST -- outside
+     * any critical section, since walking the trailing chain acquires
+     * buffer locks (which must never happen inside a crit section).
+     * The append path always takes the meta lock before any tail page,
+     * so taking these share locks while we already hold the exclusive
+     * meta + watermark-tail locks introduces no lock-order inversion.
+     */
+    if (rewind_tail)
+    {
+        BlockNumber b;
+
+        survive = (uint32) thdr->n_entries - watermark_tail_n;
+        surviving_total = survive;
+
+        b = thdr->next_page;
+        while (b != InvalidBlockNumber)
+        {
+            Buffer  cb = pg_tre_read(index, b, PG_TRE_PAGE_PENDING,
+                                     BUFFER_LOCK_SHARE);
+            PgTrePendingHeader *chdr = pending_header(BufferGetPage(cb));
+            surviving_total += chdr->n_entries;
+            b = chdr->next_page;
+            UnlockReleaseBuffer(cb);
+        }
+    }
+
+    START_CRIT_SECTION();
+
+    if (!rewind_tail)
+    {
+        /* Entire list consumed. */
+        consumed = m->pending_n_entries;
+        m->pending_head      = InvalidBlockNumber;
+        m->pending_tail      = InvalidBlockNumber;
+        m->pending_n_entries = 0;
+    }
+    else
+    {
+        /*
+         * Compact survivors on the watermark tail down to slot 0 and
+         * make it the new head.  Pages before it are orphaned (the
+         * pre-existing "rely on REINDEX to reclaim" policy).
+         */
+        PgTrePendingEntry *tent = pending_entries(tailpage);
+        uint64 old_total = m->pending_n_entries;
+
+        if (watermark_tail_n > 0 && survive > 0)
+            memmove(&tent[0], &tent[watermark_tail_n],
+                    (size_t) survive * sizeof(PgTrePendingEntry));
+
+        thdr->n_entries  = survive;
+        thdr->used_bytes = survive * sizeof(PgTrePendingEntry);
+        ((PageHeader) tailpage)->pd_lower =
+            (char *) &tent[survive] - (char *) tailpage;
+
+        m->pending_head = watermark_tail;
+        /* pending_tail unchanged (still the real tail). */
+
+        consumed = (old_total >= surviving_total)
+                   ? old_total - surviving_total : 0;
+        m->pending_n_entries = surviving_total;
+
+        MarkBufferDirty(tailbuf);
+    }
+
+    /* Swap in the new tree roots / stats in the SAME meta write. */
+    m->root_upper       = new_root;
+    m->root_range       = root_range;
+    m->n_trigrams       = n_trigrams;
+    m->n_tuples_indexed = n_tuples_indexed;
 
     MarkBufferDirty(metabuf);
 
@@ -840,12 +1078,30 @@ truncate_pending_list(Relation index)
     {
         XLogRecPtr recptr;
         XLogBeginInsert();
+        /*
+         * FPI both pages.  Bundling the meta (root swap + list head/
+         * counter) and the rewound watermark tail in one record makes
+         * replay atomic: a crash can never reproduce "new root, stale
+         * list" or a half-compacted tail.
+         */
         XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        if (rewind_tail)
+            XLogRegisterBuffer(1, tailbuf,
+                               REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_MERGE_C);
-        PageSetLSN(page, recptr);
+        PageSetLSN(metapage, recptr);
+        if (rewind_tail)
+            PageSetLSN(tailpage, recptr);
     }
 
+    END_CRIT_SECTION();
+
+    if (BufferIsValid(tailbuf))
+        UnlockReleaseBuffer(tailbuf);
     UnlockReleaseBuffer(metabuf);
+
+    if (consumed_out != NULL)
+        *consumed_out = consumed;
 }
 
 uint64
@@ -858,6 +1114,9 @@ pg_tre_pending_merge(Relation index)
     int               i, k;
     BlockNumber       new_root;
     uint64            n_merged;
+    BlockNumber       wm_tail;
+    uint32            wm_tail_n;
+    BlockNumber       wm_head;
 
     pg_tre_meta_read(index, &meta);
     if (meta.pending_head == InvalidBlockNumber)
@@ -873,8 +1132,15 @@ pg_tre_pending_merge(Relation index)
                        mc.bucket_cap * sizeof(MergeEntry *));
     mc.mcxt       = merge_cxt;
 
-    pg_tre_pending_scan(index, collect_pending_cb, &mc);
-    n_merged = meta.pending_n_entries;
+    /*
+     * Consume only the prefix that existed when the merge began,
+     * capturing the watermark so the truncate later removes exactly
+     * that prefix.  Entries a concurrent aminsert appends during the
+     * (long) rebuild below land past the watermark and survive into
+     * the next merge instead of being silently dropped.
+     */
+    pg_tre_pending_scan_watermark(index, collect_pending_cb, &mc,
+                                  &wm_tail, &wm_tail_n, &wm_head);
 
     materialize_merged_postings(index, &mc);
 
@@ -896,23 +1162,39 @@ pg_tre_pending_merge(Relation index)
     new_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
 
     /*
-     * Update meta: new root_upper, truncate pending list, bump
-     * n_tuples_indexed by the distinct TIDs we saw in the pending
-     * list (approximation -- a TID appears multiple times with
-     * different trigrams).  For a better estimate we'd use
-     * RelationEstimateSize on the heap, but for Phase 4 the
-     * approximation is enough for the planner to make reasonable
-     * decisions post-merge.
+     * Atomically swap in the new root_upper AND truncate the consumed
+     * prefix of the pending list in one WAL record.  n_tuples_indexed
+     * is bumped by an approximation of the distinct TIDs we ingested
+     * (a TID recurs across ~5 trigrams); the exact consumed count is
+     * returned by finalize_merge so the estimate tracks what was
+     * actually merged rather than the whole (possibly grown) list.
      */
     {
-        uint64 new_n_tuples = meta.n_tuples_indexed;
-        uint64 tid_est = n_merged / 5;   /* avg ~5 trigrams per row */
+        uint64 consumed = 0;
+        uint64 new_n_tuples;
+        uint64 tid_est;
+
+        finalize_merge(index, new_root, meta.root_range,
+                       (uint64) k, meta.n_tuples_indexed,
+                       wm_tail, wm_tail_n, &consumed);
+
+        n_merged = consumed;
+        tid_est = consumed / 5;   /* avg ~5 trigrams per row */
         if (tid_est > 0)
-            new_n_tuples += tid_est;
-        pg_tre_meta_set_roots(index, new_root, meta.root_range,
-                              (uint64) k, new_n_tuples);
+        {
+            new_n_tuples = meta.n_tuples_indexed + tid_est;
+            /*
+             * finalize_merge already wrote n_tuples_indexed =
+             * meta.n_tuples_indexed; patch in the bumped estimate with
+             * a plain meta update.  This is a stats-only field, so a
+             * crash that loses it merely reverts to a slightly stale
+             * planner estimate -- never a correctness issue, and never
+             * affects pending-list atomicity.
+             */
+            pg_tre_meta_set_roots(index, new_root, meta.root_range,
+                                  (uint64) k, new_n_tuples);
+        }
     }
-    truncate_pending_list(index);
 
     /* No sparsemap handles to free (tids arrays are palloc'd in merge_cxt
      * and released by MemoryContextDelete below). */

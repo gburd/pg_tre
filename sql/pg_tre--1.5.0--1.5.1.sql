@@ -1,0 +1,6 @@
+-- pg_tre 1.5.0 -> 1.5.1 upgrade.
+--
+-- No catalog changes: 1.5.1 is a C-level security/correctness
+-- hardening release (PG 19devel header compat, VACUUM crash fix,
+-- and assorted robustness fixes).  This upgrade script is an
+-- intentional no-op.

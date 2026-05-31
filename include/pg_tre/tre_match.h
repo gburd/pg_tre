@@ -18,7 +18,40 @@ typedef struct TreMatchResult
     int num_subst;      /* number of substitutions */
     int match_start;    /* byte offset of match start */
     int match_end;      /* byte offset of match end */
+    int timed_out;      /* 1 if the progress hook aborted the match */
 } TreMatchResult;
+
+/*
+ * Progress hook used to enforce wall-clock match timeouts.
+ *
+ * tre_match.c MUST NOT include postgres.h (it links against the vendored
+ * TRE library and uses raw malloc), so the timeout decision is delegated
+ * to a plain-C callback installed by the PostgreSQL-facing layer
+ * (src/module.c).  The matcher's per-position NFA loop invokes the hook
+ * periodically; a nonzero return aborts the match cleanly and surfaces as
+ * TreMatchResult.timed_out = 1.
+ *
+ * The callback takes no arguments and returns nonzero to abort.  It must
+ * be cheap (it is called roughly once per input character) and must not
+ * throw / longjmp -- it only signals; the abort is handled by returning
+ * an error status up through TRE.
+ */
+typedef int (*TreProgressHook) (void);
+
+/*
+ * Install (or, with NULL, clear) the progress hook.  Returns the previous
+ * hook so callers can save/restore around nested matches.  Not thread
+ * safe; pg_tre runs single-threaded per backend.
+ */
+TreProgressHook tre_set_progress_hook(TreProgressHook hook);
+
+/*
+ * Invoked from inside the vendored TRE matcher's per-position loop.
+ * Returns nonzero when the installed hook requests an abort.  Defined in
+ * tre_match.c (postgres.h-free) so the vendored matcher only references a
+ * plain extern symbol -- no PG types leak into vendor/tre.
+ */
+int tre_progress_check(void);
 
 /*
  * Compile a regex pattern. Returns opaque handle on success, NULL on

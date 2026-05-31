@@ -168,7 +168,11 @@ upper_flush_leaf(UpperBulkState *state)
      * inline blobs after the entry array). */
     PageTreGetOpaque(page)->flags = (uint16) state->leaf_n_entries;
 
-    /* WAL-log as full-page image. */
+    MarkBufferDirty(buf);
+
+    /* WAL-log as full-page image.  MarkBufferDirty must precede
+     * XLogRegisterBuffer (PG18 asserts buffer is dirty + exclusively
+     * locked). */
     if (RelationNeedsWAL(state->index))
     {
         XLogRecPtr recptr;
@@ -179,8 +183,6 @@ upper_flush_leaf(UpperBulkState *state)
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
         PageSetLSN(page, recptr);
     }
-
-    MarkBufferDirty(buf);
 
     /* Record the leaf block and its first key. */
     if (state->n_leaves >= state->leaves_alloced)
@@ -331,6 +333,10 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
         ((PageHeader) page)->pd_lower =
             (char *) &entries[this_n] - (char *) page;
 
+        MarkBufferDirty(buf);
+
+        /* MarkBufferDirty must precede XLogRegisterBuffer (PG18
+         * asserts buffer is dirty + exclusively locked). */
         if (RelationNeedsWAL(index))
         {
             XLogRecPtr recptr;
@@ -342,7 +348,6 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
             PageSetLSN(page, recptr);
         }
 
-        MarkBufferDirty(buf);
         next_keys[page_idx]   = keys[start];   /* first key on this page */
         next_blocks[page_idx] = BufferGetBlockNumber(buf);
         UnlockReleaseBuffer(buf);

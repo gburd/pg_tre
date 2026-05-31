@@ -15,6 +15,7 @@
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 
 #include "pg_tre/pg_tre.h"
@@ -142,6 +143,131 @@ pg_tre_init_guc(void)
     MarkGUCPrefixReserved("pg_tre");
 }
 
+/* ====================================================================
+ * Match-timeout enforcement.
+ *
+ * tre_match.c / vendor/tre cannot include postgres.h, so they cannot
+ * call GetCurrentTimestamp() or CHECK_FOR_INTERRUPTS().  Instead the
+ * matcher's per-position NFA loop calls the plain-C hook installed here.
+ * The hook compares the current wall-clock time against a deadline armed
+ * by pg_tre_arm_match_deadline() and returns nonzero to abort once the
+ * deadline is passed; the abort surfaces as TreMatchResult.timed_out,
+ * which pg_tre_check_match_timeout() converts into an ereport(ERROR).
+ *
+ * Granularity: the hook fires once per input character, so enforcement
+ * is exact to within one NFA-position step (sub-millisecond for typical
+ * inputs).  GetCurrentTimestamp() is a cheap gettimeofday() wrapper.
+ *
+ * This is a per-backend, single-threaded mechanism (no re-entrancy):
+ * nested matches share one deadline.  Callers must pair every arm with
+ * a disarm, preferably via PG_TRY/PG_FINALLY.
+ * ==================================================================== */
+
+static TimestampTz pg_tre_match_deadline = 0;     /* 0 == not armed */
+static int         pg_tre_match_arm_depth = 0;
+
+/*
+ * Progress hook handed to the TRE matcher.  Plain C signature, no
+ * arguments, returns nonzero to abort.  Must be cheap and must not throw.
+ */
+static int
+pg_tre_match_progress_hook(void)
+{
+    if (pg_tre_match_deadline != 0 &&
+        GetCurrentTimestamp() >= pg_tre_match_deadline)
+        return 1;               /* deadline exceeded: abort the match */
+    return 0;
+}
+
+/*
+ * Arm a wall-clock deadline for subsequent tre_do_match() calls and
+ * install the progress hook.  timeout_ms <= 0 means "use the GUC".
+ * Re-entrant: nested arms keep the outermost (earliest-disarming) hook
+ * installed and tighten the deadline to the soonest one.
+ */
+void
+pg_tre_arm_match_deadline(int timeout_ms)
+{
+    int          ms = (timeout_ms > 0) ? timeout_ms : pg_tre_match_timeout_ms;
+    TimestampTz  deadline;
+
+    if (ms <= 0)
+        return;                 /* timeout disabled */
+
+    deadline = TimestampTzPlusMilliseconds(GetCurrentTimestamp(), ms);
+
+    if (pg_tre_match_arm_depth == 0)
+    {
+        pg_tre_match_deadline = deadline;
+        (void) tre_set_progress_hook(pg_tre_match_progress_hook);
+    }
+    else if (deadline < pg_tre_match_deadline)
+    {
+        pg_tre_match_deadline = deadline;   /* tighten */
+    }
+    pg_tre_match_arm_depth++;
+}
+
+/* Disarm the deadline; uninstall the hook when the outermost arm exits. */
+void
+pg_tre_disarm_match_deadline(void)
+{
+    if (pg_tre_match_arm_depth == 0)
+        return;
+    if (--pg_tre_match_arm_depth == 0)
+    {
+        pg_tre_match_deadline = 0;
+        (void) tre_set_progress_hook(NULL);
+    }
+}
+
+/*
+ * Turn a timed-out match result into an error.  Call immediately after
+ * each tre_do_match() while the deadline is armed.
+ */
+void
+pg_tre_check_match_timeout(const TreMatchResult *r)
+{
+    if (r != NULL && r->timed_out)
+        ereport(ERROR,
+                (errcode(ERRCODE_QUERY_CANCELED),
+                 errmsg("pg_tre: regex match exceeded "
+                        "pg_tre.match_timeout_ms = %d ms",
+                        pg_tre_match_timeout_ms),
+                 errhint("Simplify the pattern, reduce max_cost, or raise "
+                         "pg_tre.match_timeout_ms for trusted callers.")));
+}
+
+/*
+ * Convenience wrapper used by the legacy UDFs: arm the deadline, run one
+ * match, disarm (even on error), and raise on timeout.  Keeps the per-UDF
+ * boilerplate to a single call.
+ */
+static TreMatchResult
+pg_tre_match_guarded(void *compiled, const char *str, int str_len,
+                     int max_cost, int cost_ins, int cost_del,
+                     int cost_subst, int max_ins, int max_del,
+                     int max_subst, int max_err)
+{
+    TreMatchResult result;
+
+    pg_tre_arm_match_deadline(0);
+    PG_TRY();
+    {
+        result = tre_do_match(compiled, str, str_len,
+                              max_cost, cost_ins, cost_del, cost_subst,
+                              max_ins, max_del, max_subst, max_err);
+    }
+    PG_FINALLY();
+    {
+        pg_tre_disarm_match_deadline();
+    }
+    PG_END_TRY();
+
+    pg_tre_check_match_timeout(&result);
+    return result;
+}
+
 /* ---- rmgr registration ---- */
 
 static RmgrData pg_tre_rmgr = {
@@ -203,7 +329,7 @@ pg_tre_amatch(PG_FUNCTION_ARGS)
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
                                 VARSIZE_ANY_EXHDR(pattern));
 
-    result = tre_do_match(compiled,
+    result = pg_tre_match_guarded(compiled,
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -226,7 +352,7 @@ pg_tre_amatch_cost(PG_FUNCTION_ARGS)
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
                                 VARSIZE_ANY_EXHDR(pattern));
 
-    result = tre_do_match(compiled,
+    result = pg_tre_match_guarded(compiled,
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -255,7 +381,7 @@ pg_tre_amatch_with_costs(PG_FUNCTION_ARGS)
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
                                 VARSIZE_ANY_EXHDR(pattern));
 
-    result = tre_do_match(compiled,
+    result = pg_tre_match_guarded(compiled,
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, cost_ins, cost_del, cost_subst,
@@ -306,7 +432,7 @@ pg_tre_amatch_detail(PG_FUNCTION_ARGS)
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
                                 VARSIZE_ANY_EXHDR(pattern));
 
-    result = tre_do_match(compiled,
+    result = pg_tre_match_guarded(compiled,
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -356,7 +482,7 @@ tre_compute_similarity(const char *input, int input_len,
     int             max_len;
 
     compiled = tre_cache_lookup(pattern, pattern_len);
-    result = tre_do_match(compiled, input, input_len,
+    result = pg_tre_match_guarded(compiled, input, input_len,
                           max_cost, 1, 1, 1,
                           INT_MAX, INT_MAX, INT_MAX, INT_MAX);
 
@@ -415,7 +541,7 @@ pg_tre_distance(PG_FUNCTION_ARGS)
 
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
                                 VARSIZE_ANY_EXHDR(pattern));
-    result = tre_do_match(compiled,
+    result = pg_tre_match_guarded(compiled,
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -477,7 +603,7 @@ pg_tre_distance_pattern(PG_FUNCTION_ARGS)
     max_cost = tre_pattern_get_max_cost(pat);
 
     compiled = tre_cache_lookup(pat_text, pat_len);
-    result = tre_do_match(compiled,
+    result = pg_tre_match_guarded(compiled,
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,

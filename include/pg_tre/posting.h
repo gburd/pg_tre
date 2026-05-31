@@ -24,6 +24,7 @@
 #define PG_TRE_POSTING_H
 
 #include "postgres.h"
+#include "access/genam.h"
 #include "storage/block.h"
 #include "storage/itemptr.h"
 #include "storage/buf.h"
@@ -230,11 +231,14 @@ extern bool pg_tre_posting_lookup_tuple_bloom(Relation index,
 
 /*
  * Look up the list of positions where a trigram appears in a given TID.
- * Returns the number of positions found (0 if TID not present).  The
- * returned positions array points into internal storage and is valid
- * until the next call to this function.
+ * Returns the number of positions found (0 if TID not present).  On
+ * success *out_positions is set to a buffer palloc'd in
+ * CurrentMemoryContext owned by the caller (freed on context reset or
+ * via pfree).  Each call allocates a fresh buffer, so results do not
+ * alias across calls (issue H4: the prior implementation returned a
+ * pointer into a process-global static array).
  *
- * Phase 5 READ requires; Phase 5 WRITE implements (STUB for now).
+ * Phase 5 READ requires; Phase 5 WRITE implements.
  */
 extern int pg_tre_posting_lookup_positions(Relation index,
                                            BlockNumber root,
@@ -242,5 +246,29 @@ extern int pg_tre_posting_lookup_positions(Relation index,
                                            Size inline_bytes,
                                            uint64 packed_tid,
                                            const uint32 **out_positions);
+
+/* ---- Bulk delete (VACUUM, issue C2) ---- */
+
+/*
+ * Walk every posting tree reachable from the upper tree and strip the
+ * heap TIDs that `callback` reports dead, repacking each affected leaf
+ * in place and WAL-logging the change (XLOG_PTRE_VACUUM full-page
+ * image).  Surviving TIDs and their payload entries are preserved.
+ *
+ * Returns the number of TIDs removed.  *out_remaining (optional)
+ * receives the count of surviving TIDs across all reachable
+ * (non-inline) posting trees; *out_pages (optional) receives the number
+ * of posting leaf pages visited.
+ *
+ * NOTE: postings stored INLINE in the upper-tree leaf entry are not
+ * cleaned (rewriting upper-tree pages is out of this module's scope);
+ * their dead TIDs remain correctly filtered by the executor's heap MVCC
+ * recheck and are reclaimed on the next REINDEX.
+ */
+extern uint64 pg_tre_posting_bulk_delete(Relation index,
+                                         IndexBulkDeleteCallback callback,
+                                         void *callback_state,
+                                         uint64 *out_remaining,
+                                         BlockNumber *out_pages);
 
 #endif /* PG_TRE_POSTING_H */

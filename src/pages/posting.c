@@ -29,6 +29,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "access/genam.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "lib/stringinfo.h"
@@ -40,6 +41,7 @@
 #include "utils/rel.h"
 
 #include "pg_tre/buffer.h"
+#include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
 #include "pg_tre/pg_tre.h"
@@ -1153,7 +1155,15 @@ corrupt_payload:
 /*
  * Look up positions where a trigram appears in a TID.
  * Returns the number of positions found (0 if TID not present).
- * The returned positions array points into internal storage.
+ *
+ * On success *out_positions is set to a buffer palloc'd in
+ * CurrentMemoryContext holding the returned positions.  Ownership is
+ * the caller's: it is freed when the surrounding memory context is
+ * reset/deleted, or the caller may pfree it explicitly.  Each call
+ * allocates a fresh buffer, so the result of one call is NOT clobbered
+ * by a subsequent (possibly re-entrant) call -- unlike the previous
+ * implementation, which returned a pointer into a single process-global
+ * static array that aliased across re-entrant scans (issue H4).
  *
  * Phase 5.1: Implements position lookup from payload area.
  */
@@ -1165,7 +1175,13 @@ pg_tre_posting_lookup_positions(Relation index,
                                 uint64 packed_tid,
                                 const uint32 **out_positions)
 {
-    static uint32 positions_buf[1024];  /* thread-local buffer */
+    /*
+     * H4 fix: positions are copied into a buffer palloc'd in
+     * CurrentMemoryContext (allocated lazily once we know we have a
+     * non-empty position list).  No shared static storage, so
+     * concurrent / re-entrant lookups do not alias each other.
+     */
+    uint32 *positions_buf = NULL;
     Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     sparsemap_t *smap = NULL;
     size_t rank;
@@ -1301,9 +1317,18 @@ pg_tre_posting_lookup_positions(Relation index,
 
             positions_ptr = (const uint32 *) entry_ptr;
 
-            /* Copy positions to thread-local buffer */
-            memcpy(positions_buf, positions_ptr,
-                   (Size) n_positions * sizeof(uint32));
+            /*
+             * Copy positions into a per-call buffer palloc'd in
+             * CurrentMemoryContext (H4: no shared static storage).
+             * When n_positions is 0 we still hand back a valid (1-elem)
+             * buffer so *out_positions is never left dangling.
+             */
+            positions_buf = (uint32 *) palloc((n_positions > 0
+                                               ? (Size) n_positions : 1)
+                                              * sizeof(uint32));
+            if (n_positions > 0)
+                memcpy(positions_buf, positions_ptr,
+                       (Size) n_positions * sizeof(uint32));
             *out_positions = positions_buf;
 
             UnlockReleaseBuffer(buf);
@@ -1318,4 +1343,497 @@ corrupt_positions:
                         cur_blk)));
         return 0;               /* unreachable */
     }
+}
+
+/* ================================================================
+ * Bulk delete (VACUUM)
+ * ================================================================
+ *
+ * Local mirror of the upper-tree internal-page entry layout.  The
+ * canonical definition lives in src/pages/upper.c (not exported via a
+ * header); we replicate the on-disk struct here so the vacuum walk can
+ * descend internal upper-tree levels.  Keep in sync with upper.c.
+ */
+typedef struct PgTreVacUpperInternalEntry
+{
+    uint64      first_key;
+    BlockNumber child_blk;
+} PgTreVacUpperInternalEntry;
+
+/*
+ * C2: remove dead heap TIDs from posting trees.  ambulkdelete()
+ * (src/am/amvacuum.c) drives this: for every TID stored in every
+ * reachable posting tree we invoke the IndexBulkDeleteCallback; TIDs
+ * the callback reports dead are stripped from the leaf sparsemap and
+ * their parallel payload entries are dropped.  Surviving TIDs (and
+ * their payload) are repacked in place and the leaf is WAL-logged as a
+ * full-page image (XLOG_PTRE_VACUUM, which routes through the generic
+ * FPI redo path in src/wal/xlog.c).
+ *
+ * Enumeration: posting roots live in the upper-tree leaf entries
+ * (PgTreUpperLeafEntry.posting_root).  We walk the upper tree from
+ * meta.root_upper -- descending internal levels to the leftmost leaf is
+ * not enough because upper leaves are NOT right-linked (they are
+ * bulk-loaded and addressed only via internal pages), so we perform a
+ * full recursive descent collecting every leaf's posting roots, then
+ * delete from each posting tree (following its right-link chain).
+ *
+ * Residual gap (documented for the orchestrator): postings stored
+ * INLINE in the upper-tree leaf entry (posting_root ==
+ * InvalidBlockNumber, inline_bytes > 0) are NOT cleaned here -- doing so
+ * would require rewriting upper-tree leaf pages, which this module does
+ * not own.  Such inline postings are small (< PG_TRE_INLINE_POSTING_MAX
+ * bytes) and their dead TIDs remain correctly filtered by the
+ * executor's heap MVCC recheck; they are reclaimed on the next REINDEX.
+ */
+
+/*
+ * Repack one posting leaf, dropping dead TIDs.  Returns the number of
+ * TIDs removed from this leaf (0 if nothing changed).  *out_remaining
+ * receives the surviving TID count.  The caller holds an EXCLUSIVE lock
+ * on buf; this routine writes back in place, WAL-logs, and leaves the
+ * lock held (the caller releases).
+ */
+static uint64
+posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
+                    IndexBulkDeleteCallback callback, void *callback_state,
+                    uint64 *out_remaining)
+{
+    Page    page = BufferGetPage(buf);
+    PgTrePostingLeafHeader *hdr =
+        (PgTrePostingLeafHeader *) PageGetContents(page);
+    uint8  *sm_bytes;
+    sparsemap_t *smap;
+    Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+    Size    smap_size;
+
+    /* surviving state */
+    uint64 *keep_tids = NULL;
+    int     keep_n = 0;
+    int     keep_cap = 0;
+    uint64  new_min = UINT64_MAX;
+    uint64  new_max = 0;
+    uint64  removed = 0;
+
+    /* surviving payload, rebuilt as a flat byte stream in rank order */
+    bool    has_payload;
+    const uint8 *payload_base = NULL;
+    const uint8 *payload_end = NULL;
+    const uint8 *entry_ptr = NULL;
+    uint8  *new_payload = NULL;
+    Size    new_payload_used = 0;
+    Size    new_payload_cap = 0;
+
+    uint64  member;
+
+    if (!posting_leaf_header_valid(hdr))
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("pg_tre: corrupt posting leaf at block %u", blkno)));
+
+    sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
+    smap_size = hdr->sparsemap_bytes;
+
+    has_payload = (hdr->payload_bytes > 0 && hdr->payload_offset != 0);
+    if (has_payload)
+    {
+        payload_base = (const uint8 *) page + hdr->payload_offset;
+        payload_end  = payload_base + hdr->payload_bytes;
+        entry_ptr    = payload_base;
+        new_payload_cap = hdr->payload_bytes;
+        new_payload = (uint8 *) palloc(new_payload_cap > 0 ? new_payload_cap : 1);
+    }
+
+    /*
+     * Wrap (read-only) the on-page sparsemap to iterate its members in
+     * ascending order.  Payload entries are stored in this same rank
+     * order, so we walk both in lockstep.
+     */
+    smap = sm_wrap(sm_bytes, smap_size);
+    if (smap != NULL)
+        sm_open(smap, sm_bytes, smap_size);
+
+    member = SM_IDX_MAX;
+    while (smap != NULL && (member = sm_next_member(smap, member)) != SM_IDX_MAX)
+    {
+        ItemPointerData iptr;
+        bool    dead;
+        const uint8 *this_entry = NULL;
+        Size    this_entry_len = 0;
+
+        CHECK_FOR_INTERRUPTS();
+
+        /* Locate this TID's payload entry (variable-length) before we
+         * decide to keep or drop, so we can copy it on the keep path. */
+        if (has_payload)
+        {
+            uint16 n_pos;
+            Size   step;
+
+            if (entry_ptr + sizeof(uint16) > payload_end)
+                goto corrupt;
+            memcpy(&n_pos, entry_ptr, sizeof(uint16));
+            step = sizeof(uint16)
+                 + (Size) n_pos * sizeof(uint32)
+                 + bloom_bytes;
+            if (step > (Size) (payload_end - entry_ptr))
+                goto corrupt;
+            this_entry = entry_ptr;
+            this_entry_len = step;
+            entry_ptr += step;
+        }
+
+        pg_tre_unpack_tid(member, &iptr);
+        dead = callback(&iptr, callback_state);
+
+        if (dead)
+        {
+            removed++;
+            continue;
+        }
+
+        /* Keep this TID. */
+        if (keep_n >= keep_cap)
+        {
+            keep_cap = keep_cap ? keep_cap * 2 : 64;
+            keep_tids = (uint64 *) (keep_tids
+                ? repalloc(keep_tids, (Size) keep_cap * sizeof(uint64))
+                : palloc((Size) keep_cap * sizeof(uint64)));
+        }
+        keep_tids[keep_n++] = member;
+        if (member < new_min) new_min = member;
+        if (member > new_max) new_max = member;
+
+        if (has_payload)
+        {
+            /* Append the preserved entry to the rebuilt payload stream.
+             * new_payload_cap == old payload_bytes is always sufficient
+             * since we only ever drop entries. */
+            Assert(new_payload_used + this_entry_len <= new_payload_cap);
+            memcpy(new_payload + new_payload_used, this_entry, this_entry_len);
+            new_payload_used += this_entry_len;
+        }
+    }
+
+    if (smap != NULL)
+        free(smap);
+
+    if (out_remaining)
+        *out_remaining = (uint64) keep_n;
+
+    /* Nothing dead in this leaf: leave the page untouched. */
+    if (removed == 0)
+    {
+        if (keep_tids)
+            pfree(keep_tids);
+        if (new_payload)
+            pfree(new_payload);
+        return 0;
+    }
+
+    /*
+     * Rebuild the leaf in place.  Serialize the surviving TIDs into a
+     * fresh sparsemap, then lay out header / sparsemap / payload exactly
+     * as write_single_leaf() does.  The new content is always <= the old
+     * content (we only removed entries), so it fits on the same page.
+     */
+    {
+        uint8  *new_sm_bytes;
+        Size    new_sm_size;
+        char   *sm_area;
+        sparsemap_t *fresh;
+        int     k;
+
+        if (keep_n > 0)
+        {
+            size_t cap = (size_t) keep_n * 16 + 1024;
+            fresh = sm_create(cap);
+            if (fresh == NULL)
+                ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                    errmsg("pg_tre: failed to allocate sparsemap for vacuum repack")));
+            for (k = 0; k < keep_n; k++)
+            {
+                int retries = 0;
+                CHECK_FOR_INTERRUPTS();
+                while (sm_add_grow(&fresh, keep_tids[k]) == SM_IDX_MAX)
+                {
+                    if (++retries > 16)
+                    {
+                        sm_free(fresh);
+                        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                            errmsg("pg_tre: vacuum repack sm_add_grow exhausted retries")));
+                    }
+                }
+            }
+            new_sm_size = sm_get_size(fresh);
+            new_sm_bytes = (uint8 *) palloc(new_sm_size + 16);
+            memcpy(new_sm_bytes, sm_get_data(fresh), new_sm_size);
+            sm_free(fresh);
+        }
+        else
+        {
+            /* Leaf emptied entirely.  Keep a valid empty sparsemap blob;
+             * the leaf stays linked in the chain (we do not unlink/free
+             * pages in this pass) but matches no TIDs. */
+            fresh = sm_create(64);
+            if (fresh == NULL)
+                ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                    errmsg("pg_tre: failed to allocate empty sparsemap for vacuum repack")));
+            new_sm_size = sm_get_size(fresh);
+            new_sm_bytes = (uint8 *) palloc(new_sm_size + 16);
+            memcpy(new_sm_bytes, sm_get_data(fresh), new_sm_size);
+            sm_free(fresh);
+            new_min = 0;
+            new_max = 0;
+        }
+
+        /* The repacked content must never exceed the original budget. */
+        if (new_sm_size + new_payload_used > posting_leaf_budget())
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: vacuum repack overflow on block %u", blkno)));
+
+        /* Header: preserve right_link; refresh min/max/sizes/counts. */
+        hdr->min_tid         = new_min;
+        hdr->max_tid         = new_max;
+        hdr->sparsemap_bytes = (uint32) new_sm_size;
+        hdr->n_entries       = (keep_n > UINT16_MAX) ? UINT16_MAX : (uint16) keep_n;
+        hdr->_pad            = 0;
+
+        sm_area = (char *) hdr + MAXALIGN(sizeof(*hdr));
+        memcpy(sm_area, new_sm_bytes, new_sm_size);
+        pfree(new_sm_bytes);
+
+        if (has_payload && new_payload_used > 0)
+        {
+            char *payload_area = (char *) page + BLCKSZ
+                               - MAXALIGN(sizeof(PageTreOpaqueData))
+                               - new_payload_used;
+            memcpy(payload_area, new_payload, new_payload_used);
+            hdr->payload_bytes  = (uint32) new_payload_used;
+            hdr->payload_offset = payload_area - (char *) page;
+            ((PageHeader) page)->pd_lower = (sm_area + new_sm_size) - (char *) page;
+            ((PageHeader) page)->pd_upper = payload_area - (char *) page;
+        }
+        else
+        {
+            hdr->payload_bytes  = 0;
+            hdr->payload_offset = 0;
+            ((PageHeader) page)->pd_lower = (sm_area + new_sm_size) - (char *) page;
+            /* Reclaim the former payload region: reset pd_upper to the
+             * end of the usable area (start of the opaque trailer) so the
+             * whole gap is free space and REGBUF_STANDARD strips it from
+             * the FPI. */
+            ((PageHeader) page)->pd_upper =
+                BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData));
+        }
+    }
+
+    if (keep_tids)
+        pfree(keep_tids);
+    if (new_payload)
+        pfree(new_payload);
+
+    /* WAL: MarkBufferDirty BEFORE XLogRegisterBuffer (PG18 asserts the
+     * buffer is dirty + exclusively locked); FPI replay handled by
+     * pg_tre_redo_fpi via XLOG_PTRE_VACUUM. */
+    MarkBufferDirty(buf);
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_VACUUM);
+        PageSetLSN(page, recptr);
+    }
+
+    return removed;
+
+corrupt:
+    if (smap != NULL)
+        free(smap);
+    if (keep_tids)
+        pfree(keep_tids);
+    if (new_payload)
+        pfree(new_payload);
+    ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("pg_tre: corrupt posting payload at block %u", blkno)));
+    return 0;                   /* unreachable */
+}
+
+/*
+ * Delete dead TIDs from one posting tree (the right-link chain rooted at
+ * `root`).  Each leaf is locked EXCLUSIVE, repacked, WAL-logged, and
+ * released before moving to the right sibling.  Accumulates removed /
+ * remaining counts into the supplied counters and bumps *pages_visited.
+ */
+static void
+posting_tree_delete(Relation index, BlockNumber root,
+                    IndexBulkDeleteCallback callback, void *callback_state,
+                    uint64 *tuples_removed, uint64 *tuples_remaining,
+                    BlockNumber *pages_visited)
+{
+    BlockNumber cur = root;
+
+    while (BlockNumberIsValid(cur))
+    {
+        Buffer  buf = pg_tre_read(index, cur, PG_TRE_PAGE_POSTING_L,
+                                  BUFFER_LOCK_EXCLUSIVE);
+        Page    page = BufferGetPage(buf);
+        PgTrePostingLeafHeader *hdr =
+            (PgTrePostingLeafHeader *) PageGetContents(page);
+        BlockNumber next;
+        uint64  remaining = 0;
+        uint64  removed;
+
+        if (!posting_leaf_header_valid(hdr))
+        {
+            UnlockReleaseBuffer(buf);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt posting leaf at block %u", cur)));
+        }
+        next = hdr->right_link;
+
+        removed = posting_leaf_delete(index, buf, cur, callback,
+                                      callback_state, &remaining);
+        if (tuples_removed)
+            *tuples_removed += removed;
+        if (tuples_remaining)
+            *tuples_remaining += remaining;
+        if (pages_visited)
+            (*pages_visited)++;
+
+        UnlockReleaseBuffer(buf);
+        cur = next;
+    }
+}
+
+/*
+ * Recursively walk the upper tree collecting posting roots and deleting
+ * dead TIDs from each.  `blk` is the current upper-tree page.  Internal
+ * pages dispatch to children; leaf pages enumerate their entries.
+ *
+ * Inline postings (posting_root == InvalidBlockNumber, inline_bytes > 0)
+ * are skipped (see the residual-gap note at the top of this section);
+ * their count of surviving TIDs is not added to *tuples_remaining, so
+ * the reported num_index_tuples slightly undercounts when inline
+ * postings are present -- this is honest (it never reports the false
+ * zero the old no-op did) and conservative.
+ */
+static void
+posting_upper_walk(Relation index, BlockNumber blk,
+                   IndexBulkDeleteCallback callback, void *callback_state,
+                   uint64 *tuples_removed, uint64 *tuples_remaining,
+                   BlockNumber *posting_pages)
+{
+    Buffer  buf;
+    Page    page;
+    PageTreOpaque opq;
+
+    CHECK_FOR_INTERRUPTS();
+
+    buf = pg_tre_read(index, blk, PG_TRE_PAGE_INVALID, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    opq = PageTreGetOpaque(page);
+
+    if (opq->page_kind == PG_TRE_PAGE_UPPER)
+    {
+        /* Internal node: collect child block numbers, then recurse after
+         * releasing this page's lock (avoid holding locks across the
+         * descent / posting-tree exclusive locks). */
+        PgTreVacUpperInternalEntry *entries =
+            (PgTreVacUpperInternalEntry *) PageGetContents(page);
+        int n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
+              / sizeof(PgTreVacUpperInternalEntry);
+        BlockNumber *children = NULL;
+        int i;
+
+        if (n > 0)
+        {
+            children = (BlockNumber *) palloc((Size) n * sizeof(BlockNumber));
+            for (i = 0; i < n; i++)
+                children[i] = entries[i].child_blk;
+        }
+        UnlockReleaseBuffer(buf);
+
+        for (i = 0; i < n; i++)
+            posting_upper_walk(index, children[i], callback, callback_state,
+                               tuples_removed, tuples_remaining, posting_pages);
+        if (children)
+            pfree(children);
+        return;
+    }
+
+    if (opq->page_kind == PG_TRE_PAGE_UPPER_L)
+    {
+        /* Leaf node: collect posting roots, then release before deleting. */
+        PgTreUpperLeafEntry *entries =
+            (PgTreUpperLeafEntry *) PageGetContents(page);
+        int n = opq->flags;
+        BlockNumber *roots = NULL;
+        int roots_n = 0;
+        int i;
+
+        if (n == 0)
+            n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
+              / sizeof(PgTreUpperLeafEntry);
+
+        if (n > 0)
+        {
+            roots = (BlockNumber *) palloc((Size) n * sizeof(BlockNumber));
+            for (i = 0; i < n; i++)
+            {
+                /* Skip inline postings (no separate root page). */
+                if (BlockNumberIsValid(entries[i].posting_root))
+                    roots[roots_n++] = entries[i].posting_root;
+            }
+        }
+        UnlockReleaseBuffer(buf);
+
+        for (i = 0; i < roots_n; i++)
+            posting_tree_delete(index, roots[i], callback, callback_state,
+                                tuples_removed, tuples_remaining,
+                                posting_pages);
+        if (roots)
+            pfree(roots);
+        return;
+    }
+
+    /* Unexpected page kind: release and ignore (defensive). */
+    UnlockReleaseBuffer(buf);
+}
+
+/*
+ * Top-level bulk delete entry point used by ambulkdelete().  Walks every
+ * posting tree reachable from the upper tree, stripping TIDs the
+ * callback reports dead.  Returns the number of TIDs removed; reports
+ * the surviving TID count via *out_remaining and the number of posting
+ * leaf pages visited via *out_pages (both optional).
+ */
+uint64
+pg_tre_posting_bulk_delete(Relation index,
+                           IndexBulkDeleteCallback callback,
+                           void *callback_state,
+                           uint64 *out_remaining,
+                           BlockNumber *out_pages)
+{
+    PgTreMetaPageData meta;
+    uint64  tuples_removed = 0;
+    uint64  tuples_remaining = 0;
+    BlockNumber posting_pages = 0;
+
+    pg_tre_meta_read(index, &meta);
+
+    if (BlockNumberIsValid(meta.root_upper))
+        posting_upper_walk(index, meta.root_upper, callback, callback_state,
+                           &tuples_removed, &tuples_remaining, &posting_pages);
+
+    if (out_remaining)
+        *out_remaining = tuples_remaining;
+    if (out_pages)
+        *out_pages = posting_pages;
+    return tuples_removed;
 }

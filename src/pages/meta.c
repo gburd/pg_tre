@@ -128,6 +128,10 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
      */
     wal_log = (forknum == INIT_FORKNUM) || RelationNeedsWAL(index);
 
+    MarkBufferDirty(metabuf);
+
+    /* MarkBufferDirty must precede XLogRegisterBuffer (PG18 asserts
+     * buffer is dirty + exclusively locked). */
     if (wal_log)
     {
         XLogRecPtr recptr;
@@ -138,7 +142,6 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
         PageSetLSN(metapage, recptr);
     }
 
-    MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
 
     /*

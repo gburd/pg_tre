@@ -45,6 +45,18 @@
 #include "pg_tre/sparsemap.h"
 #include "pg_tre/tre_match.h"
 
+/*
+ * Pinning entrypoints for the compiled-pattern cache.  Declared here
+ * because pattern_cache.h is shared and owned elsewhere; the pin/unpin
+ * API is consumed only by this translation unit (the KNN scan loop).
+ * tre_cache_lookup_pinned() returns a compiled handle whose cache slot
+ * is pinned against LRU eviction until tre_cache_release() drops the
+ * pin -- without this, a long re-entrant scan that compiles >= 32 other
+ * patterns could evict and free the handle still in use (use-after-free).
+ */
+extern void *tre_cache_lookup_pinned(const char *pattern, int pattern_len);
+extern void tre_cache_release(void *compiled);
+
 
 /*
  * KNN heap entry: packed TID + computed edit distance.
@@ -966,7 +978,21 @@ static sparsemap_t *
 tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                          bool *out_always_true)
 {
-    sparsemap_t  *result = NULL;
+    volatile sparsemap_t *result = NULL;
+    /*
+     * Maps owned transiently during the build.  Tracked in volatile
+     * locals so the PG_CATCH below can free them if any ereport-capable
+     * call (pg_tre_posting_materialize, sm_intersection/sm_union/sm_copy,
+     * pg_tre_posting_lookup_positions, sm_add) longjmps out mid-build --
+     * otherwise these malloc-backed maps leak (H3).
+     */
+    volatile sparsemap_t *inflight = NULL;   /* transient sm being merged */
+    volatile sparsemap_t *filtered = NULL;   /* positional-filter result */
+    PendingOverlay ov;
+    volatile bool  overlay_built = false;
+    TriUpperCache  upper_cache;
+    volatile bool  upper_cache_built = false;
+    volatile bool  short_circuit = false;   /* CNF proved empty: result == NULL */
     int           i;
 
     *out_always_true = false;
@@ -977,14 +1003,16 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         return NULL;
     }
 
+    PG_TRY();
+    {
     /*
      * Build the pending-list overlay once.  If the index has no
      * pending entries, this is a single metapage read and returns
      * immediately.
      */
     {
-        PendingOverlay ov;
         overlay_build(&ov, scan->indexRelation, &st->q, st->scan_cxt);
+        overlay_built = true;
 
         if (st->q.mode == TRIGRAM_QUERY_CNF)
         {
@@ -997,9 +1025,11 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                                       st->scan_cxt, &ov);
                 if (sm == NULL)
                 {
-                    if (result != NULL) free(result);
+                    if (result != NULL) { free((sparsemap_t *) result); result = NULL; }
                     overlay_free(&ov);
-                    return NULL;
+                    overlay_built = false;
+                    short_circuit = true;
+                    break;
                 }
 
                 if (result == NULL)
@@ -1008,17 +1038,22 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 }
                 else
                 {
-                    sparsemap_t *merged = sm_intersection(result, sm);
-                    free(result);
+                    sparsemap_t *merged;
+                    inflight = sm;
+                    merged = sm_intersection((sparsemap_t *) result, sm);
+                    free((sparsemap_t *) result);
                     free(sm);
+                    inflight = NULL;
                     result = merged;
                     if (result == NULL ||
-                        (sm_get_size(result) != 0 &&
-                         sm_cardinality(result) == 0))
+                        (sm_get_size((sparsemap_t *) result) != 0 &&
+                         sm_cardinality((sparsemap_t *) result) == 0))
                     {
-                        if (result) free(result);
+                        if (result) { free((sparsemap_t *) result); result = NULL; }
                         overlay_free(&ov);
-                        return NULL;
+                        overlay_built = false;
+                        short_circuit = true;
+                        break;
                     }
                 }
             }
@@ -1045,6 +1080,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                                                        ref.inline_bytes);
                         pg_tre_upper_release(&ref);
                     }
+                    inflight = sm;
 
                     pend = overlay_lookup(&ov, tile->alts[j].trigram_hash);
                     if (pend != NULL)
@@ -1057,27 +1093,46 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                             free(sm);
                             sm = u;
                         }
+                        inflight = sm;
                     }
 
                     if (sm == NULL)
+                    {
+                        inflight = NULL;
                         continue;
+                    }
 
                     if (result == NULL)
+                    {
                         result = sm;
+                        inflight = NULL;
+                    }
                     else
                     {
-                        sparsemap_t *merged = sm_union(result, sm);
-                        free(result);
+                        sparsemap_t *merged = sm_union((sparsemap_t *) result, sm);
+                        free((sparsemap_t *) result);
                         free(sm);
+                        inflight = NULL;
                         result = merged;
                     }
                 }
             }
         }
 
-        overlay_free(&ov);
+        if (!short_circuit)
+        {
+            overlay_free(&ov);
+            overlay_built = false;
+        }
     }
 
+    /*
+     * When the CNF intersection proved the candidate set empty,
+     * result is NULL and there is nothing further to filter; skip the
+     * upper-tree cache build and the tier-3 / positional passes.
+     */
+    if (!short_circuit)
+    {
     /*
      * Build the per-trigram upper-tree lookup cache.  Both tier-3 and
      * the Phase 5.1 positional filter walk every candidate TID and used
@@ -1086,35 +1141,45 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
      * the lookups into a single O(T) pass; the inner loops do a small
      * linear-scan cache hit instead.
      */
-    TriUpperCache upper_cache;
     tri_upper_cache_build(&upper_cache, scan->indexRelation, &st->q,
                           st->scan_cxt);
+    upper_cache_built = true;
 
     /* Tier-3: per-tuple bloom filter (chain-rank gated; see comment in
      * pg_tre_amgetbitmap below). */
     if (result != NULL && st->q.global_max_cost >= 0 &&
         pg_tre_tuple_bloom_enable &&
         !tre_query_is_single_trigram(&st->q) &&
-        sm_cardinality(result) <= (uint64) pg_tre_tier3_max_candidates)
+        sm_cardinality((sparsemap_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
-                                          result, st->scan_cxt,
+                                          (sparsemap_t *) result, st->scan_cxt,
                                           &upper_cache);
     }
 
     /* Phase 5.1: positional filter (CNF only). */
-    if (result != NULL && sm_cardinality(result) > 0 &&
+    if (result != NULL && sm_cardinality((sparsemap_t *) result) > 0 &&
         st->q.mode == TRIGRAM_QUERY_CNF &&
         pg_tre_tuple_bloom_enable &&
         !tre_query_is_single_trigram(&st->q) &&
-        sm_cardinality(result) <= (uint64) pg_tre_tier3_max_candidates)
+        sm_cardinality((sparsemap_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
     {
-        sparsemap_t *filtered = sm_create(sm_get_capacity(result));
+        filtered = sm_create(sm_get_capacity((sparsemap_t *) result));
         if (filtered != NULL)
         {
             uint64 tid_idx = SM_IDX_MAX;
+            /*
+             * H4: pg_tre_posting_lookup_positions() returns a pointer
+             * into a process-global static buffer (posting.c) that is
+             * aliased across re-entrant scans.  Copy each result into
+             * this scan-context buffer immediately and read only from
+             * the copy, so a re-entrant posting lookup cannot clobber
+             * positions out from under us.  The posting side caps a
+             * single TID's position list at 1024 entries.
+             */
+            uint32 *pos_copy = palloc(sizeof(uint32) * 1024);
 
-            while ((tid_idx = sm_next_member(result, tid_idx)) != SM_IDX_MAX)
+            while ((tid_idx = sm_next_member((sparsemap_t *) result, tid_idx)) != SM_IDX_MAX)
             {
                 bool passes = (st->q.mode == TRIGRAM_QUERY_CNF);
                 int ci, j;
@@ -1155,6 +1220,13 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                                 conj_pass = true;
                                 break;
                             }
+
+                            /* H4: copy out of the shared static buffer before use. */
+                            if (n_positions > 1024)
+                                n_positions = 1024;
+                            memcpy(pos_copy, positions,
+                                   sizeof(uint32) * n_positions);
+                            positions = pos_copy;
 
                             for (p = 0; p < n_positions; p++)
                             {
@@ -1201,6 +1273,13 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                                 this_tri_pass = true;
                             else
                             {
+                                /* H4: copy out of the shared static buffer before use. */
+                                if (n_positions > 1024)
+                                    n_positions = 1024;
+                                memcpy(pos_copy, positions,
+                                       sizeof(uint32) * n_positions);
+                                positions = pos_copy;
+
                                 for (p = 0; p < n_positions; p++)
                                 {
                                     if (positions[p] >= (uint32) dis->min_offset &&
@@ -1228,9 +1307,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
 
                 if (passes)
                 {
-                    if (sm_add(filtered, tid_idx) == SM_IDX_MAX)
+                    if (sm_add((sparsemap_t *) filtered, tid_idx) == SM_IDX_MAX)
                     {
-                        free(filtered);
+                        free((sparsemap_t *) filtered);
                         filtered = NULL;
                         break;
                     }
@@ -1239,15 +1318,39 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
 
             if (filtered != NULL)
             {
-                free(result);
+                free((sparsemap_t *) result);
                 result = filtered;
+                filtered = NULL;
             }
         }
     }
 
     tri_upper_cache_release(&upper_cache);
+    upper_cache_built = false;
+    }  /* if (!short_circuit) */
+    }
+    PG_CATCH();
+    {
+        /*
+         * H3: a longjmp out of any ereport-capable call above skips the
+         * manual frees.  Release every malloc-backed map we still own,
+         * plus the overlay and upper-tree cache, then re-throw.
+         */
+        if (inflight != NULL)
+            free((sparsemap_t *) inflight);
+        if (filtered != NULL)
+            free((sparsemap_t *) filtered);
+        if (result != NULL)
+            free((sparsemap_t *) result);
+        if (overlay_built)
+            overlay_free(&ov);
+        if (upper_cache_built)
+            tri_upper_cache_release(&upper_cache);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 
-    return result;
+    return (sparsemap_t *) result;
 }
 
 int64
@@ -1419,21 +1522,22 @@ static void
 knn_build(IndexScanDesc scan, TreScanState *st)
 {
     MemoryContext old;
-    sparsemap_t   *result;
+    volatile sparsemap_t *result = NULL;
     bool          always_true = false;
     Relation      heap = scan->heapRelation;
     bool          opened_heap = false;
     AttrNumber    body_attno;
-    void         *compiled = NULL;
+    void * volatile compiled = NULL;
     int32         max_cost = 0;
     struct TrePatternData *pat;
     char         *pat_text;
     int           pat_len;
     int           cap = 64;
-    int           n_entries = 0;
-    OrderEntry   *entries;
+    volatile int  n_entries = 0;
+    OrderEntry   *volatile entries;
     bool          have_orderby = (scan->numberOfOrderBys >= 1 &&
                                   scan->orderByData != NULL);
+    volatile bool deadline_armed = false;
 
     if (!st->query_valid)
         ereport(ERROR,
@@ -1446,6 +1550,12 @@ knn_build(IndexScanDesc scan, TreScanState *st)
      * (no ORDER BY), we still emit candidate TIDs but skip the
      * distance pipeline entirely; entries[].dist stays 0 and
      * xs_orderbyvals stays untouched.
+     *
+     * Pin the compiled pattern: the handle is held across the long
+     * heap_getnext / sm_next_member loop below, which can re-enter the
+     * planner/executor (toast fetches, etc.) and compile other regexes,
+     * evicting an unpinned entry out from under us (use-after-free).
+     * The pin is dropped in the PG_FINALLY block.
      */
     if (have_orderby)
     {
@@ -1453,7 +1563,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
               PG_DETOAST_DATUM(scan->orderByData[0].sk_argument);
         pat_text = tre_pattern_get_text(pat, &pat_len);
         max_cost = tre_pattern_get_max_cost(pat);
-        compiled = tre_cache_lookup(pat_text, pat_len);
+        compiled = tre_cache_lookup_pinned(pat_text, pat_len);
     }
 
     body_attno = resolve_body_attno(scan->indexRelation);
@@ -1468,131 +1578,173 @@ knn_build(IndexScanDesc scan, TreScanState *st)
     old = MemoryContextSwitchTo(st->scan_cxt);
     entries = palloc(sizeof(*entries) * cap);
 
-    result = tre_compute_candidate_sm(scan, st, &always_true);
-
-    if (always_true)
+    /*
+     * Consolidated cleanup region (H2 + H3 + C1): the match-timeout
+     * deadline, the pinned compiled pattern, and the malloc-backed
+     * candidate sparsemap must all be released on both normal and
+     * error (longjmp) exit.  A corrupt-page ERROR or OOM inside any of
+     * the ereport-capable calls below (heap_fetch, PG_DETOAST_DATUM,
+     * tre_do_match, sm_*) would otherwise skip the manual frees and
+     * leak / leave the cache entry pinned forever.
+     */
+    PG_TRY();
     {
+        result = tre_compute_candidate_sm(scan, st, &always_true);
+
         /*
-         * No candidate filter from the index.  We must consider every
-         * heap row.  This degrades to a sequential scan but preserves
-         * correctness; the cost estimator should already have steered
-         * the planner away when this can be avoided.  Stream every
-         * row's TID through the same distance pipeline.
-         *
-         * When there is no ORDER BY (have_orderby == false), we still
-         * must run the executor's recheck path, so emit every TID and
-         * let the caller's xs_recheck decide.
+         * Arm the per-match deadline once for the whole loop.  Only
+         * meaningful when we actually run tre_do_match (have_orderby);
+         * 0 => use the GUC-configured timeout.
          */
-        TableScanDesc heapscan;
-        HeapTuple     htup;
-        TupleDesc     desc = RelationGetDescr(heap);
-
-        heapscan = table_beginscan_strat(heap, scan->xs_snapshot, 0, NULL,
-                                         true /* allow_strat */, true /* allow_sync */);
-        while ((htup = heap_getnext(heapscan, ForwardScanDirection)) != NULL)
+        if (have_orderby)
         {
-            bool      isnull = false;
-            Datum     val;
-            text     *body;
-            int32     dist = 0;
-            ItemPointerData tid;
-
-            CHECK_FOR_INTERRUPTS();
-
-            if (have_orderby)
-            {
-                TreMatchResult r;
-
-                val = heap_getattr(htup, body_attno, desc, &isnull);
-                if (isnull)
-                    continue;
-                body = (text *) PG_DETOAST_DATUM_PACKED(val);
-                r = tre_do_match(compiled,
-                                 VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
-                                 max_cost, 1, 1, 1,
-                                 INT_MAX, INT_MAX, INT_MAX, INT_MAX);
-                if (!r.matched)
-                    continue;       /* NULLS LAST: drop no-match rows */
-                dist = r.cost;
-            }
-
-            ItemPointerCopy(&htup->t_self, &tid);
-
-            if (n_entries >= cap)
-            {
-                cap *= 2;
-                entries = repalloc(entries, sizeof(*entries) * cap);
-            }
-            entries[n_entries].packed_tid = pg_tre_pack_tid(&tid);
-            entries[n_entries].dist = dist;
-            n_entries++;
+            pg_tre_arm_match_deadline(0);
+            deadline_armed = true;
         }
-        table_endscan(heapscan);
-    }
-    else if (result != NULL && sm_cardinality(result) > 0)
-    {
-        uint64 idx = SM_IDX_MAX;
 
-        while ((idx = sm_next_member(result, idx)) != SM_IDX_MAX)
+        if (always_true)
         {
-            ItemPointerData tid;
-            int32           dist = 0;
+            /*
+             * No candidate filter from the index.  We must consider every
+             * heap row.  This degrades to a sequential scan but preserves
+             * correctness; the cost estimator should already have steered
+             * the planner away when this can be avoided.  Stream every
+             * row's TID through the same distance pipeline.
+             *
+             * When there is no ORDER BY (have_orderby == false), we still
+             * must run the executor's recheck path, so emit every TID and
+             * let the caller's xs_recheck decide.
+             */
+            TableScanDesc heapscan;
+            HeapTuple     htup;
+            TupleDesc     desc = RelationGetDescr(heap);
 
-            CHECK_FOR_INTERRUPTS();
-
-            pg_tre_unpack_tid(idx, &tid);
-
-            if (have_orderby)
+            heapscan = table_beginscan_strat(heap, scan->xs_snapshot, 0, NULL,
+                                             true /* allow_strat */, true /* allow_sync */);
+            while ((htup = heap_getnext(heapscan, ForwardScanDirection)) != NULL)
             {
-                HeapTupleData   htup;
-                Buffer          buf = InvalidBuffer;
-                TupleDesc       desc;
-                bool            isnull = false;
-                Datum           val;
-                text           *body;
-                TreMatchResult  r;
+                bool      isnull = false;
+                Datum     val;
+                text     *body;
+                int32     dist = 0;
+                ItemPointerData tid;
 
-                ItemPointerCopy(&tid, &htup.t_self);
+                CHECK_FOR_INTERRUPTS();
 
-                if (!heap_fetch(heap, scan->xs_snapshot, &htup, &buf, false))
+                if (have_orderby)
                 {
-                    if (BufferIsValid(buf))
+                    TreMatchResult r;
+
+                    val = heap_getattr(htup, body_attno, desc, &isnull);
+                    if (isnull)
+                        continue;
+                    body = (text *) PG_DETOAST_DATUM_PACKED(val);
+                    r = tre_do_match(compiled,
+                                     VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
+                                     max_cost, 1, 1, 1,
+                                     INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                    pg_tre_check_match_timeout(&r);
+                    if (!r.matched)
+                        continue;       /* NULLS LAST: drop no-match rows */
+                    dist = r.cost;
+                }
+
+                ItemPointerCopy(&htup->t_self, &tid);
+
+                if (n_entries >= cap)
+                {
+                    cap *= 2;
+                    entries = repalloc(entries, sizeof(*entries) * cap);
+                }
+                entries[n_entries].packed_tid = pg_tre_pack_tid(&tid);
+                entries[n_entries].dist = dist;
+                n_entries++;
+            }
+            table_endscan(heapscan);
+        }
+        else if (result != NULL && sm_cardinality((sparsemap_t *) result) > 0)
+        {
+            uint64 idx = SM_IDX_MAX;
+
+            while ((idx = sm_next_member((sparsemap_t *) result, idx)) != SM_IDX_MAX)
+            {
+                ItemPointerData tid;
+                int32           dist = 0;
+
+                CHECK_FOR_INTERRUPTS();
+
+                pg_tre_unpack_tid(idx, &tid);
+
+                if (have_orderby)
+                {
+                    HeapTupleData   htup;
+                    Buffer          buf = InvalidBuffer;
+                    TupleDesc       desc;
+                    bool            isnull = false;
+                    Datum           val;
+                    text           *body;
+                    TreMatchResult  r;
+
+                    ItemPointerCopy(&tid, &htup.t_self);
+
+                    if (!heap_fetch(heap, scan->xs_snapshot, &htup, &buf, false))
+                    {
+                        if (BufferIsValid(buf))
+                            ReleaseBuffer(buf);
+                        continue;       /* not visible; executor would skip too */
+                    }
+
+                    desc = RelationGetDescr(heap);
+                    val = heap_getattr(&htup, body_attno, desc, &isnull);
+                    if (isnull)
+                    {
                         ReleaseBuffer(buf);
-                    continue;       /* not visible; executor would skip too */
-                }
-
-                desc = RelationGetDescr(heap);
-                val = heap_getattr(&htup, body_attno, desc, &isnull);
-                if (isnull)
-                {
+                        continue;
+                    }
+                    body = (text *) PG_DETOAST_DATUM_PACKED(val);
+                    r = tre_do_match(compiled,
+                                     VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
+                                     max_cost, 1, 1, 1,
+                                     INT_MAX, INT_MAX, INT_MAX, INT_MAX);
                     ReleaseBuffer(buf);
-                    continue;
+
+                    pg_tre_check_match_timeout(&r);
+                    if (!r.matched)
+                        continue;       /* false positive from trigram filter */
+                    dist = r.cost;
                 }
-                body = (text *) PG_DETOAST_DATUM_PACKED(val);
-                r = tre_do_match(compiled,
-                                 VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
-                                 max_cost, 1, 1, 1,
-                                 INT_MAX, INT_MAX, INT_MAX, INT_MAX);
-                ReleaseBuffer(buf);
 
-                if (!r.matched)
-                    continue;       /* false positive from trigram filter */
-                dist = r.cost;
+                if (n_entries >= cap)
+                {
+                    cap *= 2;
+                    entries = repalloc(entries, sizeof(*entries) * cap);
+                }
+                entries[n_entries].packed_tid = idx;
+                entries[n_entries].dist = dist;
+                n_entries++;
             }
+        }
 
-            if (n_entries >= cap)
-            {
-                cap *= 2;
-                entries = repalloc(entries, sizeof(*entries) * cap);
-            }
-            entries[n_entries].packed_tid = idx;
-            entries[n_entries].dist = dist;
-            n_entries++;
+        /*
+         * Normal-path free of the malloc-backed candidate map.  Clear
+         * the pointer so the PG_FINALLY block does not double-free it.
+         */
+        if (result != NULL)
+        {
+            free((sparsemap_t *) result);
+            result = NULL;
         }
     }
-
-    if (result != NULL)
-        free(result);
+    PG_FINALLY();
+    {
+        if (deadline_armed)
+            pg_tre_disarm_match_deadline();
+        if (result != NULL)
+            free((sparsemap_t *) result);
+        if (compiled != NULL)
+            tre_cache_release(compiled);
+    }
+    PG_END_TRY();
 
     /*
      * Sorting is only meaningful when ORDER BY is asking for it.
@@ -1602,9 +1754,9 @@ knn_build(IndexScanDesc scan, TreScanState *st)
      * stable, deterministic order for tests in either case.
      */
     if (have_orderby)
-        qsort(entries, n_entries, sizeof(*entries), knn_entry_cmp);
+        qsort((void *) entries, n_entries, sizeof(*entries), knn_entry_cmp);
 
-    st->knn_entries     = entries;
+    st->knn_entries     = (OrderEntry *) entries;
     st->knn_n           = n_entries;
     st->knn_pos         = 0;
     st->knn_compiled    = compiled;

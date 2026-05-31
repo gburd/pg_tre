@@ -31,6 +31,7 @@ typedef struct TreCacheSlot
     int     pattern_len;
     void   *compiled;       /* opaque handle from tre_compile_pattern */
     uint64  last_used;
+    int     pinned;         /* >0 => in use by a scan, must not evict/free */
 } TreCacheSlot;
 
 static TreCacheSlot *cache_slots = NULL;
@@ -64,10 +65,23 @@ evict_slot(TreCacheSlot *slot)
     }
     slot->pattern_len = 0;
     slot->last_used = 0;
+    slot->pinned = 0;
 }
 
-void *
-tre_cache_lookup(const char *pattern, int pattern_len)
+/*
+ * Internal lookup.  When pin is true, the returned slot's compiled
+ * handle is pinned (refcount++) so it cannot be evicted or freed until
+ * a matching tre_cache_release().  A pinned entry held across a long,
+ * re-entrant scan would otherwise be evicted by the LRU once >= 32
+ * other patterns are compiled, freeing the handle out from under the
+ * caller (use-after-free).
+ *
+ * On a miss with every slot pinned we compile the pattern but do NOT
+ * cache it (out_uncached set to the fresh handle); the caller is
+ * responsible for freeing such a handle via tre_cache_release().
+ */
+static void *
+tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
 {
     int             i;
     TreCacheSlot   *target;
@@ -95,6 +109,8 @@ tre_cache_lookup(const char *pattern, int pattern_len)
             memcmp(slot->pattern, pattern, pattern_len) == 0)
         {
             slot->last_used = ++cache_clock;
+            if (pin)
+                slot->pinned++;
             return slot->compiled;
         }
     }
@@ -131,9 +147,13 @@ tre_cache_lookup(const char *pattern, int pattern_len)
         }
     }
 
-    /* Find an empty slot, or the LRU slot for eviction */
-    target = &cache_slots[0];
-    min_used = cache_slots[0].last_used;
+    /*
+     * Find an empty slot, or the LRU slot for eviction.  Pinned slots
+     * are skipped: their compiled handle is live in some scan loop and
+     * freeing it would be a use-after-free.
+     */
+    target = NULL;
+    min_used = 0;
     for (i = 0; i < TRE_CACHE_SLOTS; i++)
     {
         if (cache_slots[i].compiled == NULL)
@@ -141,12 +161,25 @@ tre_cache_lookup(const char *pattern, int pattern_len)
             target = &cache_slots[i];
             break;
         }
-        if (cache_slots[i].last_used < min_used)
+        if (cache_slots[i].pinned > 0)
+            continue;
+        if (target == NULL || cache_slots[i].last_used < min_used)
         {
             min_used = cache_slots[i].last_used;
             target = &cache_slots[i];
         }
     }
+
+    /*
+     * Every slot is pinned (>= 32 patterns live in concurrent/re-entrant
+     * scans).  Don't evict anything; hand back the freshly compiled
+     * handle uncached.  When pinned, the caller owns it and must free it
+     * via tre_cache_release(); when not pinned this leaks one compile,
+     * which is preferable to corrupting a live entry and is bounded by
+     * the (rare) all-pinned condition.
+     */
+    if (target == NULL)
+        return compiled;
 
     evict_slot(target);
 
@@ -160,6 +193,53 @@ tre_cache_lookup(const char *pattern, int pattern_len)
     target->pattern_len = pattern_len;
     target->compiled = compiled;
     target->last_used = ++cache_clock;
+    target->pinned = pin ? 1 : 0;
 
     return compiled;
+}
+
+void *
+tre_cache_lookup(const char *pattern, int pattern_len)
+{
+    return tre_cache_lookup_internal(pattern, pattern_len, false);
+}
+
+/*
+ * Like tre_cache_lookup(), but pins the returned compiled handle so the
+ * LRU cannot evict/free it until tre_cache_release() is called with the
+ * same handle.  Use this when the handle is held across calls that can
+ * re-enter the cache (e.g. a scan loop that compiles other patterns).
+ */
+void *
+tre_cache_lookup_pinned(const char *pattern, int pattern_len)
+{
+    return tre_cache_lookup_internal(pattern, pattern_len, true);
+}
+
+/*
+ * Release a pin taken by tre_cache_lookup_pinned().  Matches the handle
+ * by pointer identity.  If the handle was returned uncached (all slots
+ * pinned at lookup time), it is not found in any slot and is freed here.
+ * A NULL handle is a no-op.
+ */
+void
+tre_cache_release(void *compiled)
+{
+    int i;
+
+    if (compiled == NULL || cache_slots == NULL)
+        return;
+
+    for (i = 0; i < TRE_CACHE_SLOTS; i++)
+    {
+        if (cache_slots[i].compiled == compiled)
+        {
+            if (cache_slots[i].pinned > 0)
+                cache_slots[i].pinned--;
+            return;
+        }
+    }
+
+    /* Not cached: an uncached handle handed out under all-pinned. */
+    tre_free_pattern(compiled);
 }
