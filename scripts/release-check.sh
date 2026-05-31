@@ -88,6 +88,6 @@ fi
 
 echo ""
 echo "==> All checks passed. Ready to tag:"
-echo "    git tag -a v1.3.0 -m 'pg_tre 1.3.0'"
-echo "    make dist          # produces pg_tre-1.3.0.tar.gz"
+echo "    git tag -a v1.5.2 -m 'pg_tre 1.5.2'"
+echo "    make dist          # produces pg_tre-1.5.2.tar.gz"
 echo ""

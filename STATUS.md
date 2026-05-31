@@ -1,8 +1,17 @@
 # pg_tre status
 
-Released: **1.5.0** (2026-05).  See `CHANGELOG.md` for full
+Released: **1.5.2** (2026-05).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+1.5.2 is a production-readiness audit patch on the 1.5.0
+lineage: same on-disk format (v5), no re-index required.
+Headline fixes: `pg_tre.match_timeout_ms` is now enforced
+(progress hook into the vendored TRE matcher); `ambulkdelete`
+reclaims dead TIDs on `VACUUM` instead of growing until
+`REINDEX`; pending-list merge is atomic under one WAL record;
+WAL `MarkBufferDirty`/`XLogRegisterBuffer` ordering and
+scan-path memory safety hardened.
 
 1.5.0 is a minor release on the 1.0.0 lineage: same on-disk
 format, no re-index required.  Headline additions:
@@ -46,7 +55,7 @@ format, no re-index required.  Headline additions:
 plus a multi-leaf right-link `sm_union` reversed-logic fix
 that silently dropped every leaf past the first.
 
-## What ships in 1.5.0
+## What ships in 1.5.2
 
 ### Storage and recovery
 

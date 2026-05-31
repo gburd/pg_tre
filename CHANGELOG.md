@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.3] - 2026-05-31 - version-consistency patch
+
+Documentation/version-consistency patch.  No on-disk format
+change (remains v5); no REINDEX required.  No C-level or
+SQL-level behavior change.  Upgrade script `1.5.2--1.5.3` is
+a no-op stub that only bumps the recorded extension version.
+
+### Changed
+
+- `STATUS.md` and `scripts/release-check.sh` brought in line
+  with the shipped version (both still referenced 1.5.0 / a
+  stale tag example).  All version strings now consistent at
+  1.5.3.
+
 ## [1.5.2] - 2026-05-31 - production-readiness audit hardening
 
 Patch release addressing findings from three independent

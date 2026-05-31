@@ -1,0 +1,6 @@
+-- pg_tre 1.5.2 -> 1.5.3 upgrade.
+--
+-- No catalog changes: 1.5.3 is a documentation/version-consistency
+-- patch (STATUS.md and scripts/release-check.sh brought in line with
+-- the shipped version; no C-level or SQL-level behavior change).  This
+-- upgrade script is an intentional no-op.
