@@ -1,8 +1,21 @@
 # pg_tre status
 
-Released: **1.5.5** (2026-06).  See `CHANGELOG.md` for full
+Released: **1.5.6** (2026-06).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+1.5.6 is a robustness + DoS-hardening release on the 1.5.0
+lineage: same on-disk format (v5), no re-index required.
+Headline changes: (1) the pending-list merge now descends a
+MULTI-LEVEL upper tree, so once an index has grown an upper
+internal page a subsequent insert+`VACUUM` merges cleanly
+instead of erroring with a REINDEX demand; (2)
+`materialize_merged_postings` iterates posting members in rank
+order (`sm_next_member`) instead of probing every integer in
+the TID range, eliminating a multi-minute ~100%-CPU spin on
+wide-spanning trigrams; and (3) `pg_tre.compile_timeout_ms` is
+now actually enforced via a real wall-clock deadline armed
+around regex compilation.
 
 1.5.5 is a storage-reclamation release on the 1.5.0 lineage:
 same on-disk format (v5), no re-index required.  Headline

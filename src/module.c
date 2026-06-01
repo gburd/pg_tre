@@ -221,6 +221,98 @@ pg_tre_disarm_match_deadline(void)
     }
 }
 
+/* ====================================================================
+ * Compile-timeout enforcement (pg_tre.compile_timeout_ms).
+ *
+ * Mirrors the match-deadline machinery above but drives the separate
+ * compile progress hook (tre_set_compile_progress_hook), which the
+ * vendored TRE compiler's AST-expansion loops poll via
+ * tre_compile_progress_check().  A pathological bounded-repetition
+ * pattern (e.g. a{1000}{1000}{1000}) can otherwise spin the backend for
+ * a long time inside tre_regncomp() with no CHECK_FOR_INTERRUPTS reach.
+ * ==================================================================== */
+
+static TimestampTz pg_tre_compile_deadline = 0;   /* 0 == not armed */
+static int         pg_tre_compile_arm_depth = 0;
+static bool        pg_tre_compile_timed_out = false;
+
+static int
+pg_tre_compile_progress_hook(void)
+{
+    if (pg_tre_compile_deadline != 0 &&
+        GetCurrentTimestamp() >= pg_tre_compile_deadline)
+    {
+        pg_tre_compile_timed_out = true;
+        return 1;               /* deadline exceeded: abort the compile */
+    }
+    return 0;
+}
+
+/*
+ * Arm a wall-clock deadline for a subsequent tre_compile_pattern() call
+ * and install the compile progress hook.  timeout_ms <= 0 means "use the
+ * GUC".  Re-entrant like the match arm.
+ */
+void
+pg_tre_arm_compile_deadline(int timeout_ms)
+{
+    int          ms = (timeout_ms > 0) ? timeout_ms : pg_tre_compile_timeout_ms;
+    TimestampTz  deadline;
+
+    if (ms <= 0)
+        return;                 /* timeout disabled */
+
+    deadline = TimestampTzPlusMilliseconds(GetCurrentTimestamp(), ms);
+
+    if (pg_tre_compile_arm_depth == 0)
+    {
+        pg_tre_compile_deadline = deadline;
+        pg_tre_compile_timed_out = false;
+        (void) tre_set_compile_progress_hook(pg_tre_compile_progress_hook);
+    }
+    else if (deadline < pg_tre_compile_deadline)
+    {
+        pg_tre_compile_deadline = deadline;   /* tighten */
+    }
+    pg_tre_compile_arm_depth++;
+}
+
+/* Disarm the compile deadline; uninstall the hook at the outermost exit. */
+void
+pg_tre_disarm_compile_deadline(void)
+{
+    if (pg_tre_compile_arm_depth == 0)
+        return;
+    if (--pg_tre_compile_arm_depth == 0)
+    {
+        pg_tre_compile_deadline = 0;
+        (void) tre_set_compile_progress_hook(NULL);
+    }
+}
+
+/*
+ * Raise if the most recent armed compile aborted on the deadline.  Call
+ * immediately after tre_compile_pattern() returns NULL while the
+ * deadline is (or was just) armed; distinguishes a genuine syntax error
+ * from a wall-clock timeout.
+ */
+void
+pg_tre_check_compile_timeout(void)
+{
+    if (pg_tre_compile_timed_out)
+    {
+        pg_tre_compile_timed_out = false;
+        ereport(ERROR,
+                (errcode(ERRCODE_QUERY_CANCELED),
+                 errmsg("pg_tre: regex compilation exceeded "
+                        "pg_tre.compile_timeout_ms = %d ms",
+                        pg_tre_compile_timeout_ms),
+                 errhint("Simplify the pattern (reduce nested bounded "
+                         "repetitions) or raise pg_tre.compile_timeout_ms "
+                         "for trusted callers.")));
+    }
+}
+
 /*
  * Turn a timed-out match result into an error.  Call immediately after
  * each tre_do_match() while the deadline is armed.

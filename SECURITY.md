@@ -32,10 +32,10 @@ server. When deploying:
   multi-tenant environments. `pg_tre.match_timeout_ms`
   bounds the wall-clock time spent in a single regex match
   (see "Known Sharp Edges" for exactly what is and is not
-  enforced). `pg_tre.max_nfa_states` rejects patterns whose
+  enforced).   `pg_tre.max_nfa_states` rejects patterns whose
   compiled automaton is too large *before* any match runs.
-  `pg_tre.compile_timeout_ms` is **advisory only** today (see
-  below) — do not rely on it as a hard bound.
+  `pg_tre.compile_timeout_ms` bounds the wall-clock time spent
+  compiling a single pattern (enforced since 1.5.6; see below).
 - Keep PostgreSQL and pg_tre updated to the latest versions.
 - Run with `wal_consistency_checking = 'pg_tre'` enabled in
   pre-production environments to catch any custom-rmgr WAL
@@ -66,15 +66,21 @@ server. When deploying:
     time: a pattern whose compiled automaton exceeds the limit
     is rejected before it can ever reach the match path.
 
-  - `pg_tre.compile_timeout_ms` is currently **advisory /
-    best-effort only**. Compilation is already bounded by the
-    64 KiB hard pattern-length ceiling and by
-    `pg_tre.max_nfa_states`, so the dominant DoS lever is match
-    time, not compile time. The compile path does not yet honor
-    a wall-clock deadline; treat `compile_timeout_ms` as a
-    documented intent, not a hard guarantee, and rely on
-    `max_nfa_states` plus the length ceiling to bound compile
-    cost.
+  - `pg_tre.compile_timeout_ms` **is enforced** (since 1.5.6)
+    for the pattern-compile phase. A progress hook woven into
+    TRE's NFA-build loops (the bounded-repetition AST expansion
+    and the tag/copy/compile worklists) compares the current
+    wall-clock time against a deadline armed when compilation
+    begins; once the deadline passes, compilation is aborted and
+    the query fails with a `query_canceled` error (`pg_tre:
+    regex compilation exceeded pg_tre.compile_timeout_ms`). This
+    closes the compile-time DoS lever (pathological nested
+    bounded repetitions such as `a{80}{80}{80}` can expand for
+    seconds before `max_nfa_states` is even evaluated, since the
+    state cap is checked only *after* the automaton is built).
+    Compilation remains additionally bounded by the 64 KiB hard
+    pattern-length ceiling and by `pg_tre.max_nfa_states`. Do
+    not raise the timeout for untrusted callers.
 - Tier-3 per-tuple bloom and the positional filter are
   controlled by `pg_tre.tuple_bloom_enable` (default **on**
   since 1.2.3). The chain-rank lookup defect that motivated

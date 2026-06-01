@@ -1,0 +1,26 @@
+-- pg_tre 1.5.5 -> 1.5.6 upgrade.
+--
+-- No catalog changes: 1.5.6 is a C-level robustness + DoS-hardening
+-- release.
+--
+--   * Pending-list merge now descends a MULTI-LEVEL upper tree.  Once an
+--     index accumulated enough distinct trigrams for VACUUM to build an
+--     upper internal page (page_kind=2) fanning out to many upper
+--     leaves, the prior pending merge could read back only a single
+--     upper leaf and raised "pending-list merge on multi-level upper
+--     tree not yet supported" (HINT: REINDEX).  The merge snapshot now
+--     recurses the whole upper subtree, so subsequent inserts merge
+--     cleanly with no REINDEX.
+--   * materialize_merged_postings no longer probes every integer in the
+--     TID range with sm_contains (an O(TID-range) loop that spun ~100%
+--     CPU for minutes on wide-spanning trigrams); it iterates members in
+--     rank order via sm_next_member instead.
+--   * pg_tre.compile_timeout_ms is now ENFORCED: a real wall-clock
+--     deadline armed around regex compilation (progress hook woven into
+--     TRE's NFA-build loops) aborts pathological compiles with a
+--     query_canceled error.  Previously the GUC was defined but never
+--     honored.
+--
+-- No on-disk format change (remains v5); no REINDEX required.  This
+-- upgrade script is an intentional no-op that only bumps the recorded
+-- extension version.

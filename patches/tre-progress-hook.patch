@@ -1,3 +1,114 @@
+diff --git a/lib/tre-compile.c b/lib/tre-compile.c
+index 81e9ec1..bdf8730 100644
+--- a/lib/tre-compile.c
++++ b/lib/tre-compile.c
+@@ -28,6 +28,28 @@
+ #include "tre-compile.h"
+ #include "xmalloc.h"
+ 
++/*
++ * pg_tre: progress hook for wall-clock compile-timeout enforcement.
++ *
++ * The real implementation lives in src/util/tre_match.c (postgres.h-free);
++ * it returns nonzero when the PG-installed compile deadline
++ * (pg_tre.compile_timeout_ms) has passed.  Called from the AST-expansion
++ * loops below, which are the combinatorial-blowup vectors for bounded
++ * repetitions such as a{1000}{1000}.  Declared here as a plain extern so
++ * no pg_tre/PG headers leak into the vendored compiler.
++ *
++ * A __weak__ default returning 0 lets the vendored TRE library and its
++ * stand-alone tools link cleanly on their own; the strong definition in
++ * tre_match.c overrides it when linked into pg_tre.so.
++ */
++#if defined(__GNUC__) || defined(__clang__)
++int tre_compile_progress_check(void) __attribute__((weak));
++int tre_compile_progress_check(void) { return 0; }
++#else
++extern int tre_compile_progress_check(void);
++#endif
++
++
+ /*
+   Algorithms to setup tags so that submatch addressing can be done.
+ */
+@@ -202,6 +224,10 @@ tre_add_tags(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *tree,
+       if (status != REG_OK)
+ 	break;
+ 
++      /* pg_tre: enforce the wall-clock compile deadline. */
++      if (tre_compile_progress_check())
++	{ status = REG_ESPACE; break; }
++
+       symbol = (tre_addtags_symbol_t)tre_stack_pop_int(stack);
+       switch (symbol)
+ 	{
+@@ -674,6 +700,10 @@ tre_copy_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+       if (status != REG_OK)
+ 	break;
+ 
++      /* pg_tre: enforce the wall-clock compile deadline. */
++      if (tre_compile_progress_check())
++	{ status = REG_ESPACE; break; }
++
+       symbol = (tre_copyast_symbol_t)tre_stack_pop_int(stack);
+       switch (symbol)
+ 	{
+@@ -830,6 +860,12 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+       tre_ast_node_t *node;
+       tre_expand_ast_symbol_t symbol;
+ 
++      /* pg_tre: enforce the wall-clock compile deadline.  This loop and
++         the inner tre_copy_ast() calls below are the combinatorial
++         blowup vector for nested bounded repetitions. */
++      if (tre_compile_progress_check())
++	return REG_ESPACE;
++
+       if (status != REG_OK)
+ 	break;
+ 
+@@ -909,6 +945,10 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+ 		for (j = 0; j < iter->min; j++)
+ 		  {
+ 		    tre_ast_node_t *copy;
++		    /* pg_tre: enforce the wall-clock compile deadline -- this
++		       expansion loop is the combinatorial blowup vector. */
++		    if (tre_compile_progress_check())
++		      return REG_ESPACE;
+ 		    /* Remove tags from all but the last copy. */
+ 		    int flags = ((j + 1 < iter->min)
+ 				 ? COPY_REMOVE_TAGS
+@@ -945,6 +985,9 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+ 		    for (j = iter->min; j < iter->max; j++)
+ 		      {
+ 			tre_ast_node_t *copy;
++			/* pg_tre: enforce the wall-clock compile deadline. */
++			if (tre_compile_progress_check())
++			  return REG_ESPACE;
+ 			pos_add_save = pos_add;
+ 			status = tre_copy_ast(mem, stack, iter->arg, 0,
+ 					      &pos_add, NULL, &copy, &max_pos);
+@@ -1210,6 +1253,10 @@ tre_match_empty(tre_stack_t *stack, tre_ast_node_t *node, int *tags,
+   /* Walk through the tree recursively. */
+   while (status == REG_OK && tre_stack_num_objects(stack) > bottom)
+     {
++      /* pg_tre: enforce the wall-clock compile deadline. */
++      if (tre_compile_progress_check())
++	{ status = REG_ESPACE; break; }
++
+       node = tre_stack_pop_voidptr(stack);
+ 
+       switch (node->type)
+@@ -1323,6 +1370,10 @@ tre_compute_npfl(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *tree,
+       tre_npfl_stack_symbol_t symbol;
+       tre_ast_node_t *node;
+ 
++      /* pg_tre: enforce the wall-clock compile deadline. */
++      if (tre_compile_progress_check())
++	return REG_ESPACE;
++
+       symbol = (tre_npfl_stack_symbol_t)tre_stack_pop_int(stack);
+       node = tre_stack_pop_voidptr(stack);
+       switch (symbol)
 diff --git a/lib/tre-match-approx.c b/lib/tre-match-approx.c
 index 50664ce..2d79c52 100644
 --- a/lib/tre-match-approx.c

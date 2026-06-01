@@ -6,6 +6,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.6] - 2026-06-01 - multi-level pending merge, posting-merge speedup, compile-timeout enforcement
+
+Robustness + DoS-hardening release on the 1.5.0 lineage.  No
+on-disk format change (remains v5); no REINDEX required.
+Upgrade script `1.5.5--1.5.6` is a no-op stub that only bumps
+the recorded extension version.
+
+### Fixed
+
+- **Pending-list merge now supports a multi-level upper tree.**
+  Once an index accumulated enough distinct trigrams that
+  `VACUUM` had to build an upper *internal* page (page_kind=2)
+  fanning out to many upper leaves, the next pending merge
+  raised `ERROR: pg_tre: pending-list merge on multi-level
+  upper tree not yet supported` and demanded a REINDEX — the
+  merge snapshot could read back only a single upper leaf. The
+  snapshot path (`snapshot_existing_upper`) now descends the
+  whole upper subtree recursively (collecting child blocks
+  under lock, releasing, then recursing — never holding more
+  than one upper buffer locked), so subsequent inserts merge
+  cleanly with no REINDEX. The bulk-load and lookup paths
+  already handled multi-level trees; this was a read-side gap
+  in the merge snapshot only.
+- **`materialize_merged_postings` no longer spins O(TID-range).**
+  The on-disk-leaf merge branch probed every integer in
+  `[min_idx, max_idx]` with `sm_contains`, burning ~100% CPU
+  for minutes when a trigram's TIDs spanned a wide range. It
+  now iterates set members in rank order via `sm_next_member`
+  (O(cardinality)).
+
+### Security
+
+- **`pg_tre.compile_timeout_ms` is now enforced.** The GUC was
+  previously defined but never honored — only `match_timeout_ms`
+  and `max_nfa_states` bounded cost, and `max_nfa_states` is
+  checked only *after* the automaton is built, so a pathological
+  nested bounded repetition (e.g. `a{80}{80}{80}`) could expand
+  for seconds before any cap applied. A progress hook woven into
+  TRE's NFA-build loops (the bounded-repetition AST expansion
+  and the tag/copy/compile worklists) now compares wall-clock
+  time against a deadline armed around compilation and aborts
+  with a `query_canceled` error (`pg_tre: regex compilation
+  exceeded pg_tre.compile_timeout_ms`). The compile and match
+  deadlines use independent progress hooks so arming one never
+  perturbs the other. See `SECURITY.md`.
+
+---
+
 ## [1.5.5] - 2026-06-01 - posting-leaf FSM reclamation (deferred page deletion + recycle)
 
 Storage-reclamation release on the 1.5.0 lineage.  No on-disk

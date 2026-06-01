@@ -49,7 +49,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.5.5"
+#define PG_TRE_VERSION_STRING "pg_tre 1.5.6"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;
@@ -88,6 +88,16 @@ extern void pg_tre_init_rmgr(void);
 extern void pg_tre_arm_match_deadline(int timeout_ms);
 extern void pg_tre_disarm_match_deadline(void);
 extern void pg_tre_check_match_timeout(const TreMatchResult *r);
+
+/*
+ * Compile-deadline analogue of the three functions above.  Arm before a
+ * tre_compile_pattern() call, disarm in a PG_FINALLY, and call
+ * pg_tre_check_compile_timeout() to convert a deadline abort into an
+ * ereport(ERROR) distinct from a syntax error.
+ */
+extern void pg_tre_arm_compile_deadline(int timeout_ms);
+extern void pg_tre_disarm_compile_deadline(void);
+extern void pg_tre_check_compile_timeout(void);
 
 /* Legacy UDF exports (for internal use). */
 extern Datum pg_tre_amatch(PG_FUNCTION_ARGS);

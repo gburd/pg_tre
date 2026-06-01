@@ -54,6 +54,15 @@ TreProgressHook tre_set_progress_hook(TreProgressHook hook);
 int tre_progress_check(void);
 
 /*
+ * Compile-path analogue of the two functions above.  tre_compile.c calls
+ * tre_compile_progress_check() from inside its AST-expansion loops so a
+ * wall-clock compile deadline (pg_tre.compile_timeout_ms) can interrupt a
+ * pathological bounded-repetition blowup before it consumes the backend.
+ */
+TreProgressHook tre_set_compile_progress_hook(TreProgressHook hook);
+int tre_compile_progress_check(void);
+
+/*
  * Compile a regex pattern. Returns opaque handle on success, NULL on
  * failure (with errcode set to a TRE error code).
  */

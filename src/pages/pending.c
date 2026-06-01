@@ -47,6 +47,18 @@
 #include "pg_tre/upper.h"
 #include "pg_tre/xlog.h"
 
+/*
+ * Local mirror of upper.c's internal-page entry layout (the struct is
+ * file-private to upper.c).  Must match PgTreUpperInternalEntry exactly;
+ * mirrored here -- as posting.c does with PgTreVacUpperInternalEntry --
+ * so the merge walk can descend a multi-level upper tree.
+ */
+typedef struct PgTrePendingUpperInternalEntry
+{
+    uint64      first_key;
+    BlockNumber child_blk;
+} PgTrePendingUpperInternalEntry;
+
 /* --------------------------------------------------------------------
  * Page layout helpers
  * -------------------------------------------------------------------- */
@@ -627,7 +639,6 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         sparsemap_t *existing;
         sparsemap_t *merged;
         int k;
-        uint64 min_idx, max_idx;
         size_t sz;
         uint8 *out_buf;
         sparsemap_t *fresh;
@@ -703,10 +714,6 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         sz = sm_get_size(fresh);
 
-        /* Capture range now; we use it on the on-disk path below. */
-        min_idx = sm_minimum(merged);
-        max_idx = sm_maximum(merged);
-
         /* Copy the serialized data to a palloc'd buffer. */
         out_buf = MemoryContextAlloc(mc->mcxt, sz);
         memcpy(out_buf, sm_get_data(fresh), sz);
@@ -728,19 +735,23 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             size_t expected = (size_t) e->n_tids * 16 + 1024;
             b = pg_tre_posting_build_begin_sized(index, e->trigram_hash,
                                                   false, expected);
-            if (sm_cardinality(merged) > 0)
+            /*
+             * Iterate the sparsemap's MEMBERS in rank order via
+             * sm_next_member() — O(cardinality), with a cursor fast-path
+             * for sequential iteration — rather than probing every integer
+             * in [min_idx, max_idx] with sm_contains().  The old range
+             * scan was O(TID-range): for a trigram whose TIDs span a wide
+             * block range it spins ~100% CPU for minutes even though the
+             * set may hold only a handful of members.
+             */
+            for (j = sm_next_member(merged, SM_IDX_MAX);
+                 j != SM_IDX_MAX;
+                 j = sm_next_member(merged, j))
             {
-                for (j = min_idx; j <= max_idx; j++)
-                {
-                    CHECK_FOR_INTERRUPTS();
-                    if (sm_contains(merged, j))
-                    {
-                        ItemPointerData tid;
-                        pg_tre_unpack_tid(j, &tid);
-                        pg_tre_posting_build_add(b, &tid, NULL, 0, NULL);
-                    }
-                    if (j == max_idx) break;
-                }
+                ItemPointerData tid;
+                CHECK_FOR_INTERRUPTS();
+                pg_tre_unpack_tid(j, &tid);
+                pg_tre_posting_build_add(b, &tid, NULL, 0, NULL);
             }
             {
                 const uint8 *id;
@@ -777,6 +788,7 @@ typedef struct RebuildState
      * to remain valid after the upper rebuild has released its buffer.
      * So materialize entries to palloc'd copies up front. */
     uint8      **existing_inline;
+    int          existing_cap;    /* allocated capacity of the two arrays */
 } RebuildState;
 
 static bool
@@ -828,98 +840,176 @@ rebuild_iter(void *ctx, uint64 *hash, BlockNumber *root,
     }
 }
 
-/* Snapshot the existing upper-tree leaf's entries into palloc'd
- * storage so we can release the buffer before rebuilding. */
+/*
+ * Append all PgTreUpperLeafEntry rows of one upper LEAF page to the
+ * RebuildState's growable existing/existing_inline arrays, copying any
+ * inline blobs into mcxt-owned storage.  `buf` must hold a SHARE lock
+ * on a PG_TRE_PAGE_UPPER_L page; it is NOT released here.
+ */
+static void
+snapshot_upper_leaf(RebuildState *r, MemoryContext mcxt, Buffer buf)
+{
+    Page                 page = BufferGetPage(buf);
+    PgTreUpperLeafEntry *src  = (PgTreUpperLeafEntry *) PageGetContents(page);
+    int                  n    = PageTreGetOpaque(page)->flags;
+    int                  i;
+    Size                 inline_offset;
+    const uint8         *blob_base;
+    int                  need;
+
+    if (n == 0)
+    {
+        /* Fallback: old-format page without the n_entries counter. */
+        n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
+            / sizeof(PgTreUpperLeafEntry);
+    }
+    if (n <= 0)
+        return;
+
+    /* Grow the two parallel arrays to fit n more entries. */
+    need = r->n_existing + n;
+    if (need > r->existing_cap)
+    {
+        int newcap = (r->existing_cap == 0) ? need : r->existing_cap * 2;
+        if (newcap < need)
+            newcap = need;
+        if (r->existing == NULL)
+        {
+            r->existing = MemoryContextAlloc(mcxt,
+                            (Size) newcap * sizeof(PgTreUpperLeafEntry));
+            r->existing_inline = MemoryContextAllocZero(mcxt,
+                            (Size) newcap * sizeof(uint8 *));
+        }
+        else
+        {
+            r->existing = repalloc(r->existing,
+                            (Size) newcap * sizeof(PgTreUpperLeafEntry));
+            r->existing_inline = repalloc(r->existing_inline,
+                            (Size) newcap * sizeof(uint8 *));
+            /* Zero the freshly-grown inline slots. */
+            memset(r->existing_inline + r->existing_cap, 0,
+                   (Size) (newcap - r->existing_cap) * sizeof(uint8 *));
+        }
+        r->existing_cap = newcap;
+    }
+
+    /*
+     * Inline blobs are concatenated after the entry array, in entry
+     * order, without per-entry offsets (see pg_tre_upper_lookup).  We
+     * already hold a SHARE lock on this leaf page, so we copy the blob
+     * straight out of the page we hold, tracking the running offset.
+     */
+    inline_offset = 0;
+    blob_base     = (const uint8 *) &src[n];
+    for (i = 0; i < n; i++)
+    {
+        int dst = r->n_existing + i;
+        r->existing[dst] = src[i];
+        if (src[i].inline_bytes > 0)
+        {
+            uint8 *copy = MemoryContextAlloc(mcxt, src[i].inline_bytes);
+            memcpy(copy, blob_base + inline_offset, src[i].inline_bytes);
+            r->existing_inline[dst]       = copy;
+            r->existing[dst].inline_bytes = src[i].inline_bytes;
+            inline_offset += src[i].inline_bytes;
+        }
+        else
+        {
+            r->existing_inline[dst] = NULL;
+        }
+    }
+    r->n_existing += n;
+}
+
+/*
+ * Recursively walk the upper tree rooted at `blk`, snapshotting every
+ * leaf's entries in left-to-right (ascending-key) order.  Upper leaves
+ * are NOT right-linked -- they are addressed only through internal
+ * pages -- so a full recursive descent is required.  Internal pages
+ * store children in ascending first_key order, so visiting children in
+ * array order yields globally sorted leaf entries, which rebuild_iter
+ * requires.
+ */
+static void
+snapshot_upper_subtree(Relation index, RebuildState *r, MemoryContext mcxt,
+                       BlockNumber blk)
+{
+    Buffer        buf;
+    Page          page;
+    PageTreOpaque opq;
+
+    CHECK_FOR_INTERRUPTS();
+
+    buf  = pg_tre_read(index, blk, PG_TRE_PAGE_INVALID, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    opq  = PageTreGetOpaque(page);
+
+    if (opq->page_kind == PG_TRE_PAGE_UPPER_L)
+    {
+        snapshot_upper_leaf(r, mcxt, buf);
+        UnlockReleaseBuffer(buf);
+        return;
+    }
+
+    if (opq->page_kind != PG_TRE_PAGE_UPPER)
+    {
+        UnlockReleaseBuffer(buf);
+        elog(ERROR,
+             "pg_tre: unexpected page kind %u during upper-tree merge walk",
+             opq->page_kind);
+    }
+
+    /*
+     * Internal page: collect child block numbers under the lock, then
+     * release before recursing so we never hold more than one upper
+     * buffer locked at a time (recursion re-locks each child).
+     */
+    {
+        PgTrePendingUpperInternalEntry *ents =
+            (PgTrePendingUpperInternalEntry *) PageGetContents(page);
+        int n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
+                / sizeof(PgTrePendingUpperInternalEntry);
+        BlockNumber *children;
+        int i;
+
+        if (n <= 0)
+        {
+            UnlockReleaseBuffer(buf);
+            return;
+        }
+
+        children = MemoryContextAlloc(mcxt, (Size) n * sizeof(BlockNumber));
+        for (i = 0; i < n; i++)
+            children[i] = ents[i].child_blk;
+        UnlockReleaseBuffer(buf);
+
+        for (i = 0; i < n; i++)
+            snapshot_upper_subtree(index, r, mcxt, children[i]);
+
+        pfree(children);
+    }
+}
+
+/* Snapshot the existing upper-tree leaf entries into palloc'd storage
+ * so we can release the buffers before rebuilding.  Handles both a
+ * single-leaf root and a multi-level internal tree. */
 static void
 snapshot_existing_upper(Relation index, RebuildState *r,
                         MemoryContext mcxt)
 {
     PgTreMetaPageData meta;
-    Buffer  buf;
-    Page    page;
-    PageTreOpaque opq;
-    int     i;
+
+    r->existing        = NULL;
+    r->existing_inline = NULL;
+    r->n_existing      = 0;
+    r->i_existing      = 0;
+    r->existing_cap    = 0;
 
     pg_tre_meta_read(index, &meta);
     if (meta.root_upper == InvalidBlockNumber)
-    {
-        r->existing        = NULL;
-        r->existing_inline = NULL;
-        r->n_existing      = 0;
-        r->i_existing      = 0;
         return;
-    }
 
-    buf = pg_tre_read(index, meta.root_upper, PG_TRE_PAGE_INVALID,
-                      BUFFER_LOCK_SHARE);
-    page = BufferGetPage(buf);
-    opq  = PageTreGetOpaque(page);
-
-    if (opq->page_kind != PG_TRE_PAGE_UPPER_L)
-    {
-        /*
-         * Multi-level upper tree support requires a walk; Phase 4
-         * fixtures stay inside a single leaf.  Raise cleanly if we hit
-         * a larger tree; Phase 8 generalizes.
-         */
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("pg_tre: pending-list merge on multi-level upper "
-                        "tree not yet supported"),
-                 errhint("Rebuild the index with REINDEX to consolidate.")));
-    }
-
-    {
-        int n = PageTreGetOpaque(page)->flags;
-        PgTreUpperLeafEntry *src =
-            (PgTreUpperLeafEntry *) PageGetContents(page);
-        if (n == 0)
-        {
-            /* Fallback: old-format page without the n_entries counter. */
-            n = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
-                / sizeof(PgTreUpperLeafEntry);
-        }
-
-        r->n_existing      = n;
-        r->i_existing      = 0;
-        r->existing        = MemoryContextAlloc(mcxt,
-                               n * sizeof(PgTreUpperLeafEntry));
-        r->existing_inline = MemoryContextAllocZero(mcxt,
-                               n * sizeof(uint8 *));
-
-        /*
-         * Inline blobs are concatenated after the entry array, in entry
-         * order, without per-entry offsets (see pg_tre_upper_lookup).
-         * We already hold a SHARE lock on this leaf page, so we MUST NOT
-         * call pg_tre_upper_lookup() here -- it would re-read and re-lock
-         * the same buffer, tripping the bufmgr "already locked" assert
-         * under VACUUM.  Instead we copy the blob straight out of the
-         * page we hold, tracking the running offset just as the lookup
-         * path does.
-         */
-        {
-            Size  inline_offset = 0;
-            const uint8 *blob_base = (const uint8 *) &src[n];
-
-            for (i = 0; i < n; i++)
-            {
-                r->existing[i] = src[i];
-                if (src[i].inline_bytes > 0)
-                {
-                    uint8 *copy = MemoryContextAlloc(mcxt,
-                                     src[i].inline_bytes);
-                    memcpy(copy, blob_base + inline_offset,
-                           src[i].inline_bytes);
-                    r->existing_inline[i]       = copy;
-                    r->existing[i].inline_bytes = src[i].inline_bytes;
-                    inline_offset += src[i].inline_bytes;
-                }
-            }
-        }
-    }
-
-    UnlockReleaseBuffer(buf);
+    snapshot_upper_subtree(index, r, mcxt, meta.root_upper);
 }
 
 /*

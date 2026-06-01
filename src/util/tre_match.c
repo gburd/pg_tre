@@ -27,6 +27,33 @@
 static TreProgressHook progress_hook = NULL;
 static int             progress_aborted = 0;
 
+/*
+ * Separate progress hook for the COMPILE path.  The vendored TRE
+ * compiler's AST-expansion loops (tre_expand_ast / tre_copy_ast /
+ * tre_add_tags) can blow up combinatorially on bounded repetitions such
+ * as a{1000}{1000}; this hook lets src/module.c arm a wall-clock
+ * compile deadline (pg_tre.compile_timeout_ms) checked from inside those
+ * loops.  Kept separate from the match hook so arming one never
+ * perturbs the other.  See tre-compile.c for the call sites.
+ */
+static TreProgressHook compile_progress_hook = NULL;
+
+TreProgressHook
+tre_set_compile_progress_hook(TreProgressHook hook)
+{
+    TreProgressHook prev = compile_progress_hook;
+    compile_progress_hook = hook;
+    return prev;
+}
+
+int
+tre_compile_progress_check(void)
+{
+    if (compile_progress_hook != NULL && compile_progress_hook() != 0)
+        return 1;
+    return 0;
+}
+
 TreProgressHook
 tre_set_progress_hook(TreProgressHook hook)
 {

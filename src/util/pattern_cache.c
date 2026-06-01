@@ -115,8 +115,23 @@ tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
         }
     }
 
-    /* Cache miss: compile pattern */
-    compiled = tre_compile_pattern(pattern, pattern_len, &tre_err);
+    /* Cache miss: compile pattern.  Arm a wall-clock compile deadline
+     * (pg_tre.compile_timeout_ms) so a pathological bounded-repetition
+     * pattern cannot spin the backend uninterruptibly inside TRE's AST
+     * expansion. */
+    pg_tre_arm_compile_deadline(0);
+    PG_TRY();
+    {
+        compiled = tre_compile_pattern(pattern, pattern_len, &tre_err);
+    }
+    PG_FINALLY();
+    {
+        pg_tre_disarm_compile_deadline();
+    }
+    PG_END_TRY();
+    /* Raise a distinct timeout error if the compile aborted on the
+     * deadline (tre_compile_pattern returns NULL in that case too). */
+    pg_tre_check_compile_timeout();
     if (compiled == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
