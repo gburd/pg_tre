@@ -1,0 +1,466 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Testing guide - pg_tre</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Native PostgreSQL index access method for approximate regex matching">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">pg_tre</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre/_edit/main/doc/testing.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="pg_tre-testing-guide"><a class="header" href="#pg_tre-testing-guide">pg_tre Testing Guide</a></h1>
+<p>This document describes how to run the pg_tre test suite,
+which consists of SQL regression tests, TAP tests (Test
+Anything Protocol), and shell-based tests for replication
+and stress.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>pg_tre has three test suites:</p>
+<ol>
+<li><strong>SQL Regression Tests</strong> (<code>test/sql/*.sql</code>) — Functional
+correctness tests that run SQL queries and compare
+output against expected results.  Driven by
+<code>scripts/run-regress.sh</code> or <code>make localcheck</code>.</li>
+<li><strong>TAP Tests</strong> (<code>tap/*.pl</code>) — Integration tests for
+durability, concurrency, and replication using
+<code>PostgreSQL::Test::Cluster</code>.  Driven by <code>make tap</code>.</li>
+<li><strong>Shell Tests</strong> (<code>test/scripts/*.sh</code>) — Multi-cluster
+tests modeled on <code>pg_textsearch</code>'s shell-test pattern,
+sharing infrastructure via <code>test/scripts/lib.sh</code>.
+Currently:
+<ul>
+<li><code>wal_audit.sh</code> — verifies WAL records are well-formed
+and that crash recovery preserves the index.</li>
+<li><code>replication.sh</code> — primary + streaming standby
+differential check across catchup, restart, and
+incremental writes.</li>
+<li><code>stress.sh</code> — N-iteration mixed-workload run with
+RSS ceiling, postmaster-alive check, and
+differential idx-vs-seq check at the end of every
+iteration.</li>
+</ul>
+</li>
+</ol>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<h3 id="for-regression-tests"><a class="header" href="#for-regression-tests">For Regression Tests</a></h3>
+<ul>
+<li>PostgreSQL 18+ built and installed (via PG_CONFIG)</li>
+<li>pg_tre extension compiled and installed</li>
+<li>Running PostgreSQL instance with <code>shared_preload_libraries = 'pg_tre'</code></li>
+</ul>
+<h3 id="for-tap-tests"><a class="header" href="#for-tap-tests">For TAP Tests</a></h3>
+<ul>
+<li>All regression test prerequisites</li>
+<li>Perl 5.x with Test::More and Test::Harness</li>
+<li>PostgreSQL::Test::Cluster module (the <code>make tap</code> target
+picks up the right path via <code>PG_TAP_PERL5LIB</code>).</li>
+<li><code>prove</code> command-line test runner</li>
+</ul>
+<h3 id="for-shell-tests"><a class="header" href="#for-shell-tests">For Shell Tests</a></h3>
+<ul>
+<li>All regression test prerequisites</li>
+<li><code>pg_basebackup</code>, <code>pg_walinspect</code> (for <code>replication.sh</code>
+and <code>wal_audit.sh</code>)</li>
+<li>The shell tests <code>initdb</code> their own clusters on private
+ports under <code>$TMPDIR</code> (or <code>/tmp</code>); they do not require
+a running PG instance.</li>
+</ul>
+<h2 id="running-regression-tests"><a class="header" href="#running-regression-tests">Running Regression Tests</a></h2>
+<h3 id="method-1-using-the-convenience-script"><a class="header" href="#method-1-using-the-convenience-script">Method 1: Using the Convenience Script</a></h3>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config scripts/run-regress.sh
+</code></pre>
+<p>This script:</p>
+<ul>
+<li>Creates a temporary database <code>contrib_regression</code></li>
+<li>Runs each test SQL file through psql</li>
+<li>Compares output against expected results</li>
+<li>Reports ok/FAIL for each test</li>
+</ul>
+<h3 id="method-2-using-the-makefile"><a class="header" href="#method-2-using-the-makefile">Method 2: Using the Makefile</a></h3>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config make localcheck
+</code></pre>
+<p>This invokes <code>scripts/run-regress.sh</code> via the Makefile.</p>
+<h3 id="current-regression-tests"><a class="header" href="#current-regression-tests">Current Regression Tests</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Test</th><th>Coverage</th></tr></thead><tbody>
+<tr><td><code>pg_tre.sql</code></td><td>Extension creation, legacy UDFs, basic index creation</td></tr>
+<tr><td><code>parser.sql</code></td><td>Regex parser, AST construction, tokenization</td></tr>
+<tr><td><code>scan_exact.sql</code></td><td>k=0 exact regex scanning, differential tests</td></tr>
+<tr><td><code>incremental.sql</code></td><td>INSERT, pending list, VACUUM, overlay scans</td></tr>
+<tr><td><code>p5_read.sql</code></td><td>k&gt;0 approximate matching, tiling, tier-3 bloom</td></tr>
+<tr><td><code>planner.sql</code></td><td>Cost estimation, selectivity, plan choice</td></tr>
+<tr><td><code>planner_auto.sql</code></td><td>Planner auto-tuning, metapage cardinalities</td></tr>
+<tr><td><code>p6_safety.sql</code></td><td>DoS limits, pattern validation, error handling</td></tr>
+<tr><td><code>utf8.sql</code></td><td>UTF-8 text handling, multibyte characters</td></tr>
+<tr><td><code>tier3.sql</code></td><td>Per-tuple bloom filter validation</td></tr>
+<tr><td><code>dnf_resolution.sql</code></td><td>DNF (tiled alternatives) AND/OR correctness</td></tr>
+</tbody></table>
+</div>
+<p>Expected result: all tests report <code>ok</code>.</p>
+<h2 id="running-tap-tests"><a class="header" href="#running-tap-tests">Running TAP Tests</a></h2>
+<h3 id="v100-final-blocker-tests-tap"><a class="header" href="#v100-final-blocker-tests-tap">v1.0.0-final Blocker Tests (tap/)</a></h3>
+<p>These are the production-ready tests that close the v1.0.0-final blockers:</p>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config make tap
+</code></pre>
+<p>This runs:</p>
+<ol>
+<li>
+<p><strong>tap/concurrency.pl</strong> — Concurrent writers + readers + vacuumer</p>
+<ul>
+<li>8 writer processes inserting random rows for 30 seconds</li>
+<li>4 reader processes comparing index vs seq-scan continuously</li>
+<li>1 vacuumer process running VACUUM every 5 seconds</li>
+<li>Final differential check: 10 patterns, index == seq-scan</li>
+<li><strong>Closes blocker</strong>: Concurrency TAP test</li>
+</ul>
+</li>
+<li>
+<p><strong>tap/replication.pl</strong> — Streaming replication and replica promotion</p>
+<ul>
+<li>Creates primary + streaming replica</li>
+<li>Applies 100K random insert/update/delete operations</li>
+<li>Waits for replica catchup</li>
+<li>Verifies bit-exact result equality for 10 patterns</li>
+<li>Promotes replica and re-verifies</li>
+<li><strong>Closes blocker</strong>: Streaming replication TAP test</li>
+</ul>
+</li>
+<li>
+<p><strong>tap/crash_recovery.pl</strong> — WAL replay correctness under kill -9</p>
+<ul>
+<li>Starts continuous background writer</li>
+<li>After 10 seconds, kills postmaster with -9</li>
+<li>Restarts and verifies WAL replay via differential check</li>
+<li>Repeats cycle 3 times to catch compounding corruption</li>
+<li><strong>Closes blocker</strong>: Crash-recovery-under-load TAP test</li>
+</ul>
+</li>
+</ol>
+<h3 id="expected-runtime"><a class="header" href="#expected-runtime">Expected Runtime</a></h3>
+<p>All three TAP tests complete in <strong>&lt; 5 minutes</strong> total on a developer laptop:</p>
+<ul>
+<li><code>concurrency.pl</code>: ~35 seconds (30s load + 5s checks)</li>
+<li><code>replication.pl</code>: ~90 seconds (100K ops in batches + catchup)</li>
+<li><code>crash_recovery.pl</code>: ~45 seconds (3 cycles × 10s load + 5s recovery)</li>
+</ul>
+<h3 id="phase-7-tests-testt"><a class="header" href="#phase-7-tests-testt">Phase 7 Tests (test/t/)</a></h3>
+<p>The <code>test/t/</code> directory contains the earlier Phase 7 tests that are currently blocked by bugs:</p>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config make tapcheck
+</code></pre>
+<p>These tests (<code>001_crash_recovery.pl</code>, <code>002_replica.pl</code>, etc.) were written during Phase 7 but cannot run yet due to pre-existing issues in ambuild and function exports. They are retained for historical context and will be re-enabled once those bugs are fixed.</p>
+<p><strong>Do not use <code>make tapcheck</code> for v1.0.0 validation.</strong> Use <code>make tap</code> instead.</p>
+<h2 id="full-test-suite"><a class="header" href="#full-test-suite">Full Test Suite</a></h2>
+<p>To run everything (regression + TAP):</p>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config scripts/release-check.sh
+</code></pre>
+<p>This script runs:</p>
+<ol>
+<li>Clean build with warning check</li>
+<li>Installation</li>
+<li>All regression tests</li>
+<li>All TAP tests (tap/)</li>
+<li>Quick benchmark smoke test</li>
+<li>Git artifact check</li>
+</ol>
+<p>Expected result: <code>All checks passed. Ready to tag.</code></p>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="prove-not-found"><a class="header" href="#prove-not-found">"prove not found"</a></h3>
+<p>Install Test::Harness:</p>
+<pre><code class="language-bash">cpan Test::Harness
+# or on Debian/Ubuntu:
+sudo apt-get install libtest-harness-perl
+</code></pre>
+<h3 id="cant-locate-postgresqltestclusterpm"><a class="header" href="#cant-locate-postgresqltestclusterpm">"Can't locate PostgreSQL/Test/Cluster.pm"</a></h3>
+<p>The PostgreSQL TAP modules are usually installed with PostgreSQL. Check:</p>
+<pre><code class="language-bash">find $(pg_config --libdir) -name Cluster.pm
+</code></pre>
+<p>If missing, you may need to install PostgreSQL development packages or rebuild PostgreSQL with <code>--enable-tap-tests</code>.</p>
+<h3 id="tap-test-hangs"><a class="header" href="#tap-test-hangs">TAP test hangs</a></h3>
+<p>TAP tests create temporary PostgreSQL instances. If a test hangs:</p>
+<ol>
+<li>Check available ports (tests auto-assign ports)</li>
+<li>Check disk space (each test creates a temp data directory)</li>
+<li>Check for orphaned postgres processes (<code>ps aux | grep postgres</code>)</li>
+</ol>
+<h3 id="tap-test-fails-with-could-not-connect"><a class="header" href="#tap-test-fails-with-could-not-connect">TAP test fails with "could not connect"</a></h3>
+<p>Ensure your firewall allows local connections and that PostgreSQL can bind to loopback interfaces.</p>
+<h3 id="index-scan--seq-scan"><a class="header" href="#index-scan--seq-scan">"Index scan != seq scan"</a></h3>
+<p>This indicates a correctness bug in the index. The test output will show which pattern failed and the mismatched row counts. File an issue with:</p>
+<ul>
+<li>The failing pattern</li>
+<li>The full test log</li>
+<li>Output of <code>git log --oneline -10</code></li>
+</ul>
+<h2 id="test-development"><a class="header" href="#test-development">Test Development</a></h2>
+<h3 id="adding-a-regression-test"><a class="header" href="#adding-a-regression-test">Adding a Regression Test</a></h3>
+<ol>
+<li>Create <code>test/sql/my_test.sql</code></li>
+<li>Run it to generate <code>test/expected/my_test.out</code></li>
+<li>Add <code>my_test</code> to <code>REGRESS</code> in the Makefile</li>
+<li>Run <code>make localcheck</code> to verify</li>
+</ol>
+<h3 id="adding-a-tap-test"><a class="header" href="#adding-a-tap-test">Adding a TAP Test</a></h3>
+<ol>
+<li>Create <code>tap/my_test.pl</code> following the structure of existing tests</li>
+<li>Use <code>PostgreSQL::Test::Cluster-&gt;new('my_test')</code> for isolation</li>
+<li>Add <code>use Test::More; done_testing();</code> for proper TAP output</li>
+<li>Verify with <code>prove -v tap/my_test.pl</code></li>
+</ol>
+<h2 id="continuous-integration"><a class="header" href="#continuous-integration">Continuous Integration</a></h2>
+<p>The GitHub Actions CI matrix (<code>.github/workflows/ci.yml</code>) runs all tests on every push:</p>
+<ul>
+<li>Ubuntu 22.04 with PostgreSQL 18 from apt</li>
+<li>Regression tests via <code>make installcheck</code></li>
+<li>TAP tests via <code>make tap</code></li>
+</ul>
+<h2 id="performance-notes"><a class="header" href="#performance-notes">Performance Notes</a></h2>
+<ul>
+<li>Regression tests run in <strong>&lt; 10 seconds</strong> (single psql session, small fixtures)</li>
+<li>TAP tests run in <strong>&lt; 5 minutes</strong> (parallel test instances, larger workloads)</li>
+<li>Use <code>make localcheck</code> for quick iteration during development</li>
+<li>Use <code>scripts/release-check.sh</code> for full gate before commits</li>
+</ul>
+<h2 id="test-coverage-summary"><a class="header" href="#test-coverage-summary">Test Coverage Summary</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Area</th><th>Regression</th><th>TAP</th><th>Total</th></tr></thead><tbody>
+<tr><td>Index creation</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Exact regex (k=0)</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Approximate (k&gt;0)</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Incremental writes</td><td>✓</td><td>✓</td><td>2</td></tr>
+<tr><td>VACUUM</td><td>✓</td><td>✓</td><td>2</td></tr>
+<tr><td>Planner integration</td><td>✓</td><td></td><td>2</td></tr>
+<tr><td>Concurrency</td><td></td><td>✓</td><td>1</td></tr>
+<tr><td>Streaming replication</td><td></td><td>✓</td><td>1</td></tr>
+<tr><td>Crash recovery</td><td></td><td>✓</td><td>1</td></tr>
+<tr><td>UTF-8</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Bloom filters</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>DNF correctness</td><td>✓</td><td></td><td>1</td></tr>
+</tbody></table>
+</div>
+<p>Total: <strong>10 regression tests</strong>, <strong>3 TAP tests</strong> (v1.0.0-final blockers), <strong>5 Phase 7 TAP tests</strong> (blocked).</p>
+<hr />
+<p>Last updated: 2025-05-13
+Status: v1.0.0-final blocker tests COMPLETE</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="specs/variable-width-blooms.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="release-checklist.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="specs/variable-width-blooms.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="release-checklist.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

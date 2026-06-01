@@ -1,0 +1,385 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Design - pg_tre</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Native PostgreSQL index access method for approximate regex matching">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">pg_tre</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre/_edit/main/doc/design.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="pg_tre-design"><a class="header" href="#pg_tre-design">pg_tre design</a></h1>
+<p>This file is the working design document for the production pg_tre
+native index AM.  Paired with <code>doc/onpage_format.md</code> (byte-exact page
+specs) and the top-level <code>README.md</code> (user-facing description).</p>
+<h2 id="1-goal"><a class="header" href="#1-goal">1. Goal</a></h2>
+<p>Provide a PostgreSQL index access method, <code>tre</code>, that indexes text
+columns for fast approximate-regex queries:</p>
+<pre><code>CREATE INDEX docs_tre ON docs USING tre (body);
+SELECT * FROM docs WHERE body %~~ tre_pattern('enviro.{~2}ment', 2);
+</code></pre>
+<p>Delivered via a three-tier filter funnel over trigram postings:</p>
+<ol>
+<li><strong>Range tier</strong> -- BRIN-style block-range blooms reject whole
+heap regions that lack any required trigram.</li>
+<li><strong>Posting tier</strong> -- per-trigram sparsemap postings, AND/OR-merged
+to produce a candidate TID set.</li>
+<li><strong>Per-tuple tier</strong> -- 128-bit bloom per indexed tuple stored
+inline with the posting, used to refine the candidate set
+without heap I/O.</li>
+</ol>
+<p>Recheck is always performed against the heap via TRE's
+<code>regaexec</code>.</p>
+<h2 id="2-prior-art"><a class="header" href="#2-prior-art">2. Prior art</a></h2>
+<ul>
+<li>Russ Cox 2012, Regular Expression Matching with a Trigram Index.</li>
+<li>Navarro &amp; Baeza-Yates 1999, A Hybrid Indexing Method for
+Approximate String Matching.</li>
+<li>Navarro 2001, NR-grep (bit-parallel NFA simulation).</li>
+<li>Myers 1999, bit-parallel Levenshtein.</li>
+<li>Mihov &amp; Schulz 2004, universal Levenshtein automaton.</li>
+<li>Chaudhuri &amp; Kaushik 2009, gram-list intersection with error budget.</li>
+<li>Chambi et al. 2016, Roaring bitmaps (we use the in-house
+sparsemap instead; similar adaptive compression).</li>
+<li>PG Professional RUM: payload-in-posting-tree pattern that we borrow
+for per-tuple blooms and positions.</li>
+</ul>
+<h2 id="3-architecture"><a class="header" href="#3-architecture">3. Architecture</a></h2>
+<p>See the top-level plan in the project history for the complete
+architecture; summarized here for ongoing reference.</p>
+<h3 id="31-layers"><a class="header" href="#31-layers">3.1 Layers</a></h3>
+<pre><code>+---------------------------+
+| SQL operator:             |  text %~~ tre_pattern
+| index scan via `tre` AM   |
++---------------------------+
+          |
+          v
++---------------------------+
+| regex AST (Lime-generated)|
+| extract.c  -&gt; tile query  |
+| uleven.c   -&gt; expand near |
++---------------------------+
+          |
+          v
++---------------------------+
+| tier 1 range bloom        |
+| tier 2 posting tree AND/OR|
+| tier 3 per-tuple bloom    |
++---------------------------+
+          |
+          v
++---------------------------+
+| heap recheck (TRE regaexec)|
++---------------------------+
+</code></pre>
+<h3 id="32-on-disk"><a class="header" href="#32-on-disk">3.2 On-disk</a></h3>
+<p>Byte layouts in <code>doc/onpage_format.md</code>.  Authoritative definitions
+live in <code>include/pg_tre/page.h</code>.</p>
+<p>Page kinds: META, UPPER, UPPER_L, POSTING, POSTING_L, RANGE,
+PENDING.  Each page carries a <code>PageTreOpaqueData</code> trailer with the
+page kind, flags, and format version.  The meta page (block 0)
+carries the format version of the entire index.</p>
+<h3 id="33-data-structure-choices"><a class="header" href="#33-data-structure-choices">3.3 Data structure choices</a></h3>
+<ul>
+<li>Posting sets: sparsemap (MIT, in-tree).  The wrap() API lets
+us treat disk bytes as a live sparsemap without copy.</li>
+<li>Bitmaps operations: sparsemap_union / _intersection / _difference
+for AND-of-OR query evaluation.</li>
+<li>Positional filtering: sparsemap_offset for +/-k shifts.</li>
+<li>Blooms: custom 128/2048-bit bloom filters with pg_prng-backed
+double-hashing; one implementation used at both tuple and range
+scales, different m/k parameters.</li>
+<li>Parser: Lime LALR(1) (public domain); grammar in
+<code>src/query/tre_grammar.y</code>.  Tokenizer is hand-written
+(<code>src/query/tokens.c</code>) because regex is mode-sensitive.</li>
+<li>Match recheck: TRE 0.9.0 (BSD, statically linked from
+vendor/tre).</li>
+</ul>
+<h3 id="34-trigram-extraction-phase-35-codepoint-based"><a class="header" href="#34-trigram-extraction-phase-35-codepoint-based">3.4 Trigram extraction (Phase 3.5: codepoint-based)</a></h3>
+<p><strong>Codepoint trigrams (introduced in format v2; current on-disk
+format is v5):</strong> pg_tre indexes text using <strong>Unicode
+codepoint trigrams</strong>, not byte trigrams.</p>
+<p>Each trigram is a sequence of 3 consecutive Unicode codepoints (int32
+values in the range 0x0000..0x10FFFF), not 3 bytes. For pure ASCII text,
+this is equivalent to byte trigrams (each byte IS a codepoint), so no
+regression on ASCII-only workloads.</p>
+<p>For multi-byte UTF-8:</p>
+<ul>
+<li>A 3-byte CJK character like '東' is a single codepoint (U+6771).</li>
+<li>The trigram '東京タ' is hash(0x6771, 0x4eac, 0x30bf), not a hash of 9 bytes.</li>
+<li>Query patterns and indexed values decompose identically, so matches are found.</li>
+</ul>
+<p><strong>Motivation:</strong> Byte trigrams fail for multi-byte UTF-8 because trigram
+boundaries don't align with character boundaries. A query pattern '東京'
+decomposes into different byte trigrams than the indexed text '東京' when
+concatenated with neighbors, causing false negatives.</p>
+<p><strong>Implementation:</strong></p>
+<ul>
+<li><code>src/util/utf8.c</code>: streaming UTF-8 decoder (<code>PgTreCpStream</code>).</li>
+<li><code>src/util/hash.c</code>: <code>pg_tre_hash_trigram_cp(const int32 cp[3])</code> for codepoint trigrams.</li>
+<li><code>src/am/ambuild.c</code>, <code>src/am/aminsert.c</code>: replaced byte-walk loops with codepoint streaming.</li>
+<li><code>src/query/extract.c</code>: regex AST extraction uses codepoint runs, not byte runs.</li>
+</ul>
+<p><strong>Migration:</strong> Indexes built with v1 (byte trigrams) must be REINDEXed after
+upgrade. The meta page format version is bumped from 1 to 2. Old indexes
+open cleanly but will not match UTF-8 queries correctly.</p>
+<h3 id="35-wal"><a class="header" href="#35-wal">3.5 WAL</a></h3>
+<p>Custom rmgr RM_PG_TRE_ID (140 by default).  Record types declared in
+<code>include/pg_tre/xlog.h</code>.  Registered only when the extension is
+loaded via <code>shared_preload_libraries</code>; the legacy UDFs work
+regardless.</p>
+<h2 id="4-phase-table"><a class="header" href="#4-phase-table">4. Phase table</a></h2>
+<pre><code>Phase 0  foundation               -- shipped (this commit)
+Phase 1  on-disk format + WAL     -- in progress
+Phase 2  build path               -- planned
+Phase 3  scan path (k=0)          -- planned
+Phase 4  incremental writes       -- planned
+Phase 5  approximate + 3-tier     -- planned
+Phase 6  planner + DoS            -- planned
+Phase 7  durability / replicas    -- planned
+Phase 8  performance tuning       -- planned
+Phase 9  docs &amp; 1.0.0 release     -- planned
+</code></pre>
+<p>See <code>STATUS.md</code> for the live phase state.</p>
+<h2 id="5-non-goals"><a class="header" href="#5-non-goals">5. Non-goals</a></h2>
+<ul>
+<li>Full-text ranking.  Use RUM or pg_trgm if you need BM25-style
+scoring.</li>
+<li>Vector similarity search.  Use pgvector.</li>
+<li>Index-only scans.  The recheck is mandatory.</li>
+<li>Equality / range queries.  Use btree.</li>
+</ul>
+<h2 id="6-open-questions"><a class="header" href="#6-open-questions">6. Open questions</a></h2>
+<ul>
+<li>Per-tuple bloom width: 128 default, experiment in Phase 5.</li>
+<li>Range size: 128 blocks default, experiment in Phase 5.</li>
+<li>Should positional payload be opt-in (<code>WITH (positional=off)</code>) to
+save space when positions don't help queries?  Decide in Phase 6
+once real benchmarks exist.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="migration-from-0.1.0.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="onpage_format.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="migration-from-0.1.0.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="onpage_format.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,760 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>User Guide - pg_tre</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Native PostgreSQL index access method for approximate regex matching">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">pg_tre</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre/_edit/main/doc/pg_tre.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="pg_tre-user-guide"><a class="header" href="#pg_tre-user-guide">pg_tre User Guide</a></h1>
+<p><strong>pg_tre</strong> is a PostgreSQL 18+ native index access method for fast approximate regex matching over text columns. It uses a three-tier filter funnel (range bloom → posting tree → per-tuple bloom) backed by the <a href="https://github.com/laurikari/tre">TRE library</a> for approximate pattern recheck.</p>
+<hr />
+<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
+<h3 id="what-pg_tre-does"><a class="header" href="#what-pg_tre-does">What pg_tre Does</a></h3>
+<p>pg_tre indexes text columns to enable efficient approximate regex queries of the form:</p>
+<pre><code class="language-sql">SELECT * FROM documents
+WHERE body %~~ tre_pattern('enviro.{~2}ment', 2);
+</code></pre>
+<p>This query finds rows where <code>body</code> contains a word within edit-distance 2 of the literal pattern <code>environment</code> (e.g., "environment", "enviroment", "envirnoment", etc.). Without an index, PostgreSQL must scan every row and run the regex engine on each; with pg_tre, only candidate rows are examined.</p>
+<h3 id="when-to-use-pg_tre"><a class="header" href="#when-to-use-pg_tre">When to Use pg_tre</a></h3>
+<p><strong>Use pg_tre when:</strong></p>
+<ul>
+<li>You need approximate regex matching (fuzzy search with edit distance k &gt; 0)</li>
+<li>Patterns contain substantial literal runs (3+ character substrings)</li>
+<li>Low edit distances (k ≤ 3) — recheck cost grows exponentially with k</li>
+<li>Selective patterns (matches &lt; 10% of rows) — high selectivity benefits from index filtering</li>
+</ul>
+<p><strong>Use pg_trgm when:</strong></p>
+<ul>
+<li>You need similarity search (<code>%</code>, <code>&lt;-&gt;</code>) or exact substring matching (<code>LIKE</code>, <code>ILIKE</code>)</li>
+<li>No regex syntax required</li>
+</ul>
+<p><strong>Use full-text search (tsvector/tsquery) when:</strong></p>
+<ul>
+<li>You need linguistic analysis (stemming, stop words, ranking)</li>
+<li>Natural language queries over structured documents</li>
+</ul>
+<p><strong>Use pgvector when:</strong></p>
+<ul>
+<li>You need semantic similarity (embedding-based search)</li>
+</ul>
+<p><strong>Use sequential scan when:</strong></p>
+<ul>
+<li>Patterns lack literals (e.g., <code>.*foo.*</code> where <code>foo</code> is the only trigram)</li>
+<li>Very high edit distances (k &gt; 3) — recheck dominates cost</li>
+<li>Low selectivity (matches &gt; 50% of rows)</li>
+</ul>
+<h3 id="performance-characteristics"><a class="header" href="#performance-characteristics">Performance Characteristics</a></h3>
+<p><strong>pg_tre wins when:</strong></p>
+<ul>
+<li>Long patterns with multiple literals: <code>environment.*database.*configuration</code> (many trigrams → high selectivity)</li>
+<li>Low k (0-2): recheck is fast</li>
+<li>Common trigrams appear in distinct positions: tiling partitions the pattern space effectively</li>
+</ul>
+<p><strong>Sequential scan wins when:</strong></p>
+<ul>
+<li>Short patterns: <code>a.{~1}b</code> (only 2 trigrams → poor selectivity)</li>
+<li>High k (&gt; 3): recheck cost dominates</li>
+<li>Non-literal regex: <code>[a-z]+@[a-z]+\.(com|org)</code> (few usable trigrams)</li>
+</ul>
+<p><strong>Rule of thumb:</strong> If your pattern has ≥ 10 distinct trigrams and k ≤ 2, pg_tre likely helps. Use <code>EXPLAIN ANALYZE</code> to verify.</p>
+<hr />
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="requirements"><a class="header" href="#requirements">Requirements</a></h3>
+<ul>
+<li><strong>PostgreSQL 18 or newer</strong></li>
+<li><strong>Build tools:</strong> gcc/clang, make, autoconf, automake, libtool, gettext, m4</li>
+<li><strong>Git submodules:</strong> TRE (v0.9.0) and Lime parser generator</li>
+</ul>
+<h3 id="build"><a class="header" href="#build">Build</a></h3>
+<pre><code class="language-bash"># Clone with submodules
+git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git
+cd pg_tre
+
+# Build and install
+PG_CONFIG=/path/to/pg_config make
+sudo PG_CONFIG=/path/to/pg_config make install
+</code></pre>
+<p>If you cloned without <code>--recurse-submodules</code>:</p>
+<pre><code class="language-bash">git submodule update --init --recursive
+</code></pre>
+<h3 id="enable-the-extension"><a class="header" href="#enable-the-extension">Enable the Extension</a></h3>
+<p><strong>Critical:</strong> pg_tre requires <code>shared_preload_libraries</code> for its custom WAL resource manager:</p>
+<pre><code class="language-ini"># postgresql.conf
+shared_preload_libraries = 'pg_tre'
+</code></pre>
+<p>Restart PostgreSQL:</p>
+<pre><code class="language-bash">pg_ctl restart -D /path/to/datadir
+</code></pre>
+<p>Then in your database:</p>
+<pre><code class="language-sql">CREATE EXTENSION pg_tre;
+</code></pre>
+<p><strong>Without preload:</strong> The legacy UDFs (<code>tre_amatch*</code>, <code>tre_version</code>) work, but <code>CREATE INDEX USING tre</code> will fail.</p>
+<hr />
+<h2 id="reference"><a class="header" href="#reference">Reference</a></h2>
+<h3 id="types"><a class="header" href="#types">Types</a></h3>
+<h4 id="tre_pattern"><a class="header" href="#tre_pattern">tre_pattern</a></h4>
+<p>Compiled regex pattern with approximate-match metadata.</p>
+<p><strong>Constructors:</strong></p>
+<pre><code class="language-sql">tre_pattern(pattern text) → tre_pattern
+  -- Creates pattern with default max_cost (GUC pg_tre.default_max_cost, default 3)
+
+tre_pattern(pattern text, max_cost int) → tre_pattern
+  -- Creates pattern with explicit max edit-distance budget
+
+tre_pattern(pattern text, max_cost int, cost_ins int, cost_del int, cost_subst int) → tre_pattern
+  -- Creates pattern with custom per-operation costs
+</code></pre>
+<p><strong>Grammar:</strong> Standard POSIX extended regex (ERE) with TRE approximate-match extension <code>{~m}</code>:</p>
+<ul>
+<li><code>.</code> — any character</li>
+<li><code>*</code> <code>+</code> <code>?</code> — repetition</li>
+<li><code>[abc]</code> <code>[^abc]</code> — character classes</li>
+<li><code>(foo|bar)</code> — alternation</li>
+<li><code>^</code> <code>$</code> — anchors</li>
+<li><code>{~m}</code> — approximate block: match preceding atom with up to m edits</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-sql">-- Exact match (k=0)
+tre_pattern('hello')
+
+-- Fuzzy match: "hello" ± 1 edit
+tre_pattern('hello', 1)
+
+-- Local budget: "environment" ± 2 edits, rest exact
+tre_pattern('enviro.{~2}ment.*database')
+
+-- Custom costs: deletions cost 2, others cost 1
+tre_pattern('config', 3, 1, 2, 1)
+</code></pre>
+<h3 id="operators"><a class="header" href="#operators">Operators</a></h3>
+<h4 id="-approximate-regex-match"><a class="header" href="#-approximate-regex-match">%~~ (approximate regex match)</a></h4>
+<pre><code class="language-sql">text %~~ tre_pattern → boolean
+</code></pre>
+<p>Returns true if the text matches the pattern within the edit-distance budget.</p>
+<p><strong>Indexable:</strong> When used in a WHERE clause, the planner may choose a Bitmap Index Scan on a <code>tre</code> index.</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-sql">SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL', 1);
+-- Matches: "PostgreSQL", "PostgeSQL", "PotsgreSQL", etc.
+</code></pre>
+<h4 id="-similarity--distance-for-ranking"><a class="header" href="#-similarity--distance-for-ranking"><code>&lt;@&gt;</code> (similarity / distance for ranking)</a></h4>
+<pre><code class="language-sql">text &lt;@&gt; tre_pattern → int
+</code></pre>
+<p>Returns the edit distance of the best alignment of input against
+pattern, or <code>NULL</code> if no match exists within the pattern's
+<code>max_cost</code>.  Named for its visual cue — an eyeball, looking at how
+close two strings are.</p>
+<p><strong>Indexable (since 1.4.0).</strong>  The index registers
+<code>amcanorderbyop</code> and implements <code>amgettuple</code>, so
+<code>ORDER BY col &lt;@&gt; tre_pattern(...)</code> is satisfied directly
+by a KNN-style index scan that returns candidates in
+ascending-distance order; the executor recheck still
+confirms each row.  (Prior to 1.4.0 the operator only
+returned a per-row distance and <code>ORDER BY</code> sorted in the
+executor after <code>%~~</code>-driven candidate retrieval.)</p>
+<p><strong>Idiom:</strong></p>
+<pre><code class="language-sql">SELECT body, body &lt;@&gt; tre_pattern('connection refused', 2) AS dist
+FROM   logs
+WHERE  body %~~ tre_pattern('connection refused', 2)
+ORDER BY dist ASC NULLS LAST
+LIMIT  10;
+</code></pre>
+<p>The <code>WHERE</code> clause uses the index to narrow candidates; the
+<code>ORDER BY</code> sorts the candidate set by distance.  <code>NULLS LAST</code> is
+the default for <code>ASC</code> ordering, so rows the executor recheck
+rejected sort to the bottom.</p>
+<p>Inspired by <code>pg_textsearch</code>'s <code>&lt;@&gt;</code> for BM25 ranking and
+<code>pg_trgm</code>'s <code>&lt;-&gt;</code> for trigram distance.  Unlike <code>pg_textsearch</code>,
+we don't need to invert the sign: the natural distance is
+already ASC-friendly (smaller = more similar).</p>
+<h3 id="functions"><a class="header" href="#functions">Functions</a></h3>
+<h4 id="legacy-udfs-010-compatibility"><a class="header" href="#legacy-udfs-010-compatibility">Legacy UDFs (0.1.0 compatibility)</a></h4>
+<p>These existed before the index AM and remain for backward compatibility:</p>
+<pre><code class="language-sql">tre_amatch(input text, pattern text, max_cost int) → boolean
+  -- Approximate match with default costs (1,1,1)
+
+tre_amatch_cost(input text, pattern text, max_cost int) → int
+  -- Returns edit distance if matched, else NULL
+
+tre_amatch(input text, pattern text, max_cost int, 
+           cost_ins int, cost_del int, cost_subst int) → boolean
+  -- Approximate match with custom costs
+
+tre_amatch_detail(input text, pattern text, max_cost int) 
+  → TABLE(cost int, num_ins int, num_del int, num_subst int, 
+          match_start int, match_end int)
+  -- Returns detailed match information (single row)
+</code></pre>
+<p><strong>Note:</strong> These do NOT use the index; they always run TRE's regex engine. Use the <code>%~~</code> operator for index scans.</p>
+<h4 id="similarity--distance-120"><a class="header" href="#similarity--distance-120">Similarity / distance (1.2.0+)</a></h4>
+<pre><code class="language-sql">tre_distance(input text, pattern text, max_cost int) → int
+tre_distance(input text, pattern tre_pattern)         → int
+  -- Edit distance of the best alignment, NULL if no match
+  -- within the pattern's budget.  Equivalent to
+  -- tre_amatch_cost; renamed to make ranking idioms
+  -- obvious in EXPLAIN plans.  The `&lt;@&gt;` operator is sugar
+  -- over the (text, tre_pattern) form.
+
+tre_similarity(input text, pattern text, max_cost int) → float8
+tre_similarity(input text, pattern tre_pattern)         → float8
+  -- Normalized similarity in [0.0, 1.0]:
+  --   1 - cost / max(len(input), len(pattern))
+  -- Returns 0.0 (NOT NULL) when no match exists, so the
+  -- value is always orderable.  Matches pg_trgm's
+  -- similarity() semantics.
+</code></pre>
+<p><strong>Note:</strong> Like the legacy UDFs, these always run TRE's regex
+engine.  Use them in conjunction with the <code>%~~</code> operator to
+drive the index for narrowing first, then rank the candidate
+set.</p>
+<h4 id="introspection"><a class="header" href="#introspection">Introspection</a></h4>
+<pre><code class="language-sql">tre_version() → text
+  -- Returns TRE library version (e.g., "pg_tre 1.2.0 (TRE 0.9.0)")
+
+tre_parse_debug(pattern text) → text
+  -- Returns AST of parsed regex (for debugging extraction)
+
+tre_extract_debug(pattern text) → text
+  -- Shows trigram extraction output (debugging planner)
+</code></pre>
+<h3 id="access-method"><a class="header" href="#access-method">Access Method</a></h3>
+<h4 id="creating-indexes"><a class="header" href="#creating-indexes">Creating Indexes</a></h4>
+<pre><code class="language-sql">CREATE INDEX idx_name ON table_name USING tre (column_name);
+</code></pre>
+<p><strong>Limitations:</strong></p>
+<ul>
+<li>Single-column indexes only (<code>amcanmulticol = false</code>)</li>
+<li>Text columns only (opclass <code>tre_text_ops</code>)</li>
+<li>Lossy (no index-only scans; recheck always required)</li>
+</ul>
+<h4 id="storage-options-with-clause"><a class="header" href="#storage-options-with-clause">Storage Options (WITH clause)</a></h4>
+<pre><code class="language-sql">CREATE INDEX idx_name ON table_name USING tre (column_name)
+WITH (
+  fastupdate = true,              -- Enable pending list (default: true)
+  pending_list_limit = 4096,      -- Pending list size in KiB (default: 4096)
+  bloom_tuple_bits = 128,         -- Per-tuple bloom size (default: 128)
+  range_size_blocks = 128,        -- Blocks per range entry (default: 128)
+  tuple_bloom_enable = true       -- Enable tier-3 blooms (default: true)
+);
+</code></pre>
+<p><strong>fastupdate:</strong> When true, INSERTs append to a pending list; VACUUM merges them into the main tree. Improves write throughput at the cost of slower scans until merge.</p>
+<p><strong>pending_list_limit:</strong> Maximum pending list size in KiB before auto-merge. Larger = better write throughput, slower unmaintained scans.</p>
+<p><strong>bloom_tuple_bits:</strong> Bits per per-tuple bloom filter. More bits = lower false-positive rate = fewer heap fetches. Range: 32-1024.</p>
+<p><strong>range_size_blocks:</strong> Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.</p>
+<p><strong>tuple_bloom_enable:</strong> Per-tuple bloom and positional filter
+(tier-3).  <strong>Default: true</strong> in 1.2.3 and later.  When enabled,
+the candidate set from tier-2 is refined per-row using a
+128-bit bloom of the row's distinct trigrams; rows whose
+blooms don't contain a required query trigram are dropped
+before the executor recheck.  History: 1.1.x and 1.2.0 kept
+this off due to a struct-vs-bytes bug in the scan-side bloom
+check; the bug was identified in 1.2.2 and the residual
+pending-overlay interaction was fixed in 1.2.3.  Disable only
+if you've measured no benefit for your workload (the storage
+overhead is ~16 bytes per row plus the upper-tree bookkeeping).</p>
+<h3 id="gucs-configuration-variables"><a class="header" href="#gucs-configuration-variables">GUCs (Configuration Variables)</a></h3>
+<p>All GUCs use the <code>pg_tre.</code> prefix.</p>
+<h4 id="query-behavior"><a class="header" href="#query-behavior">Query Behavior</a></h4>
+<pre><code class="language-sql">SET pg_tre.default_max_cost = 3;  -- Default edit distance when unspecified
+SET pg_tre.max_extraction_fanout = 256;  -- Max trigram disjuncts per query
+</code></pre>
+<h4 id="safety-limits-dos-protection"><a class="header" href="#safety-limits-dos-protection">Safety Limits (DoS Protection)</a></h4>
+<pre><code class="language-sql">SET pg_tre.max_nfa_states = 10000;      -- Reject patterns with &gt; N NFA states
+SET pg_tre.compile_timeout_ms = 1000;   -- Abort regex compilation after N ms
+SET pg_tre.match_timeout_ms = 1000;     -- Abort per-row recheck after N ms
+</code></pre>
+<p>These prevent catastrophic backtracking and runaway regex compilation. If you hit these limits legitimately, increase them; if you hit them on user input, the pattern is malicious or pathological.</p>
+<h4 id="index-build-defaults-apply-when-with-options-unset"><a class="header" href="#index-build-defaults-apply-when-with-options-unset">Index Build Defaults (apply when WITH options unset)</a></h4>
+<pre><code class="language-sql">SET pg_tre.pending_list_limit = 4096;    -- KiB
+SET pg_tre.range_size_blocks = 128;      -- heap blocks
+SET pg_tre.bloom_tuple_bits = 128;       -- bits
+SET pg_tre.fastupdate = true;
+SET pg_tre.tuple_bloom_enable = true;    -- 1.2.3 default
+</code></pre>
+<p>Context: <code>PGC_USERSET</code> (can set per-session), except <code>range_size_blocks</code> and <code>bloom_tuple_bits</code> are <code>PGC_SIGHUP</code> (require reload).</p>
+<hr />
+<h2 id="usage-cookbook"><a class="header" href="#usage-cookbook">Usage Cookbook</a></h2>
+<h3 id="1-exact-regex-k0"><a class="header" href="#1-exact-regex-k0">1. Exact Regex (k=0)</a></h3>
+<pre><code class="language-sql">CREATE TABLE docs (id serial, body text);
+INSERT INTO docs (body) VALUES 
+  ('The PostgreSQL database'),
+  ('MySQL is popular'),
+  ('Oracle databases are expensive');
+
+CREATE INDEX docs_tre_idx ON docs USING tre (body);
+
+-- Find rows containing "PostgreSQL" (case-sensitive)
+SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL');
+-- Returns: row 1
+
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL');
+-- Plan: Bitmap Index Scan on docs_tre_idx
+--       Recheck Cond: (body %~~ 'PostgreSQL'::tre_pattern)
+</code></pre>
+<p><strong>Why it works:</strong> Pattern "PostgreSQL" yields trigrams <code>Pos</code>, <code>ost</code>, <code>stg</code>, ..., <code>SQL</code>. All present in row 1, absent in rows 2-3. Tier-2 posting merge produces TID set <code>{1}</code>, tier-3 bloom confirms, recheck validates.</p>
+<h3 id="2-fuzzy-match-k1"><a class="header" href="#2-fuzzy-match-k1">2. Fuzzy Match (k=1)</a></h3>
+<pre><code class="language-sql">-- Find "colour" or "color" (1 edit)
+SELECT * FROM docs WHERE body %~~ tre_pattern('colo.?ur', 1);
+-- Matches: "colour", "color"
+
+-- Edit-distance expansion:
+--   Trigrams extracted: {col, olo, lou, our} OR {col, olo, lor}
+--   k=1 expansion via universal Levenshtein adds variants:
+--     col → {col, xol, cxl, col, ...} (255 substitutions + insertions + deletions)
+--   Planner chooses based on estimated selectivity.
+</code></pre>
+<h3 id="3-when-seq-scan-wins"><a class="header" href="#3-when-seq-scan-wins">3. When Seq Scan Wins</a></h3>
+<pre><code class="language-sql">-- Pattern: ".*environment.*" (k=2)
+SELECT * FROM docs WHERE body %~~ tre_pattern('.*environment.*', 2);
+
+EXPLAIN SELECT * FROM docs WHERE body %~~ tre_pattern('.*environment.*', 2);
+-- Plan: Seq Scan on docs
+--       Filter: (body %~~ '.*environment.*'::tre_pattern)
+
+-- Reason: Leading `.*` is non-selective; tiling extracts trigrams from
+--         "environment" but the pattern matches anywhere in the text.
+--         Planner estimates high row count → seq scan cheaper.
+</code></pre>
+<p>To make this index-scannable, anchor the pattern or add more literals:</p>
+<pre><code class="language-sql">-- Anchored: must start with "environment"
+WHERE body %~~ tre_pattern('^environment', 2);
+
+-- Additional context
+WHERE body %~~ tre_pattern('.*environment.*database', 2);
+</code></pre>
+<h3 id="4-pending-list-maintenance"><a class="header" href="#4-pending-list-maintenance">4. Pending List Maintenance</a></h3>
+<pre><code class="language-sql">-- Check pending list size
+SELECT pg_relation_size('docs_tre_idx');  -- before
+INSERT INTO docs (body) SELECT 'test' || i FROM generate_series(1, 10000) i;
+SELECT pg_relation_size('docs_tre_idx');  -- after (pending list grew)
+
+-- Drain pending list
+VACUUM docs;
+SELECT pg_relation_size('docs_tre_idx');  -- merged (may grow or shrink)
+
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM docs WHERE body %~~ tre_pattern('test123');
+-- Before VACUUM: slower (pending list overlay)
+-- After VACUUM: faster (posting tree only)
+</code></pre>
+<h3 id="5-approximate-match-with-local-budget"><a class="header" href="#5-approximate-match-with-local-budget">5. Approximate Match with Local Budget</a></h3>
+<pre><code class="language-sql">-- "environment" ± 2 edits, rest exact
+SELECT * FROM docs 
+WHERE body %~~ tre_pattern('enviro.{~2}ment.*database');
+
+-- Matches:
+--   "environment management database"
+--   "enviroment setup database"
+--   "envirnoment config database"
+-- Does NOT match:
+--   "environment management MySQL"  (lacks "database")
+</code></pre>
+<p><strong>How it works:</strong> The <code>{~2}</code> block applies locally to the preceding pattern slice. Tiling extracts trigrams from "enviro", "ment", "database" and expands only the "enviro...ment" portion by k=2.</p>
+<hr />
+<h2 id="performance-notes"><a class="header" href="#performance-notes">Performance Notes</a></h2>
+<p><strong>For measured benchmark numbers, see <a href="perf.html">perf.md</a>.</strong></p>
+<p>This section describes the theoretical performance characteristics of pg_tre's three-tier filter architecture. Real measurements are in <code>doc/perf.md</code> once the Phase 5 ambuild bug is resolved.</p>
+<h3 id="three-tier-filter-funnel"><a class="header" href="#three-tier-filter-funnel">Three-Tier Filter Funnel</a></h3>
+<p>pg_tre uses three progressively refined filters before heap recheck:</p>
+<ol>
+<li>
+<p><strong>Tier 1 (Range bloom):</strong> Groups heap blocks into ranges (default 128 blocks). Each range has a bloom filter of all trigrams in that region. Query trigrams tested against range blooms; entire ranges rejected if blooms don't match.</p>
+</li>
+<li>
+<p><strong>Tier 2 (Posting tree):</strong> Per-trigram sparsemap postings. AND/OR merged based on query mode (CNF for k=0, DNF for k&gt;0 tiled). Produces candidate TID set.</p>
+</li>
+<li>
+<p><strong>Tier 3 (Per-tuple bloom):</strong> Each posting leaf stores a 128-bit bloom per TID with all trigrams from that tuple. Candidate TIDs tested; non-matches rejected without heap I/O.</p>
+</li>
+<li>
+<p><strong>Recheck:</strong> Surviving TIDs fetched from heap, TRE's <code>regaexec</code> runs the full approximate-match algorithm.</p>
+</li>
+</ol>
+<p><strong>False positive rate:</strong> Tier-3 bloom has ~2% FPR at 10 trigrams/tuple. Recheck is mandatory (the index is lossy).</p>
+<h3 id="why-recheck-is-necessary"><a class="header" href="#why-recheck-is-necessary">Why Recheck is Necessary</a></h3>
+<p>The index stores trigrams, not the full text. Even exact regex matches require recheck because:</p>
+<ul>
+<li>Trigram presence doesn't prove ordering (e.g., trigrams <code>abc</code>, <code>bcd</code>, <code>cde</code> could be "abcde" or "cdeabc")</li>
+<li>Approximate matches require NFA simulation for edit-distance computation</li>
+<li>Anchors (<code>^</code>, <code>$</code>) and boundaries (<code>\b</code>) are not indexed</li>
+</ul>
+<p>The recheck cost is why high k (&gt; 3) degrades performance: TRE's approximate-match algorithm is exponential in k.</p>
+<h3 id="planner-cost-estimates"><a class="header" href="#planner-cost-estimates">Planner Cost Estimates</a></h3>
+<p>The planner uses <code>pg_tre_amcostestimate</code> to decide between index scan and seq scan:</p>
+<ul>
+<li><strong>Selectivity:</strong> Per-trigram cardinalities from the meta page → estimated candidate rows</li>
+<li><strong>Index cost:</strong> posting lookup + bloom checks + recheck</li>
+<li><strong>Seq scan cost:</strong> scan all rows + recheck all</li>
+</ul>
+<p>For k=0, selectivity is good (literal trigrams are precise). For k&gt;0, tiling expands to DNF with k+1 tiles, each tile is a conjunction; the planner ORs their selectivities.</p>
+<p><strong>If the planner always chooses seq scan:</strong> Your pattern is non-selective. Try <code>SET enable_seqscan = off;</code> to force index scan and compare <code>EXPLAIN ANALYZE</code> costs.</p>
+<h3 id="debugging-selectivity"><a class="header" href="#debugging-selectivity">Debugging Selectivity</a></h3>
+<pre><code class="language-sql">-- Show extracted trigrams and estimated fanout
+SELECT tre_extract_debug('environment.*database');
+-- Output: CNF mode, trigrams: {env, nvi, vir, ..., ase}, fanout: 18
+
+-- Show parsed AST
+SELECT tre_parse_debug('enviro.{~2}ment');
+-- Output: CONCAT(CONCAT(Literal('enviro'), APPROX(..., k=2)), Literal('ment'))
+</code></pre>
+<hr />
+<h2 id="known-limitations"><a class="header" href="#known-limitations">Known Limitations</a></h2>
+<h3 id="phase-4-single-leaf-posting-budget"><a class="header" href="#phase-4-single-leaf-posting-budget">Phase 4 Single-Leaf Posting Budget</a></h3>
+<p><strong>Symptom:</strong> <code>ERROR: posting for trigram ... exceeds single-leaf budget</code></p>
+<p><strong>Cause:</strong> Very common trigrams (e.g., "the", "ing") generate postings &gt; 7 KB. Phase 4's single-leaf implementation can't split them.</p>
+<p><strong>Workaround:</strong> Shorten the text, filter common trigrams, or REINDEX after Phase 8 ships multi-leaf posting splits.</p>
+<p><strong>Status:</strong> Deferred to Phase 8 (multi-level posting trees).</p>
+<h3 id="utf-8-support"><a class="header" href="#utf-8-support">UTF-8 Support</a></h3>
+<p><strong>Current:</strong> Trigrams are extracted as byte-sequences. ASCII works perfectly. Multi-byte UTF-8 characters (e.g., "résumé") work but aren't optimal:</p>
+<ul>
+<li>Byte-trigrams cross character boundaries</li>
+<li>Selectivity estimates degrade for non-ASCII text</li>
+</ul>
+<p><strong>Planned:</strong> Phase 8 will add <code>tri_encoding = codepoint_hash</code> reloption for proper Unicode normalization.</p>
+<h3 id="range-bloom-and-positional-filters"><a class="header" href="#range-bloom-and-positional-filters">Range Bloom and Positional Filters</a></h3>
+<p><strong>Status (Phase 5):</strong> Tier-1 range bloom and positional offsets are implemented but selectivity benefits are less than design intent.</p>
+<ul>
+<li><strong>Range bloom:</strong> Multi-leaf since 1.5.0 — range pages carry a
+<code>PgTreRangeHeader</code> and chain via <code>right_link</code>, so the tier-1
+summary covers the whole heap instead of just the first page's
+worth of ranges.  v3/v4 single-page range layouts remain
+readable (per-page format dispatch).</li>
+<li><strong>Positional filtering:</strong> Wired since 1.3.0 (Phase 5.1).
+Per-trigram positions stored in the posting payload are used
+by the scan-side positional filter to prune candidates whose
+trigram offsets are out of range before recheck.</li>
+</ul>
+<h3 id="dos-protections"><a class="header" href="#dos-protections">DoS Protections</a></h3>
+<p><strong>Limits enforced:</strong></p>
+<ul>
+<li><code>pg_tre.max_nfa_states</code>: Rejects patterns whose TRE-compiled NFA exceeds this state count. Prevents stack overflow.</li>
+<li><code>pg_tre.compile_timeout_ms</code>: Aborts regex compilation after timeout. Prevents pathological patterns (e.g., nested quantifiers) from hanging.</li>
+<li><code>pg_tre.match_timeout_ms</code>: Aborts per-row recheck after timeout. Prevents catastrophic backtracking.</li>
+</ul>
+<p><strong>User-visible errors:</strong></p>
+<pre><code class="language-sql">ERROR:  regex too complex (estimated NFA states exceed pg_tre.max_nfa_states)
+HINT:  Simplify the pattern or increase pg_tre.max_nfa_states.
+</code></pre>
+<p><strong>If you hit these limits:</strong></p>
+<ul>
+<li>For legitimate patterns: increase the GUC</li>
+<li>For user input: the pattern is malicious or too complex; reject it</li>
+</ul>
+<h3 id="approximate-match-recheck-cost"><a class="header" href="#approximate-match-recheck-cost">Approximate Match Recheck Cost</a></h3>
+<p>TRE's <code>regaexec</code> approximate-match algorithm is O(n * m * k^2) where n = text length, m = pattern length, k = edit distance. For k &gt; 3, recheck dominates scan cost.</p>
+<p><strong>Recommendation:</strong> Use k ≤ 2 for production. For k = 3, test on your workload. Avoid k &gt; 3 unless texts are very short.</p>
+<hr />
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="error-posting-for-trigram--exceeds-single-leaf-budget"><a class="header" href="#error-posting-for-trigram--exceeds-single-leaf-budget">Error: "posting for trigram ... exceeds single-leaf budget"</a></h3>
+<p><strong>Fix:</strong> REINDEX after Phase 8 ships, or filter common words before indexing.</p>
+<p><strong>Explanation:</strong> Phase 4's posting tree is single-leaf. A single trigram posting must fit in ~7 KB. If you index 100k rows containing "the", the posting's sparsemap exceeds this.</p>
+<p><strong>Temporary workaround:</strong></p>
+<pre><code class="language-sql">-- Exclude very common words
+CREATE INDEX docs_tre_idx ON docs USING tre (body)
+WHERE length(body) &gt; 20 AND body !~~ '%common_word%';
+</code></pre>
+<h3 id="error-regex-too-complex"><a class="header" href="#error-regex-too-complex">Error: "regex too complex"</a></h3>
+<p><strong>Fix:</strong> Raise <code>pg_tre.max_nfa_states</code>:</p>
+<pre><code class="language-sql">SET pg_tre.max_nfa_states = 50000;
+</code></pre>
+<p><strong>Explanation:</strong> Your pattern compiles to &gt; 10k NFA states. This is rare for normal regexes but can happen with deeply nested alternations or large character classes.</p>
+<p><strong>If you're indexing user input:</strong> This is likely a DoS attempt. Reject the query.</p>
+<h3 id="index-scan-returns-wrong-rows"><a class="header" href="#index-scan-returns-wrong-rows">Index Scan Returns Wrong Rows</a></h3>
+<p><strong>Action:</strong> File a bug report with:</p>
+<ol>
+<li><code>SELECT version();</code> output</li>
+<li>Minimal reproduction case (CREATE TABLE + INSERT + query)</li>
+<li><code>EXPLAIN (ANALYZE, BUFFERS, VERBOSE)</code> output</li>
+<li><code>SELECT tre_extract_debug('your_pattern');</code> output</li>
+</ol>
+<p><strong>Known causes (fixed in later phases):</strong></p>
+<ul>
+<li>Phase 5.1 uleven expansion bugs (missing trigram variants)</li>
+<li>Phase 6 selectivity underestimation (planner chooses index when it shouldn't)</li>
+</ul>
+<h3 id="seq-scan-always-chosen"><a class="header" href="#seq-scan-always-chosen">Seq Scan Always Chosen</a></h3>
+<p><strong>Diagnosis:</strong></p>
+<pre><code class="language-sql">EXPLAIN SELECT * FROM docs WHERE body %~~ tre_pattern('your_pattern');
+-- If "Seq Scan" appears, planner thinks it's cheaper
+</code></pre>
+<p><strong>Reasons:</strong></p>
+<ol>
+<li><strong>Non-selective pattern:</strong> <code>.*foo.*</code> matches too many rows</li>
+<li><strong>Missing statistics:</strong> <code>ANALYZE docs;</code> may help</li>
+<li><strong>Index not visible:</strong> Check <code>pg_index.indisready</code>, <code>indisvalid</code></li>
+<li><strong>Cost parameters:</strong> Try <code>SET random_page_cost = 1.1;</code> (SSD tuning)</li>
+</ol>
+<p><strong>Force index scan to compare:</strong></p>
+<pre><code class="language-sql">SET enable_seqscan = off;
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM docs WHERE body %~~ tre_pattern('your_pattern');
+-- Compare actual cost to seq scan's actual cost
+</code></pre>
+<h3 id="crash-after-create-index"><a class="header" href="#crash-after-create-index">Crash After CREATE INDEX</a></h3>
+<p><strong>Symptom:</strong> <code>LOG: server process (PID ...) was terminated by signal 11</code></p>
+<p><strong>Status:</strong> Known Phase 5 bug (ambuild segfault during bloom population). Fixed in main branch commit <code>ff69090</code>.</p>
+<p><strong>Workaround:</strong> Pull latest main, rebuild.</p>
+<hr />
+<h2 id="internals-pointers"><a class="header" href="#internals-pointers">Internals Pointers</a></h2>
+<p>For architecture and on-disk format details, see:</p>
+<ul>
+<li><strong><a href="design.html">doc/design.md</a></strong> — Three-tier funnel, extraction pipeline, recheck flow</li>
+<li><strong><a href="onpage_format.html">doc/onpage_format.md</a></strong> — Page layouts, WAL records, format versioning</li>
+<li><strong><a href="../STATUS.html">STATUS.md</a></strong> — Phase-by-phase implementation status</li>
+</ul>
+<p>For hacking on pg_tre:</p>
+<ul>
+<li><strong>src/query/extract.c</strong> — Trigram extraction and tiling</li>
+<li><strong>src/am/amscan.c</strong> — Three-tier filtering logic</li>
+<li><strong>src/pages/posting.c</strong> — Posting tree + per-tuple bloom serialization</li>
+<li><strong>vendor/tre/</strong> — TRE library (submodule)</li>
+</ul>
+<hr />
+<h2 id="license"><a class="header" href="#license">License</a></h2>
+<p>pg_tre is MIT licensed. See <a href="../LICENSE">../LICENSE</a>.</p>
+<p>Third-party components:</p>
+<ul>
+<li>TRE: BSD 2-clause (see vendor/tre/LICENSE)</li>
+<li>Lime: Public domain</li>
+<li>sparsemap: MIT</li>
+</ul>
+<p>Full attribution in <a href="../NOTICE">../NOTICE</a>.</p>
+<hr />
+<h2 id="contributing"><a class="header" href="#contributing">Contributing</a></h2>
+<p>Report issues at: https://codeberg.org/gregburd/pg_tre/issues</p>
+<p>When filing bugs:</p>
+<ol>
+<li>Include <code>SELECT version();</code> output</li>
+<li>Provide minimal reproducer (SQL only)</li>
+<li>Attach <code>EXPLAIN (ANALYZE, VERBOSE, BUFFERS)</code> output</li>
+<li>Note whether <code>shared_preload_libraries = 'pg_tre'</code> is set</li>
+</ol>
+<p>Patches welcome via Codeberg PR or email to the author.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="migration-from-0.1.0.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="migration-from-0.1.0.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

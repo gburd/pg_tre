@@ -1,0 +1,370 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Performance - pg_tre</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Native PostgreSQL index access method for approximate regex matching">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">pg_tre</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre/_edit/main/doc/perf.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="pg_tre-performance--measured-numbers"><a class="header" href="#pg_tre-performance--measured-numbers">pg_tre performance — measured numbers</a></h1>
+<p><em>PG 18.3 · 1 000 000 row corpus from <code>/usr/share/dict/words</code>
+(Zipfian-style sample of 5–12 words per row, ~85 chars avg) ·
+seeded with <code>connection refused</code> (~10000 rows), <code>error E-NNNN</code>
+(~1000 rows), <code>database</code> (~50000 rows) · Linux x86_64 · warm cache
+unless noted.</em></p>
+<h2 id="1m-row-benchmark-141"><a class="header" href="#1m-row-benchmark-141">1M-row benchmark (1.4.1+)</a></h2>
+<h3 id="build"><a class="header" href="#build">Build</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>metric</th><th>pg_tre</th><th>pg_trgm (GIN)</th></tr></thead><tbody>
+<tr><td>Build time</td><td><strong>80 s</strong></td><td>28 s</td></tr>
+<tr><td>Index size</td><td><strong>3843 MB</strong></td><td>159 MB</td></tr>
+<tr><td>Distinct trigrams indexed</td><td>24,269</td><td>n/a</td></tr>
+<tr><td>Trigram emissions during build</td><td>83.5 M</td><td>n/a</td></tr>
+</tbody></table>
+</div>
+<p>pg_tre is 2.9× slower to build and 24× larger than pg_trgm at
+1M rows. The size delta is structural: pg_tre's posting layout
+allocates separate leaf pages per distinct trigram regardless of
+posting-list cardinality. v2.0's posting-page coalescing
+(<code>doc/specs/posting-page-coalescing.md</code>) collapses low-cardinality
+trigrams onto shared pages and is expected to close most of this
+gap. The build-time gap is dominated by the same effect — more
+pages written.</p>
+<h3 id="query-latency"><a class="header" href="#query-latency">Query latency</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>pattern</th><th>k</th><th>matches</th><th>pg_tre</th><th>pg_trgm</th><th>seq scan</th></tr></thead><tbody>
+<tr><td><code>connection refused</code></td><td>0</td><td>10,000</td><td>18.5 s</td><td><strong>35 ms</strong> (<code>LIKE</code>)</td><td>69 ms</td></tr>
+<tr><td><code>connectoin refused</code></td><td>1</td><td>10,000</td><td>5.5 s</td><td><strong>n/a</strong> (no edit-distance)</td><td>n/a</td></tr>
+<tr><td><code>database</code></td><td>0</td><td>50,043</td><td><strong>263 ms</strong></td><td>29 ms (<code>LIKE</code>)</td><td>n/a</td></tr>
+<tr><td><code>databse</code></td><td>1</td><td>50,215</td><td>7.3 s</td><td><strong>n/a</strong></td><td>n/a</td></tr>
+<tr><td><code>E-[0-9]{4}</code></td><td>0</td><td>0</td><td><strong>1.5 s</strong></td><td>n/a (no regex)</td><td>n/a</td></tr>
+<tr><td><code>connectoin refused</code> k=2 ORDER BY <code>&lt;@&gt;</code> LIMIT 10</td><td>2</td><td>top-10</td><td>6.4 s</td><td><strong>n/a</strong></td><td>n/a</td></tr>
+</tbody></table>
+</div>
+<p><strong>The honest picture at 1M rows:</strong></p>
+<ul>
+<li>pg_tre is <strong>slower than seq scan or <code>LIKE</code>/pg_trgm</strong> for the
+exact-match cases. The cost model is correctly choosing the
+index plan but the per-candidate overhead dominates: with
+~24k distinct trigrams and posting lists that are physically
+spread across many pages each, candidate-set extraction is
+I/O-heavy.</li>
+<li>Where pg_tre is the <strong>only</strong> answer (k≥1 fuzzy search,
+character-class regex like <code>E-[0-9]{4}</code>, <code>&lt;@&gt;</code> distance
+ordering), pg_tre completes in 1–7 seconds on 1M rows. No
+alternative in PostgreSQL today produces these results from
+an index — the fallback is seq scan + <code>tre_amatch</code>, which
+takes O(N × pattern_len × k) per row.</li>
+</ul>
+<p><strong>The gap closes substantially below 100K rows.</strong> See the smaller
+benchmark below for selective queries where pg_tre's three-tier
+funnel actually wins.</p>
+<h2 id="smaller-corpus-benchmark-10k-rows-short-sentences"><a class="header" href="#smaller-corpus-benchmark-10k-rows-short-sentences">Smaller-corpus benchmark (10K rows, short sentences)</a></h2>
+<p>The original 10K-row fixture (<code>bench/bench.sql</code>) shows pg_tre
+competitive on selective exact-match:</p>
+<div class="table-wrapper"><table><thead><tr><th>path</th><th>median</th></tr></thead><tbody>
+<tr><td>pg_tre index, exact 1-row match</td><td><strong>0.22 ms</strong></td></tr>
+<tr><td>pg_trgm GIN, same</td><td>0.48 ms</td></tr>
+<tr><td>seq scan</td><td>1.8 ms</td></tr>
+</tbody></table>
+</div>
+<p>pg_tre wins ~2× on this pattern. The trade-off is build time and
+size: 711 ms vs 206 ms; 36 MB vs 2.9 MB.</p>
+<p>For approximate queries (no pg_trgm comparison possible):</p>
+<div class="table-wrapper"><table><thead><tr><th>path</th><th>median</th></tr></thead><tbody>
+<tr><td>pg_tre index, k=1 selective</td><td>36 ms</td></tr>
+<tr><td>seq scan + <code>tre_amatch(..., k=1)</code></td><td>44 ms</td></tr>
+</tbody></table>
+</div>
+<p>20% faster than seq scan at k=1 because the Navarro (k+1)-tiling
+produces many OR alternatives that each individually match many
+rows; the AND of tiles narrows the candidate set but doesn't
+match the selectivity of a true btree-style equality probe.</p>
+<h2 id="take-aways"><a class="header" href="#take-aways">Take-aways</a></h2>
+<ul>
+<li><strong>Exact regex on small to medium corpora</strong>: pg_tre beats
+pg_trgm at query time. Worthwhile for read-heavy workloads.</li>
+<li><strong>Approximate regex (any k &gt; 0)</strong>: pg_tre is the only index-
+driven option in PostgreSQL. Whether pg_tre's index path
+beats seq scan depends on selectivity — selective patterns
+win, broad ones don't.</li>
+<li><strong>Million-row corpora</strong>: pg_tre's structural overhead per
+distinct trigram dominates today. v2.0's posting-page
+coalescing is the planned fix. Until then, pg_tre is best
+suited for narrow columns (short text) or smaller corpora,
+or as a complement to pg_trgm (one column, two indexes —
+the planner picks the cheaper for each query shape).</li>
+</ul>
+<h2 id="real-bugs-surfaced-by-this-benchmark"><a class="header" href="#real-bugs-surfaced-by-this-benchmark">Real bugs surfaced by this benchmark</a></h2>
+<p>The 1M-row benchmark caught two production-blocking bugs in
+1.4.0 that were silently broken before:</p>
+<ol>
+<li><strong><code>palloc</code> 1 GB cap</strong> in <code>ambuild.c</code>: ~50M trigram entries at
+24 bytes each is 1.2 GB — exceeds PG's <code>MaxAllocSize</code>. Fix
+in 1.4.1: switch the entries-array allocation to
+<code>MemoryContextAllocHuge</code> / <code>repalloc_huge</code>.</li>
+<li><strong>Single-level upper-tree internals</strong> in <code>upper.c</code>: the
+<code>upper_build_internal_level</code> was hardcoded to one page,
+capping pg_tre at ~10–20K distinct trigrams (which is just
+~50K rows of dictionary text). Fix in 1.4.1: recursive
+multi-level construction in the writer; multi-level
+descent loop in <code>pg_tre_upper_lookup</code>.</li>
+</ol>
+<p>Both fixes also surfaced a third (latent) bug: the old
+single-level descent's edge case where <code>trigram_hash &lt; first_key[0]</code> returned no match was producing wrong results on
+some queries even at small scales. The 1.4.1 multi-level
+descent loop fixes that incidentally — <code>test/expected/utf8.out</code>
+and <code>test/expected/order_by.out</code> were refreshed to reflect the
+now-correct behavior (rows that the index used to drop are now
+returned).</p>
+<h2 id="reproducing"><a class="header" href="#reproducing">Reproducing</a></h2>
+<pre><code class="language-bash"># Generate the corpus (3.9 s for 1M rows)
+python3 bench/gen_corpus.py 1000000 /tmp/corpus_1m.csv
+
+# Load + build + run query panel
+createdb bench_1m
+psql -d bench_1m -f bench/bench_1m_v2.sql
+</code></pre>
+<p><code>bench/gen_corpus.py</code> ships in the repo. The plpgsql sampler in
+the original <code>bench/bench_1m.sql</code> is O(N²) and was unusable
+beyond ~10K rows; <code>bench_1m_v2.sql</code> uses Python-generated CSV
+input via <code>\copy</code> instead.</p>
+<h2 id="known-caveats"><a class="header" href="#known-caveats">Known caveats</a></h2>
+<ul>
+<li>Measurements above are from a warm cache, single-threaded
+client, single-CPU build. NUMA / parallel scan / parallel
+build are not yet implemented in pg_tre.</li>
+<li>The 1M corpus is synthetic dictionary words; real-world
+natural text has different trigram distributions and the
+numbers will shift accordingly. Re-run on your corpus.</li>
+<li><code>\timing on</code> numbers in psql include client-side round-trip;
+the underlying executor times are 1–3 ms lower per query for
+the small ones.</li>
+</ul>
+<p><em>Last updated: 1.4.1 (1M-row benchmark).</em></p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="onpage_format.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="specs/posting-page-coalescing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="onpage_format.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="specs/posting-page-coalescing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

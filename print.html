@@ -1,0 +1,2212 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>pg_tre</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Native PostgreSQL index access method for approximate regex matching">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">pg_tre</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://codeberg.org/gregburd/pg_tre" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="pg_tre"><a class="header" href="#pg_tre">pg_tre</a></h1>
+<p><strong>A native PostgreSQL 18+ index access method for fast approximate
+(fuzzy) regular-expression matching over text columns.</strong></p>
+<p>pg_tre turns the classic "find text that looks like this, maybe with a
+typo" problem into a SQL-composable indexed query. A three-tier filter
+funnel (range bloom → trigram posting trees → per-tuple bloom) narrows
+the candidate set before any heap recheck, with the
+<a href="https://github.com/laurikari/tre">TRE library</a> performing the exact
+edit-distance match.</p>
+<pre><code class="language-sql">SELECT id FROM docs
+WHERE body %~~ tre_pattern('(error){~1}.*(42[0-9]){~0}', 1);
+-- Bitmap Index Scan on docs_tre  →  sub-millisecond on 10k rows.
+</code></pre>
+<h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
+<ul>
+<li><strong><a href="pg_tre.html">User Guide</a></strong> — installation, operators, query syntax,
+tuning, and worked examples. Start here.</li>
+<li><strong><a href="design.html">Design</a></strong> — architecture of the three-tier funnel and
+the on-disk structures.</li>
+<li><strong><a href="onpage_format.html">On-disk page format</a></strong> — byte-level page layout
+reference.</li>
+<li><strong><a href="perf.html">Performance</a></strong> — measured numbers and methodology.</li>
+<li><strong><a href="testing.html">Testing</a></strong> — the regression / sanitizer / stress
+apparatus.</li>
+</ul>
+<h2 id="project-links"><a class="header" href="#project-links">Project links</a></h2>
+<ul>
+<li>Source &amp; issues: <a href="https://codeberg.org/gregburd/pg_tre">https://codeberg.org/gregburd/pg_tre</a></li>
+<li>GitHub mirror: <a href="https://github.com/gburd/pg_tre">https://github.com/gburd/pg_tre</a></li>
+<li>License: MIT (bundles TRE under BSD-2-Clause)</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pg_tre-user-guide"><a class="header" href="#pg_tre-user-guide">pg_tre User Guide</a></h1>
+<p><strong>pg_tre</strong> is a PostgreSQL 18+ native index access method for fast approximate regex matching over text columns. It uses a three-tier filter funnel (range bloom → posting tree → per-tuple bloom) backed by the <a href="https://github.com/laurikari/tre">TRE library</a> for approximate pattern recheck.</p>
+<hr />
+<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
+<h3 id="what-pg_tre-does"><a class="header" href="#what-pg_tre-does">What pg_tre Does</a></h3>
+<p>pg_tre indexes text columns to enable efficient approximate regex queries of the form:</p>
+<pre><code class="language-sql">SELECT * FROM documents
+WHERE body %~~ tre_pattern('enviro.{~2}ment', 2);
+</code></pre>
+<p>This query finds rows where <code>body</code> contains a word within edit-distance 2 of the literal pattern <code>environment</code> (e.g., "environment", "enviroment", "envirnoment", etc.). Without an index, PostgreSQL must scan every row and run the regex engine on each; with pg_tre, only candidate rows are examined.</p>
+<h3 id="when-to-use-pg_tre"><a class="header" href="#when-to-use-pg_tre">When to Use pg_tre</a></h3>
+<p><strong>Use pg_tre when:</strong></p>
+<ul>
+<li>You need approximate regex matching (fuzzy search with edit distance k &gt; 0)</li>
+<li>Patterns contain substantial literal runs (3+ character substrings)</li>
+<li>Low edit distances (k ≤ 3) — recheck cost grows exponentially with k</li>
+<li>Selective patterns (matches &lt; 10% of rows) — high selectivity benefits from index filtering</li>
+</ul>
+<p><strong>Use pg_trgm when:</strong></p>
+<ul>
+<li>You need similarity search (<code>%</code>, <code>&lt;-&gt;</code>) or exact substring matching (<code>LIKE</code>, <code>ILIKE</code>)</li>
+<li>No regex syntax required</li>
+</ul>
+<p><strong>Use full-text search (tsvector/tsquery) when:</strong></p>
+<ul>
+<li>You need linguistic analysis (stemming, stop words, ranking)</li>
+<li>Natural language queries over structured documents</li>
+</ul>
+<p><strong>Use pgvector when:</strong></p>
+<ul>
+<li>You need semantic similarity (embedding-based search)</li>
+</ul>
+<p><strong>Use sequential scan when:</strong></p>
+<ul>
+<li>Patterns lack literals (e.g., <code>.*foo.*</code> where <code>foo</code> is the only trigram)</li>
+<li>Very high edit distances (k &gt; 3) — recheck dominates cost</li>
+<li>Low selectivity (matches &gt; 50% of rows)</li>
+</ul>
+<h3 id="performance-characteristics"><a class="header" href="#performance-characteristics">Performance Characteristics</a></h3>
+<p><strong>pg_tre wins when:</strong></p>
+<ul>
+<li>Long patterns with multiple literals: <code>environment.*database.*configuration</code> (many trigrams → high selectivity)</li>
+<li>Low k (0-2): recheck is fast</li>
+<li>Common trigrams appear in distinct positions: tiling partitions the pattern space effectively</li>
+</ul>
+<p><strong>Sequential scan wins when:</strong></p>
+<ul>
+<li>Short patterns: <code>a.{~1}b</code> (only 2 trigrams → poor selectivity)</li>
+<li>High k (&gt; 3): recheck cost dominates</li>
+<li>Non-literal regex: <code>[a-z]+@[a-z]+\.(com|org)</code> (few usable trigrams)</li>
+</ul>
+<p><strong>Rule of thumb:</strong> If your pattern has ≥ 10 distinct trigrams and k ≤ 2, pg_tre likely helps. Use <code>EXPLAIN ANALYZE</code> to verify.</p>
+<hr />
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="requirements"><a class="header" href="#requirements">Requirements</a></h3>
+<ul>
+<li><strong>PostgreSQL 18 or newer</strong></li>
+<li><strong>Build tools:</strong> gcc/clang, make, autoconf, automake, libtool, gettext, m4</li>
+<li><strong>Git submodules:</strong> TRE (v0.9.0) and Lime parser generator</li>
+</ul>
+<h3 id="build"><a class="header" href="#build">Build</a></h3>
+<pre><code class="language-bash"># Clone with submodules
+git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git
+cd pg_tre
+
+# Build and install
+PG_CONFIG=/path/to/pg_config make
+sudo PG_CONFIG=/path/to/pg_config make install
+</code></pre>
+<p>If you cloned without <code>--recurse-submodules</code>:</p>
+<pre><code class="language-bash">git submodule update --init --recursive
+</code></pre>
+<h3 id="enable-the-extension"><a class="header" href="#enable-the-extension">Enable the Extension</a></h3>
+<p><strong>Critical:</strong> pg_tre requires <code>shared_preload_libraries</code> for its custom WAL resource manager:</p>
+<pre><code class="language-ini"># postgresql.conf
+shared_preload_libraries = 'pg_tre'
+</code></pre>
+<p>Restart PostgreSQL:</p>
+<pre><code class="language-bash">pg_ctl restart -D /path/to/datadir
+</code></pre>
+<p>Then in your database:</p>
+<pre><code class="language-sql">CREATE EXTENSION pg_tre;
+</code></pre>
+<p><strong>Without preload:</strong> The legacy UDFs (<code>tre_amatch*</code>, <code>tre_version</code>) work, but <code>CREATE INDEX USING tre</code> will fail.</p>
+<hr />
+<h2 id="reference"><a class="header" href="#reference">Reference</a></h2>
+<h3 id="types"><a class="header" href="#types">Types</a></h3>
+<h4 id="tre_pattern"><a class="header" href="#tre_pattern">tre_pattern</a></h4>
+<p>Compiled regex pattern with approximate-match metadata.</p>
+<p><strong>Constructors:</strong></p>
+<pre><code class="language-sql">tre_pattern(pattern text) → tre_pattern
+  -- Creates pattern with default max_cost (GUC pg_tre.default_max_cost, default 3)
+
+tre_pattern(pattern text, max_cost int) → tre_pattern
+  -- Creates pattern with explicit max edit-distance budget
+
+tre_pattern(pattern text, max_cost int, cost_ins int, cost_del int, cost_subst int) → tre_pattern
+  -- Creates pattern with custom per-operation costs
+</code></pre>
+<p><strong>Grammar:</strong> Standard POSIX extended regex (ERE) with TRE approximate-match extension <code>{~m}</code>:</p>
+<ul>
+<li><code>.</code> — any character</li>
+<li><code>*</code> <code>+</code> <code>?</code> — repetition</li>
+<li><code>[abc]</code> <code>[^abc]</code> — character classes</li>
+<li><code>(foo|bar)</code> — alternation</li>
+<li><code>^</code> <code>$</code> — anchors</li>
+<li><code>{~m}</code> — approximate block: match preceding atom with up to m edits</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-sql">-- Exact match (k=0)
+tre_pattern('hello')
+
+-- Fuzzy match: "hello" ± 1 edit
+tre_pattern('hello', 1)
+
+-- Local budget: "environment" ± 2 edits, rest exact
+tre_pattern('enviro.{~2}ment.*database')
+
+-- Custom costs: deletions cost 2, others cost 1
+tre_pattern('config', 3, 1, 2, 1)
+</code></pre>
+<h3 id="operators"><a class="header" href="#operators">Operators</a></h3>
+<h4 id="-approximate-regex-match"><a class="header" href="#-approximate-regex-match">%~~ (approximate regex match)</a></h4>
+<pre><code class="language-sql">text %~~ tre_pattern → boolean
+</code></pre>
+<p>Returns true if the text matches the pattern within the edit-distance budget.</p>
+<p><strong>Indexable:</strong> When used in a WHERE clause, the planner may choose a Bitmap Index Scan on a <code>tre</code> index.</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-sql">SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL', 1);
+-- Matches: "PostgreSQL", "PostgeSQL", "PotsgreSQL", etc.
+</code></pre>
+<h4 id="-similarity--distance-for-ranking"><a class="header" href="#-similarity--distance-for-ranking"><code>&lt;@&gt;</code> (similarity / distance for ranking)</a></h4>
+<pre><code class="language-sql">text &lt;@&gt; tre_pattern → int
+</code></pre>
+<p>Returns the edit distance of the best alignment of input against
+pattern, or <code>NULL</code> if no match exists within the pattern's
+<code>max_cost</code>.  Named for its visual cue — an eyeball, looking at how
+close two strings are.</p>
+<p><strong>Indexable (since 1.4.0).</strong>  The index registers
+<code>amcanorderbyop</code> and implements <code>amgettuple</code>, so
+<code>ORDER BY col &lt;@&gt; tre_pattern(...)</code> is satisfied directly
+by a KNN-style index scan that returns candidates in
+ascending-distance order; the executor recheck still
+confirms each row.  (Prior to 1.4.0 the operator only
+returned a per-row distance and <code>ORDER BY</code> sorted in the
+executor after <code>%~~</code>-driven candidate retrieval.)</p>
+<p><strong>Idiom:</strong></p>
+<pre><code class="language-sql">SELECT body, body &lt;@&gt; tre_pattern('connection refused', 2) AS dist
+FROM   logs
+WHERE  body %~~ tre_pattern('connection refused', 2)
+ORDER BY dist ASC NULLS LAST
+LIMIT  10;
+</code></pre>
+<p>The <code>WHERE</code> clause uses the index to narrow candidates; the
+<code>ORDER BY</code> sorts the candidate set by distance.  <code>NULLS LAST</code> is
+the default for <code>ASC</code> ordering, so rows the executor recheck
+rejected sort to the bottom.</p>
+<p>Inspired by <code>pg_textsearch</code>'s <code>&lt;@&gt;</code> for BM25 ranking and
+<code>pg_trgm</code>'s <code>&lt;-&gt;</code> for trigram distance.  Unlike <code>pg_textsearch</code>,
+we don't need to invert the sign: the natural distance is
+already ASC-friendly (smaller = more similar).</p>
+<h3 id="functions"><a class="header" href="#functions">Functions</a></h3>
+<h4 id="legacy-udfs-010-compatibility"><a class="header" href="#legacy-udfs-010-compatibility">Legacy UDFs (0.1.0 compatibility)</a></h4>
+<p>These existed before the index AM and remain for backward compatibility:</p>
+<pre><code class="language-sql">tre_amatch(input text, pattern text, max_cost int) → boolean
+  -- Approximate match with default costs (1,1,1)
+
+tre_amatch_cost(input text, pattern text, max_cost int) → int
+  -- Returns edit distance if matched, else NULL
+
+tre_amatch(input text, pattern text, max_cost int, 
+           cost_ins int, cost_del int, cost_subst int) → boolean
+  -- Approximate match with custom costs
+
+tre_amatch_detail(input text, pattern text, max_cost int) 
+  → TABLE(cost int, num_ins int, num_del int, num_subst int, 
+          match_start int, match_end int)
+  -- Returns detailed match information (single row)
+</code></pre>
+<p><strong>Note:</strong> These do NOT use the index; they always run TRE's regex engine. Use the <code>%~~</code> operator for index scans.</p>
+<h4 id="similarity--distance-120"><a class="header" href="#similarity--distance-120">Similarity / distance (1.2.0+)</a></h4>
+<pre><code class="language-sql">tre_distance(input text, pattern text, max_cost int) → int
+tre_distance(input text, pattern tre_pattern)         → int
+  -- Edit distance of the best alignment, NULL if no match
+  -- within the pattern's budget.  Equivalent to
+  -- tre_amatch_cost; renamed to make ranking idioms
+  -- obvious in EXPLAIN plans.  The `&lt;@&gt;` operator is sugar
+  -- over the (text, tre_pattern) form.
+
+tre_similarity(input text, pattern text, max_cost int) → float8
+tre_similarity(input text, pattern tre_pattern)         → float8
+  -- Normalized similarity in [0.0, 1.0]:
+  --   1 - cost / max(len(input), len(pattern))
+  -- Returns 0.0 (NOT NULL) when no match exists, so the
+  -- value is always orderable.  Matches pg_trgm's
+  -- similarity() semantics.
+</code></pre>
+<p><strong>Note:</strong> Like the legacy UDFs, these always run TRE's regex
+engine.  Use them in conjunction with the <code>%~~</code> operator to
+drive the index for narrowing first, then rank the candidate
+set.</p>
+<h4 id="introspection"><a class="header" href="#introspection">Introspection</a></h4>
+<pre><code class="language-sql">tre_version() → text
+  -- Returns TRE library version (e.g., "pg_tre 1.2.0 (TRE 0.9.0)")
+
+tre_parse_debug(pattern text) → text
+  -- Returns AST of parsed regex (for debugging extraction)
+
+tre_extract_debug(pattern text) → text
+  -- Shows trigram extraction output (debugging planner)
+</code></pre>
+<h3 id="access-method"><a class="header" href="#access-method">Access Method</a></h3>
+<h4 id="creating-indexes"><a class="header" href="#creating-indexes">Creating Indexes</a></h4>
+<pre><code class="language-sql">CREATE INDEX idx_name ON table_name USING tre (column_name);
+</code></pre>
+<p><strong>Limitations:</strong></p>
+<ul>
+<li>Single-column indexes only (<code>amcanmulticol = false</code>)</li>
+<li>Text columns only (opclass <code>tre_text_ops</code>)</li>
+<li>Lossy (no index-only scans; recheck always required)</li>
+</ul>
+<h4 id="storage-options-with-clause"><a class="header" href="#storage-options-with-clause">Storage Options (WITH clause)</a></h4>
+<pre><code class="language-sql">CREATE INDEX idx_name ON table_name USING tre (column_name)
+WITH (
+  fastupdate = true,              -- Enable pending list (default: true)
+  pending_list_limit = 4096,      -- Pending list size in KiB (default: 4096)
+  bloom_tuple_bits = 128,         -- Per-tuple bloom size (default: 128)
+  range_size_blocks = 128,        -- Blocks per range entry (default: 128)
+  tuple_bloom_enable = true       -- Enable tier-3 blooms (default: true)
+);
+</code></pre>
+<p><strong>fastupdate:</strong> When true, INSERTs append to a pending list; VACUUM merges them into the main tree. Improves write throughput at the cost of slower scans until merge.</p>
+<p><strong>pending_list_limit:</strong> Maximum pending list size in KiB before auto-merge. Larger = better write throughput, slower unmaintained scans.</p>
+<p><strong>bloom_tuple_bits:</strong> Bits per per-tuple bloom filter. More bits = lower false-positive rate = fewer heap fetches. Range: 32-1024.</p>
+<p><strong>range_size_blocks:</strong> Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.</p>
+<p><strong>tuple_bloom_enable:</strong> Per-tuple bloom and positional filter
+(tier-3).  <strong>Default: true</strong> in 1.2.3 and later.  When enabled,
+the candidate set from tier-2 is refined per-row using a
+128-bit bloom of the row's distinct trigrams; rows whose
+blooms don't contain a required query trigram are dropped
+before the executor recheck.  History: 1.1.x and 1.2.0 kept
+this off due to a struct-vs-bytes bug in the scan-side bloom
+check; the bug was identified in 1.2.2 and the residual
+pending-overlay interaction was fixed in 1.2.3.  Disable only
+if you've measured no benefit for your workload (the storage
+overhead is ~16 bytes per row plus the upper-tree bookkeeping).</p>
+<h3 id="gucs-configuration-variables"><a class="header" href="#gucs-configuration-variables">GUCs (Configuration Variables)</a></h3>
+<p>All GUCs use the <code>pg_tre.</code> prefix.</p>
+<h4 id="query-behavior"><a class="header" href="#query-behavior">Query Behavior</a></h4>
+<pre><code class="language-sql">SET pg_tre.default_max_cost = 3;  -- Default edit distance when unspecified
+SET pg_tre.max_extraction_fanout = 256;  -- Max trigram disjuncts per query
+</code></pre>
+<h4 id="safety-limits-dos-protection"><a class="header" href="#safety-limits-dos-protection">Safety Limits (DoS Protection)</a></h4>
+<pre><code class="language-sql">SET pg_tre.max_nfa_states = 10000;      -- Reject patterns with &gt; N NFA states
+SET pg_tre.compile_timeout_ms = 1000;   -- Abort regex compilation after N ms
+SET pg_tre.match_timeout_ms = 1000;     -- Abort per-row recheck after N ms
+</code></pre>
+<p>These prevent catastrophic backtracking and runaway regex compilation. If you hit these limits legitimately, increase them; if you hit them on user input, the pattern is malicious or pathological.</p>
+<h4 id="index-build-defaults-apply-when-with-options-unset"><a class="header" href="#index-build-defaults-apply-when-with-options-unset">Index Build Defaults (apply when WITH options unset)</a></h4>
+<pre><code class="language-sql">SET pg_tre.pending_list_limit = 4096;    -- KiB
+SET pg_tre.range_size_blocks = 128;      -- heap blocks
+SET pg_tre.bloom_tuple_bits = 128;       -- bits
+SET pg_tre.fastupdate = true;
+SET pg_tre.tuple_bloom_enable = true;    -- 1.2.3 default
+</code></pre>
+<p>Context: <code>PGC_USERSET</code> (can set per-session), except <code>range_size_blocks</code> and <code>bloom_tuple_bits</code> are <code>PGC_SIGHUP</code> (require reload).</p>
+<hr />
+<h2 id="usage-cookbook"><a class="header" href="#usage-cookbook">Usage Cookbook</a></h2>
+<h3 id="1-exact-regex-k0"><a class="header" href="#1-exact-regex-k0">1. Exact Regex (k=0)</a></h3>
+<pre><code class="language-sql">CREATE TABLE docs (id serial, body text);
+INSERT INTO docs (body) VALUES 
+  ('The PostgreSQL database'),
+  ('MySQL is popular'),
+  ('Oracle databases are expensive');
+
+CREATE INDEX docs_tre_idx ON docs USING tre (body);
+
+-- Find rows containing "PostgreSQL" (case-sensitive)
+SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL');
+-- Returns: row 1
+
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL');
+-- Plan: Bitmap Index Scan on docs_tre_idx
+--       Recheck Cond: (body %~~ 'PostgreSQL'::tre_pattern)
+</code></pre>
+<p><strong>Why it works:</strong> Pattern "PostgreSQL" yields trigrams <code>Pos</code>, <code>ost</code>, <code>stg</code>, ..., <code>SQL</code>. All present in row 1, absent in rows 2-3. Tier-2 posting merge produces TID set <code>{1}</code>, tier-3 bloom confirms, recheck validates.</p>
+<h3 id="2-fuzzy-match-k1"><a class="header" href="#2-fuzzy-match-k1">2. Fuzzy Match (k=1)</a></h3>
+<pre><code class="language-sql">-- Find "colour" or "color" (1 edit)
+SELECT * FROM docs WHERE body %~~ tre_pattern('colo.?ur', 1);
+-- Matches: "colour", "color"
+
+-- Edit-distance expansion:
+--   Trigrams extracted: {col, olo, lou, our} OR {col, olo, lor}
+--   k=1 expansion via universal Levenshtein adds variants:
+--     col → {col, xol, cxl, col, ...} (255 substitutions + insertions + deletions)
+--   Planner chooses based on estimated selectivity.
+</code></pre>
+<h3 id="3-when-seq-scan-wins"><a class="header" href="#3-when-seq-scan-wins">3. When Seq Scan Wins</a></h3>
+<pre><code class="language-sql">-- Pattern: ".*environment.*" (k=2)
+SELECT * FROM docs WHERE body %~~ tre_pattern('.*environment.*', 2);
+
+EXPLAIN SELECT * FROM docs WHERE body %~~ tre_pattern('.*environment.*', 2);
+-- Plan: Seq Scan on docs
+--       Filter: (body %~~ '.*environment.*'::tre_pattern)
+
+-- Reason: Leading `.*` is non-selective; tiling extracts trigrams from
+--         "environment" but the pattern matches anywhere in the text.
+--         Planner estimates high row count → seq scan cheaper.
+</code></pre>
+<p>To make this index-scannable, anchor the pattern or add more literals:</p>
+<pre><code class="language-sql">-- Anchored: must start with "environment"
+WHERE body %~~ tre_pattern('^environment', 2);
+
+-- Additional context
+WHERE body %~~ tre_pattern('.*environment.*database', 2);
+</code></pre>
+<h3 id="4-pending-list-maintenance"><a class="header" href="#4-pending-list-maintenance">4. Pending List Maintenance</a></h3>
+<pre><code class="language-sql">-- Check pending list size
+SELECT pg_relation_size('docs_tre_idx');  -- before
+INSERT INTO docs (body) SELECT 'test' || i FROM generate_series(1, 10000) i;
+SELECT pg_relation_size('docs_tre_idx');  -- after (pending list grew)
+
+-- Drain pending list
+VACUUM docs;
+SELECT pg_relation_size('docs_tre_idx');  -- merged (may grow or shrink)
+
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM docs WHERE body %~~ tre_pattern('test123');
+-- Before VACUUM: slower (pending list overlay)
+-- After VACUUM: faster (posting tree only)
+</code></pre>
+<h3 id="5-approximate-match-with-local-budget"><a class="header" href="#5-approximate-match-with-local-budget">5. Approximate Match with Local Budget</a></h3>
+<pre><code class="language-sql">-- "environment" ± 2 edits, rest exact
+SELECT * FROM docs 
+WHERE body %~~ tre_pattern('enviro.{~2}ment.*database');
+
+-- Matches:
+--   "environment management database"
+--   "enviroment setup database"
+--   "envirnoment config database"
+-- Does NOT match:
+--   "environment management MySQL"  (lacks "database")
+</code></pre>
+<p><strong>How it works:</strong> The <code>{~2}</code> block applies locally to the preceding pattern slice. Tiling extracts trigrams from "enviro", "ment", "database" and expands only the "enviro...ment" portion by k=2.</p>
+<hr />
+<h2 id="performance-notes"><a class="header" href="#performance-notes">Performance Notes</a></h2>
+<p><strong>For measured benchmark numbers, see <a href="perf.html">perf.md</a>.</strong></p>
+<p>This section describes the theoretical performance characteristics of pg_tre's three-tier filter architecture. Real measurements are in <code>doc/perf.md</code> once the Phase 5 ambuild bug is resolved.</p>
+<h3 id="three-tier-filter-funnel"><a class="header" href="#three-tier-filter-funnel">Three-Tier Filter Funnel</a></h3>
+<p>pg_tre uses three progressively refined filters before heap recheck:</p>
+<ol>
+<li>
+<p><strong>Tier 1 (Range bloom):</strong> Groups heap blocks into ranges (default 128 blocks). Each range has a bloom filter of all trigrams in that region. Query trigrams tested against range blooms; entire ranges rejected if blooms don't match.</p>
+</li>
+<li>
+<p><strong>Tier 2 (Posting tree):</strong> Per-trigram sparsemap postings. AND/OR merged based on query mode (CNF for k=0, DNF for k&gt;0 tiled). Produces candidate TID set.</p>
+</li>
+<li>
+<p><strong>Tier 3 (Per-tuple bloom):</strong> Each posting leaf stores a 128-bit bloom per TID with all trigrams from that tuple. Candidate TIDs tested; non-matches rejected without heap I/O.</p>
+</li>
+<li>
+<p><strong>Recheck:</strong> Surviving TIDs fetched from heap, TRE's <code>regaexec</code> runs the full approximate-match algorithm.</p>
+</li>
+</ol>
+<p><strong>False positive rate:</strong> Tier-3 bloom has ~2% FPR at 10 trigrams/tuple. Recheck is mandatory (the index is lossy).</p>
+<h3 id="why-recheck-is-necessary"><a class="header" href="#why-recheck-is-necessary">Why Recheck is Necessary</a></h3>
+<p>The index stores trigrams, not the full text. Even exact regex matches require recheck because:</p>
+<ul>
+<li>Trigram presence doesn't prove ordering (e.g., trigrams <code>abc</code>, <code>bcd</code>, <code>cde</code> could be "abcde" or "cdeabc")</li>
+<li>Approximate matches require NFA simulation for edit-distance computation</li>
+<li>Anchors (<code>^</code>, <code>$</code>) and boundaries (<code>\b</code>) are not indexed</li>
+</ul>
+<p>The recheck cost is why high k (&gt; 3) degrades performance: TRE's approximate-match algorithm is exponential in k.</p>
+<h3 id="planner-cost-estimates"><a class="header" href="#planner-cost-estimates">Planner Cost Estimates</a></h3>
+<p>The planner uses <code>pg_tre_amcostestimate</code> to decide between index scan and seq scan:</p>
+<ul>
+<li><strong>Selectivity:</strong> Per-trigram cardinalities from the meta page → estimated candidate rows</li>
+<li><strong>Index cost:</strong> posting lookup + bloom checks + recheck</li>
+<li><strong>Seq scan cost:</strong> scan all rows + recheck all</li>
+</ul>
+<p>For k=0, selectivity is good (literal trigrams are precise). For k&gt;0, tiling expands to DNF with k+1 tiles, each tile is a conjunction; the planner ORs their selectivities.</p>
+<p><strong>If the planner always chooses seq scan:</strong> Your pattern is non-selective. Try <code>SET enable_seqscan = off;</code> to force index scan and compare <code>EXPLAIN ANALYZE</code> costs.</p>
+<h3 id="debugging-selectivity"><a class="header" href="#debugging-selectivity">Debugging Selectivity</a></h3>
+<pre><code class="language-sql">-- Show extracted trigrams and estimated fanout
+SELECT tre_extract_debug('environment.*database');
+-- Output: CNF mode, trigrams: {env, nvi, vir, ..., ase}, fanout: 18
+
+-- Show parsed AST
+SELECT tre_parse_debug('enviro.{~2}ment');
+-- Output: CONCAT(CONCAT(Literal('enviro'), APPROX(..., k=2)), Literal('ment'))
+</code></pre>
+<hr />
+<h2 id="known-limitations"><a class="header" href="#known-limitations">Known Limitations</a></h2>
+<h3 id="phase-4-single-leaf-posting-budget"><a class="header" href="#phase-4-single-leaf-posting-budget">Phase 4 Single-Leaf Posting Budget</a></h3>
+<p><strong>Symptom:</strong> <code>ERROR: posting for trigram ... exceeds single-leaf budget</code></p>
+<p><strong>Cause:</strong> Very common trigrams (e.g., "the", "ing") generate postings &gt; 7 KB. Phase 4's single-leaf implementation can't split them.</p>
+<p><strong>Workaround:</strong> Shorten the text, filter common trigrams, or REINDEX after Phase 8 ships multi-leaf posting splits.</p>
+<p><strong>Status:</strong> Deferred to Phase 8 (multi-level posting trees).</p>
+<h3 id="utf-8-support"><a class="header" href="#utf-8-support">UTF-8 Support</a></h3>
+<p><strong>Current:</strong> Trigrams are extracted as byte-sequences. ASCII works perfectly. Multi-byte UTF-8 characters (e.g., "résumé") work but aren't optimal:</p>
+<ul>
+<li>Byte-trigrams cross character boundaries</li>
+<li>Selectivity estimates degrade for non-ASCII text</li>
+</ul>
+<p><strong>Planned:</strong> Phase 8 will add <code>tri_encoding = codepoint_hash</code> reloption for proper Unicode normalization.</p>
+<h3 id="range-bloom-and-positional-filters"><a class="header" href="#range-bloom-and-positional-filters">Range Bloom and Positional Filters</a></h3>
+<p><strong>Status (Phase 5):</strong> Tier-1 range bloom and positional offsets are implemented but selectivity benefits are less than design intent.</p>
+<ul>
+<li><strong>Range bloom:</strong> Multi-leaf since 1.5.0 — range pages carry a
+<code>PgTreRangeHeader</code> and chain via <code>right_link</code>, so the tier-1
+summary covers the whole heap instead of just the first page's
+worth of ranges.  v3/v4 single-page range layouts remain
+readable (per-page format dispatch).</li>
+<li><strong>Positional filtering:</strong> Wired since 1.3.0 (Phase 5.1).
+Per-trigram positions stored in the posting payload are used
+by the scan-side positional filter to prune candidates whose
+trigram offsets are out of range before recheck.</li>
+</ul>
+<h3 id="dos-protections"><a class="header" href="#dos-protections">DoS Protections</a></h3>
+<p><strong>Limits enforced:</strong></p>
+<ul>
+<li><code>pg_tre.max_nfa_states</code>: Rejects patterns whose TRE-compiled NFA exceeds this state count. Prevents stack overflow.</li>
+<li><code>pg_tre.compile_timeout_ms</code>: Aborts regex compilation after timeout. Prevents pathological patterns (e.g., nested quantifiers) from hanging.</li>
+<li><code>pg_tre.match_timeout_ms</code>: Aborts per-row recheck after timeout. Prevents catastrophic backtracking.</li>
+</ul>
+<p><strong>User-visible errors:</strong></p>
+<pre><code class="language-sql">ERROR:  regex too complex (estimated NFA states exceed pg_tre.max_nfa_states)
+HINT:  Simplify the pattern or increase pg_tre.max_nfa_states.
+</code></pre>
+<p><strong>If you hit these limits:</strong></p>
+<ul>
+<li>For legitimate patterns: increase the GUC</li>
+<li>For user input: the pattern is malicious or too complex; reject it</li>
+</ul>
+<h3 id="approximate-match-recheck-cost"><a class="header" href="#approximate-match-recheck-cost">Approximate Match Recheck Cost</a></h3>
+<p>TRE's <code>regaexec</code> approximate-match algorithm is O(n * m * k^2) where n = text length, m = pattern length, k = edit distance. For k &gt; 3, recheck dominates scan cost.</p>
+<p><strong>Recommendation:</strong> Use k ≤ 2 for production. For k = 3, test on your workload. Avoid k &gt; 3 unless texts are very short.</p>
+<hr />
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="error-posting-for-trigram--exceeds-single-leaf-budget"><a class="header" href="#error-posting-for-trigram--exceeds-single-leaf-budget">Error: "posting for trigram ... exceeds single-leaf budget"</a></h3>
+<p><strong>Fix:</strong> REINDEX after Phase 8 ships, or filter common words before indexing.</p>
+<p><strong>Explanation:</strong> Phase 4's posting tree is single-leaf. A single trigram posting must fit in ~7 KB. If you index 100k rows containing "the", the posting's sparsemap exceeds this.</p>
+<p><strong>Temporary workaround:</strong></p>
+<pre><code class="language-sql">-- Exclude very common words
+CREATE INDEX docs_tre_idx ON docs USING tre (body)
+WHERE length(body) &gt; 20 AND body !~~ '%common_word%';
+</code></pre>
+<h3 id="error-regex-too-complex"><a class="header" href="#error-regex-too-complex">Error: "regex too complex"</a></h3>
+<p><strong>Fix:</strong> Raise <code>pg_tre.max_nfa_states</code>:</p>
+<pre><code class="language-sql">SET pg_tre.max_nfa_states = 50000;
+</code></pre>
+<p><strong>Explanation:</strong> Your pattern compiles to &gt; 10k NFA states. This is rare for normal regexes but can happen with deeply nested alternations or large character classes.</p>
+<p><strong>If you're indexing user input:</strong> This is likely a DoS attempt. Reject the query.</p>
+<h3 id="index-scan-returns-wrong-rows"><a class="header" href="#index-scan-returns-wrong-rows">Index Scan Returns Wrong Rows</a></h3>
+<p><strong>Action:</strong> File a bug report with:</p>
+<ol>
+<li><code>SELECT version();</code> output</li>
+<li>Minimal reproduction case (CREATE TABLE + INSERT + query)</li>
+<li><code>EXPLAIN (ANALYZE, BUFFERS, VERBOSE)</code> output</li>
+<li><code>SELECT tre_extract_debug('your_pattern');</code> output</li>
+</ol>
+<p><strong>Known causes (fixed in later phases):</strong></p>
+<ul>
+<li>Phase 5.1 uleven expansion bugs (missing trigram variants)</li>
+<li>Phase 6 selectivity underestimation (planner chooses index when it shouldn't)</li>
+</ul>
+<h3 id="seq-scan-always-chosen"><a class="header" href="#seq-scan-always-chosen">Seq Scan Always Chosen</a></h3>
+<p><strong>Diagnosis:</strong></p>
+<pre><code class="language-sql">EXPLAIN SELECT * FROM docs WHERE body %~~ tre_pattern('your_pattern');
+-- If "Seq Scan" appears, planner thinks it's cheaper
+</code></pre>
+<p><strong>Reasons:</strong></p>
+<ol>
+<li><strong>Non-selective pattern:</strong> <code>.*foo.*</code> matches too many rows</li>
+<li><strong>Missing statistics:</strong> <code>ANALYZE docs;</code> may help</li>
+<li><strong>Index not visible:</strong> Check <code>pg_index.indisready</code>, <code>indisvalid</code></li>
+<li><strong>Cost parameters:</strong> Try <code>SET random_page_cost = 1.1;</code> (SSD tuning)</li>
+</ol>
+<p><strong>Force index scan to compare:</strong></p>
+<pre><code class="language-sql">SET enable_seqscan = off;
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM docs WHERE body %~~ tre_pattern('your_pattern');
+-- Compare actual cost to seq scan's actual cost
+</code></pre>
+<h3 id="crash-after-create-index"><a class="header" href="#crash-after-create-index">Crash After CREATE INDEX</a></h3>
+<p><strong>Symptom:</strong> <code>LOG: server process (PID ...) was terminated by signal 11</code></p>
+<p><strong>Status:</strong> Known Phase 5 bug (ambuild segfault during bloom population). Fixed in main branch commit <code>ff69090</code>.</p>
+<p><strong>Workaround:</strong> Pull latest main, rebuild.</p>
+<hr />
+<h2 id="internals-pointers"><a class="header" href="#internals-pointers">Internals Pointers</a></h2>
+<p>For architecture and on-disk format details, see:</p>
+<ul>
+<li><strong><a href="design.html">doc/design.md</a></strong> — Three-tier funnel, extraction pipeline, recheck flow</li>
+<li><strong><a href="onpage_format.html">doc/onpage_format.md</a></strong> — Page layouts, WAL records, format versioning</li>
+<li><strong><a href="../STATUS.html">STATUS.md</a></strong> — Phase-by-phase implementation status</li>
+</ul>
+<p>For hacking on pg_tre:</p>
+<ul>
+<li><strong>src/query/extract.c</strong> — Trigram extraction and tiling</li>
+<li><strong>src/am/amscan.c</strong> — Three-tier filtering logic</li>
+<li><strong>src/pages/posting.c</strong> — Posting tree + per-tuple bloom serialization</li>
+<li><strong>vendor/tre/</strong> — TRE library (submodule)</li>
+</ul>
+<hr />
+<h2 id="license"><a class="header" href="#license">License</a></h2>
+<p>pg_tre is MIT licensed. See <a href="../LICENSE">../LICENSE</a>.</p>
+<p>Third-party components:</p>
+<ul>
+<li>TRE: BSD 2-clause (see vendor/tre/LICENSE)</li>
+<li>Lime: Public domain</li>
+<li>sparsemap: MIT</li>
+</ul>
+<p>Full attribution in <a href="../NOTICE">../NOTICE</a>.</p>
+<hr />
+<h2 id="contributing"><a class="header" href="#contributing">Contributing</a></h2>
+<p>Report issues at: https://codeberg.org/gregburd/pg_tre/issues</p>
+<p>When filing bugs:</p>
+<ol>
+<li>Include <code>SELECT version();</code> output</li>
+<li>Provide minimal reproducer (SQL only)</li>
+<li>Attach <code>EXPLAIN (ANALYZE, VERBOSE, BUFFERS)</code> output</li>
+<li>Note whether <code>shared_preload_libraries = 'pg_tre'</code> is set</li>
+</ol>
+<p>Patches welcome via Codeberg PR or email to the author.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="migration-guide-pg_tre-010--100"><a class="header" href="#migration-guide-pg_tre-010--100">Migration Guide: pg_tre 0.1.0 → 1.0.0</a></h1>
+<p>This guide covers upgrading from the UDF-only 0.1.0 release to the 1.0.0 native index access method.</p>
+<hr />
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p><strong>0.1.0:</strong> UDF-only extension. Provided <code>tre_amatch*</code> functions that ran TRE's regex engine directly on every row (seq scan only).</p>
+<p><strong>1.0.0:</strong> Native index access method. Adds the <code>tre</code> AM, <code>tre_pattern</code> type, <code>%~~</code> operator, and indexing support. Legacy UDFs preserved for backward compatibility.</p>
+<p><strong>Key change:</strong> <code>shared_preload_libraries = 'pg_tre'</code> now required for index AM functionality (rmgr registration).</p>
+<hr />
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<ul>
+<li>PostgreSQL 18 or newer</li>
+<li>Existing database with pg_tre 0.1.0 installed</li>
+<li>Superuser access for <code>shared_preload_libraries</code> modification</li>
+</ul>
+<hr />
+<h2 id="upgrade-steps"><a class="header" href="#upgrade-steps">Upgrade Steps</a></h2>
+<h3 id="1-build-and-install-100"><a class="header" href="#1-build-and-install-100">1. Build and Install 1.0.0</a></h3>
+<pre><code class="language-bash">cd /path/to/pg_tre
+git pull origin main  # or download 1.0.0 release tarball
+git submodule update --init --recursive
+
+PG_CONFIG=/path/to/pg_config make clean
+PG_CONFIG=/path/to/pg_config make
+sudo PG_CONFIG=/path/to/pg_config make install
+</code></pre>
+<p>Verify installation:</p>
+<pre><code class="language-bash">ls -l $(pg_config --pkglibdir)/pg_tre.so
+# Should show recent timestamp
+</code></pre>
+<h3 id="2-enable-preload-required-for-index-am"><a class="header" href="#2-enable-preload-required-for-index-am">2. Enable Preload (Required for Index AM)</a></h3>
+<p>Edit <code>postgresql.conf</code>:</p>
+<pre><code class="language-ini">shared_preload_libraries = 'pg_tre'
+</code></pre>
+<p><strong>If you have other preloaded libraries:</strong></p>
+<pre><code class="language-ini">shared_preload_libraries = 'pg_stat_statements,pg_tre'
+</code></pre>
+<p>Restart PostgreSQL:</p>
+<pre><code class="language-bash">pg_ctl restart -D /path/to/datadir
+# OR
+systemctl restart postgresql
+</code></pre>
+<p><strong>Without preload:</strong></p>
+<ul>
+<li>Legacy UDFs (<code>tre_amatch*</code>) continue to work</li>
+<li><code>CREATE INDEX USING tre</code> will fail with: <code>ERROR: custom rmgr not registered</code></li>
+</ul>
+<h3 id="3-run-the-upgrade-script"><a class="header" href="#3-run-the-upgrade-script">3. Run the Upgrade Script</a></h3>
+<p>Connect to each database using pg_tre:</p>
+<pre><code class="language-sql">\c your_database
+ALTER EXTENSION pg_tre UPDATE TO '1.0.0';
+</code></pre>
+<p>What this does:</p>
+<ul>
+<li>Registers the <code>tre</code> access method handler</li>
+<li>Creates the <code>tre_text_ops</code> operator class</li>
+<li>Does NOT drop or modify legacy UDFs (backward compatible)</li>
+</ul>
+<p>Verify:</p>
+<pre><code class="language-sql">SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_tre';
+--  extname | extversion 
+-- ---------+------------
+--  pg_tre  | 1.0.0
+
+\dAm tre
+-- Access method: tre
+--   Handler: tre_handler
+</code></pre>
+<h3 id="4-verify-legacy-udfs-still-work"><a class="header" href="#4-verify-legacy-udfs-still-work">4. Verify Legacy UDFs Still Work</a></h3>
+<pre><code class="language-sql">SELECT tre_amatch('hello', 'helo', 1);
+-- Returns: t (backward compatible)
+
+SELECT tre_version();
+-- Returns: TRE 0.9.0 (BSD)
+</code></pre>
+<p><strong>No changes required to existing application queries using legacy UDFs.</strong></p>
+<h3 id="5-optionally-create-indexes"><a class="header" href="#5-optionally-create-indexes">5. Optionally Create Indexes</a></h3>
+<pre><code class="language-sql">CREATE INDEX docs_body_tre_idx ON documents USING tre (body);
+</code></pre>
+<p><strong>No automatic migration:</strong> 0.1.0 had no indexes. If you want index-accelerated queries, create them manually.</p>
+<p><strong>Rewrite queries to use <code>%~~</code> for indexing:</strong></p>
+<p>Before (always seq scan):</p>
+<pre><code class="language-sql">SELECT * FROM documents WHERE tre_amatch(body, 'environment', 2);
+</code></pre>
+<p>After (uses index if present):</p>
+<pre><code class="language-sql">SELECT * FROM documents WHERE body %~~ tre_pattern('environment', 2);
+</code></pre>
+<p>Both syntaxes work; only <code>%~~</code> is indexable.</p>
+<hr />
+<h2 id="what-changes"><a class="header" href="#what-changes">What Changes</a></h2>
+<h3 id="added"><a class="header" href="#added">Added</a></h3>
+<ul>
+<li><strong>Access method:</strong> <code>CREATE INDEX ... USING tre</code> now supported</li>
+<li><strong>Type:</strong> <code>tre_pattern</code> (compiled regex with edit-distance budget)</li>
+<li><strong>Operator:</strong> <code>%~~</code> (text, tre_pattern) → bool (indexable)</li>
+<li><strong>Functions:</strong>
+<ul>
+<li><code>tre_pattern(text, ...)</code> constructors</li>
+<li><code>tre_parse_debug(text)</code> — show parsed AST</li>
+<li><code>tre_extract_debug(text)</code> — show extracted trigrams</li>
+</ul>
+</li>
+<li><strong>GUCs:</strong>
+<ul>
+<li><code>pg_tre.default_max_cost</code></li>
+<li><code>pg_tre.max_nfa_states</code></li>
+<li><code>pg_tre.compile_timeout_ms</code></li>
+<li><code>pg_tre.match_timeout_ms</code></li>
+<li><code>pg_tre.max_extraction_fanout</code></li>
+<li><code>pg_tre.pending_list_limit</code></li>
+<li><code>pg_tre.range_size_blocks</code></li>
+<li><code>pg_tre.bloom_tuple_bits</code></li>
+<li><code>pg_tre.fastupdate</code></li>
+<li><code>pg_tre.tuple_bloom_enable</code></li>
+</ul>
+</li>
+<li><strong>Reloptions:</strong> <code>pending_list_limit</code>, <code>bloom_tuple_bits</code>, <code>range_size_blocks</code>, <code>fastupdate</code>, <code>tuple_bloom_enable</code>, <code>q</code></li>
+</ul>
+<h3 id="unchanged"><a class="header" href="#unchanged">Unchanged</a></h3>
+<ul>
+<li>All legacy UDFs: <code>tre_amatch</code>, <code>tre_amatch_cost</code>, <code>tre_amatch_detail</code>, <code>tre_version</code></li>
+<li>Function signatures identical</li>
+<li>Return types identical</li>
+<li>Behavior identical (modulo GUC-controlled safety limits)</li>
+</ul>
+<h3 id="removed"><a class="header" href="#removed">Removed</a></h3>
+<p><strong>Nothing.</strong> 1.0.0 is 100% backward compatible with 0.1.0 UDF usage.</p>
+<hr />
+<h2 id="behavior-changes"><a class="header" href="#behavior-changes">Behavior Changes</a></h2>
+<h3 id="notice-output"><a class="header" href="#notice-output">NOTICE Output</a></h3>
+<p><strong>0.1.0:</strong></p>
+<pre><code>NOTICE: TRE approximate match: cost 2, operations: 1 ins, 0 del, 1 subst
+</code></pre>
+<p><strong>1.0.0:</strong></p>
+<pre><code>NOTICE: pg_tre: index build complete, 1234 tuples, 567 distinct trigrams
+</code></pre>
+<p>NOTICE messages changed during index operations. If you parse NOTICE output, update your scripts.</p>
+<h3 id="safety-limits"><a class="header" href="#safety-limits">Safety Limits</a></h3>
+<p><strong>New in 1.0.0:</strong> DoS protection GUCs reject pathological patterns:</p>
+<pre><code class="language-sql">SELECT tre_amatch('input', '(a+)+b', 3);
+-- 0.1.0: hangs (catastrophic backtracking)
+-- 1.0.0: ERROR: regex too complex (estimated NFA states exceed pg_tre.max_nfa_states)
+</code></pre>
+<p>To allow complex patterns:</p>
+<pre><code class="language-sql">SET pg_tre.max_nfa_states = 50000;
+SET pg_tre.compile_timeout_ms = 5000;
+</code></pre>
+<h3 id="performance"><a class="header" href="#performance">Performance</a></h3>
+<p><strong>Without indexes:</strong> Identical to 0.1.0 (seq scan + TRE regaexec).</p>
+<p><strong>With indexes:</strong> 10-1000x faster for selective patterns (k ≤ 2, long literal runs).</p>
+<hr />
+<h2 id="rollback"><a class="header" href="#rollback">Rollback</a></h2>
+<p>If you need to downgrade to 0.1.0:</p>
+<h3 id="1-drop-all-pg_tre-indexes"><a class="header" href="#1-drop-all-pg_tre-indexes">1. Drop All pg_tre Indexes</a></h3>
+<pre><code class="language-sql">DROP INDEX docs_body_tre_idx;
+-- Repeat for all USING tre indexes
+</code></pre>
+<p>Verify:</p>
+<pre><code class="language-sql">SELECT indexrelid::regclass 
+FROM pg_index i 
+JOIN pg_class c ON i.indexrelid = c.oid 
+JOIN pg_am a ON c.relam = a.oid 
+WHERE a.amname = 'tre';
+-- Should return 0 rows
+</code></pre>
+<h3 id="2-downgrade-extension"><a class="header" href="#2-downgrade-extension">2. Downgrade Extension</a></h3>
+<pre><code class="language-sql">ALTER EXTENSION pg_tre UPDATE TO '0.1.0';
+</code></pre>
+<p><strong>Note:</strong> The 0.1.0 → 1.0.0 upgrade script is NOT reversible. If this fails, you must:</p>
+<pre><code class="language-sql">DROP EXTENSION pg_tre CASCADE;
+-- Reinstall 0.1.0 binaries, then:
+CREATE EXTENSION pg_tre VERSION '0.1.0';
+</code></pre>
+<h3 id="3-remove-preload"><a class="header" href="#3-remove-preload">3. Remove Preload</a></h3>
+<p>Edit <code>postgresql.conf</code>:</p>
+<pre><code class="language-ini"># shared_preload_libraries = 'pg_tre'  # comment out or remove
+</code></pre>
+<p>Restart PostgreSQL.</p>
+<h3 id="4-verify"><a class="header" href="#4-verify">4. Verify</a></h3>
+<pre><code class="language-sql">SELECT tre_amatch('test', 'test', 0);
+-- Should work (legacy UDFs)
+
+CREATE INDEX test_idx ON test USING tre (col);
+-- Should fail: ERROR: access method "tre" does not exist
+</code></pre>
+<hr />
+<h2 id="troubleshooting-1"><a class="header" href="#troubleshooting-1">Troubleshooting</a></h2>
+<h3 id="error-custom-rmgr-not-registered"><a class="header" href="#error-custom-rmgr-not-registered">Error: "custom rmgr not registered"</a></h3>
+<p><strong>Cause:</strong> <code>shared_preload_libraries</code> not set or PostgreSQL not restarted.</p>
+<p><strong>Fix:</strong></p>
+<ol>
+<li>Verify <code>postgresql.conf</code> has <code>shared_preload_libraries = 'pg_tre'</code></li>
+<li>Restart PostgreSQL (reload is insufficient)</li>
+</ol>
+<h3 id="error-could-not-access-file-pg_tre"><a class="header" href="#error-could-not-access-file-pg_tre">Error: "could not access file pg_tre"</a></h3>
+<p><strong>Cause:</strong> 1.0.0 binaries not installed or wrong <code>pg_config</code> used during build.</p>
+<p><strong>Fix:</strong></p>
+<pre><code class="language-bash"># Verify pg_config points to the correct PostgreSQL
+which pg_config
+pg_config --version  # should match your running server
+
+# Rebuild and reinstall
+PG_CONFIG=/correct/path/to/pg_config make clean
+PG_CONFIG=/correct/path/to/pg_config make install
+</code></pre>
+<h3 id="existing-queries-slower-after-upgrade"><a class="header" href="#existing-queries-slower-after-upgrade">Existing Queries Slower After Upgrade</a></h3>
+<p><strong>Cause:</strong> Planner incorrectly chooses index scan when seq scan is faster.</p>
+<p><strong>Diagnosis:</strong></p>
+<pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM docs WHERE body %~~ tre_pattern('.*foo.*', 3);
+-- Check "Index Scan" vs "Seq Scan" in plan
+</code></pre>
+<p><strong>Fix:</strong></p>
+<ol>
+<li>Run <code>ANALYZE</code> on the table to update statistics</li>
+<li>If pattern is non-selective, seq scan is correct; use legacy UDF:
+<pre><code class="language-sql">WHERE tre_amatch(body, '.*foo.*', 3)  -- forces seq scan
+</code></pre>
+</li>
+<li>Adjust cost parameters:
+<pre><code class="language-sql">SET random_page_cost = 1.1;  -- if using SSD
+</code></pre>
+</li>
+</ol>
+<h3 id="alter-extension-fails"><a class="header" href="#alter-extension-fails">ALTER EXTENSION Fails</a></h3>
+<p><strong>Error:</strong> <code>extension "pg_tre" has no update path from version "0.1.0" to version "1.0.0"</code></p>
+<p><strong>Cause:</strong> Upgrade script <code>sql/pg_tre--0.1.0--1.0.0.sql</code> not installed.</p>
+<p><strong>Fix:</strong></p>
+<pre><code class="language-bash">sudo cp sql/pg_tre--0.1.0--1.0.0.sql \
+  $(pg_config --sharedir)/extension/
+</code></pre>
+<p>Retry:</p>
+<pre><code class="language-sql">ALTER EXTENSION pg_tre UPDATE TO '1.0.0';
+</code></pre>
+<hr />
+<h2 id="testing-the-upgrade"><a class="header" href="#testing-the-upgrade">Testing the Upgrade</a></h2>
+<p>Recommended test sequence:</p>
+<pre><code class="language-sql">-- 1. Verify extension version
+SELECT extversion FROM pg_extension WHERE extname = 'pg_tre';
+-- Should be 1.0.0
+
+-- 2. Test legacy UDFs (backward compat)
+SELECT tre_amatch('hello', 'helo', 1);  -- should return true
+
+-- 3. Test new type
+SELECT 'hello'::text %~~ tre_pattern('hello', 0);  -- should return true
+
+-- 4. Create test index
+CREATE TEMP TABLE test_pg_tre (id serial, body text);
+INSERT INTO test_pg_tre (body) VALUES ('PostgreSQL'), ('MySQL'), ('Oracle');
+CREATE INDEX test_pg_tre_idx ON test_pg_tre USING tre (body);
+
+-- 5. Test index scan
+SET enable_seqscan = off;  -- force index
+EXPLAIN SELECT * FROM test_pg_tre WHERE body %~~ tre_pattern('PostgreSQL', 1);
+-- Should show "Bitmap Index Scan on test_pg_tre_idx"
+
+-- 6. Verify correctness
+SELECT COUNT(*) FROM test_pg_tre WHERE body %~~ tre_pattern('PostgreSQL', 1);
+-- Should return 1 (only first row matches)
+</code></pre>
+<p>If all tests pass, the upgrade is successful.</p>
+<hr />
+<h2 id="performance-tips"><a class="header" href="#performance-tips">Performance Tips</a></h2>
+<p>After upgrading to 1.0.0:</p>
+<ol>
+<li>
+<p><strong>Create indexes on columns you query frequently:</strong></p>
+<pre><code class="language-sql">CREATE INDEX CONCURRENTLY docs_body_tre_idx ON documents USING tre (body);
+</code></pre>
+</li>
+<li>
+<p><strong>Run ANALYZE to populate statistics:</strong></p>
+<pre><code class="language-sql">ANALYZE documents;
+</code></pre>
+</li>
+<li>
+<p><strong>Tune GUCs for your workload:</strong></p>
+<pre><code class="language-sql">-- For large pending lists (high write throughput)
+ALTER INDEX docs_body_tre_idx SET (pending_list_limit = 8192);
+
+-- For better selectivity (more memory)
+ALTER INDEX docs_body_tre_idx SET (bloom_tuple_bits = 256);
+</code></pre>
+</li>
+<li>
+<p><strong>Monitor pending list size:</strong></p>
+<pre><code class="language-sql">SELECT pg_relation_size('docs_body_tre_idx');  -- bytes
+</code></pre>
+<p>If growing rapidly, run <code>VACUUM</code> to merge.</p>
+</li>
+<li>
+<p><strong>Rewrite queries for indexability:</strong></p>
+<ul>
+<li>Bad: <code>WHERE tre_amatch(body, pattern, k)</code> — always seq scan</li>
+<li>Good: <code>WHERE body %~~ tre_pattern(pattern, k)</code> — uses index</li>
+</ul>
+</li>
+</ol>
+<hr />
+<h2 id="support"><a class="header" href="#support">Support</a></h2>
+<p>For migration issues:</p>
+<ul>
+<li>File bug reports: https://codeberg.org/gregburd/pg_tre/issues</li>
+<li>Include: PostgreSQL version (<code>SELECT version();</code>), pg_tre version, full error message</li>
+<li>Attach: <code>pg_config --version</code>, <code>postgresql.conf</code> excerpt, EXPLAIN output</li>
+</ul>
+<p>For general questions:</p>
+<ul>
+<li>See <a href="pg_tre.html">doc/pg_tre.md</a> for usage guide</li>
+<li>Check <a href="../CHANGELOG.html">CHANGELOG.md</a> for what changed</li>
+<li>Review <a href="../STATUS.html">STATUS.md</a> for known limitations</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pg_tre-design"><a class="header" href="#pg_tre-design">pg_tre design</a></h1>
+<p>This file is the working design document for the production pg_tre
+native index AM.  Paired with <code>doc/onpage_format.md</code> (byte-exact page
+specs) and the top-level <code>README.md</code> (user-facing description).</p>
+<h2 id="1-goal"><a class="header" href="#1-goal">1. Goal</a></h2>
+<p>Provide a PostgreSQL index access method, <code>tre</code>, that indexes text
+columns for fast approximate-regex queries:</p>
+<pre><code>CREATE INDEX docs_tre ON docs USING tre (body);
+SELECT * FROM docs WHERE body %~~ tre_pattern('enviro.{~2}ment', 2);
+</code></pre>
+<p>Delivered via a three-tier filter funnel over trigram postings:</p>
+<ol>
+<li><strong>Range tier</strong> -- BRIN-style block-range blooms reject whole
+heap regions that lack any required trigram.</li>
+<li><strong>Posting tier</strong> -- per-trigram sparsemap postings, AND/OR-merged
+to produce a candidate TID set.</li>
+<li><strong>Per-tuple tier</strong> -- 128-bit bloom per indexed tuple stored
+inline with the posting, used to refine the candidate set
+without heap I/O.</li>
+</ol>
+<p>Recheck is always performed against the heap via TRE's
+<code>regaexec</code>.</p>
+<h2 id="2-prior-art"><a class="header" href="#2-prior-art">2. Prior art</a></h2>
+<ul>
+<li>Russ Cox 2012, Regular Expression Matching with a Trigram Index.</li>
+<li>Navarro &amp; Baeza-Yates 1999, A Hybrid Indexing Method for
+Approximate String Matching.</li>
+<li>Navarro 2001, NR-grep (bit-parallel NFA simulation).</li>
+<li>Myers 1999, bit-parallel Levenshtein.</li>
+<li>Mihov &amp; Schulz 2004, universal Levenshtein automaton.</li>
+<li>Chaudhuri &amp; Kaushik 2009, gram-list intersection with error budget.</li>
+<li>Chambi et al. 2016, Roaring bitmaps (we use the in-house
+sparsemap instead; similar adaptive compression).</li>
+<li>PG Professional RUM: payload-in-posting-tree pattern that we borrow
+for per-tuple blooms and positions.</li>
+</ul>
+<h2 id="3-architecture"><a class="header" href="#3-architecture">3. Architecture</a></h2>
+<p>See the top-level plan in the project history for the complete
+architecture; summarized here for ongoing reference.</p>
+<h3 id="31-layers"><a class="header" href="#31-layers">3.1 Layers</a></h3>
+<pre><code>+---------------------------+
+| SQL operator:             |  text %~~ tre_pattern
+| index scan via `tre` AM   |
++---------------------------+
+          |
+          v
++---------------------------+
+| regex AST (Lime-generated)|
+| extract.c  -&gt; tile query  |
+| uleven.c   -&gt; expand near |
++---------------------------+
+          |
+          v
++---------------------------+
+| tier 1 range bloom        |
+| tier 2 posting tree AND/OR|
+| tier 3 per-tuple bloom    |
++---------------------------+
+          |
+          v
++---------------------------+
+| heap recheck (TRE regaexec)|
++---------------------------+
+</code></pre>
+<h3 id="32-on-disk"><a class="header" href="#32-on-disk">3.2 On-disk</a></h3>
+<p>Byte layouts in <code>doc/onpage_format.md</code>.  Authoritative definitions
+live in <code>include/pg_tre/page.h</code>.</p>
+<p>Page kinds: META, UPPER, UPPER_L, POSTING, POSTING_L, RANGE,
+PENDING.  Each page carries a <code>PageTreOpaqueData</code> trailer with the
+page kind, flags, and format version.  The meta page (block 0)
+carries the format version of the entire index.</p>
+<h3 id="33-data-structure-choices"><a class="header" href="#33-data-structure-choices">3.3 Data structure choices</a></h3>
+<ul>
+<li>Posting sets: sparsemap (MIT, in-tree).  The wrap() API lets
+us treat disk bytes as a live sparsemap without copy.</li>
+<li>Bitmaps operations: sparsemap_union / _intersection / _difference
+for AND-of-OR query evaluation.</li>
+<li>Positional filtering: sparsemap_offset for +/-k shifts.</li>
+<li>Blooms: custom 128/2048-bit bloom filters with pg_prng-backed
+double-hashing; one implementation used at both tuple and range
+scales, different m/k parameters.</li>
+<li>Parser: Lime LALR(1) (public domain); grammar in
+<code>src/query/tre_grammar.y</code>.  Tokenizer is hand-written
+(<code>src/query/tokens.c</code>) because regex is mode-sensitive.</li>
+<li>Match recheck: TRE 0.9.0 (BSD, statically linked from
+vendor/tre).</li>
+</ul>
+<h3 id="34-trigram-extraction-phase-35-codepoint-based"><a class="header" href="#34-trigram-extraction-phase-35-codepoint-based">3.4 Trigram extraction (Phase 3.5: codepoint-based)</a></h3>
+<p><strong>Codepoint trigrams (introduced in format v2; current on-disk
+format is v5):</strong> pg_tre indexes text using <strong>Unicode
+codepoint trigrams</strong>, not byte trigrams.</p>
+<p>Each trigram is a sequence of 3 consecutive Unicode codepoints (int32
+values in the range 0x0000..0x10FFFF), not 3 bytes. For pure ASCII text,
+this is equivalent to byte trigrams (each byte IS a codepoint), so no
+regression on ASCII-only workloads.</p>
+<p>For multi-byte UTF-8:</p>
+<ul>
+<li>A 3-byte CJK character like '東' is a single codepoint (U+6771).</li>
+<li>The trigram '東京タ' is hash(0x6771, 0x4eac, 0x30bf), not a hash of 9 bytes.</li>
+<li>Query patterns and indexed values decompose identically, so matches are found.</li>
+</ul>
+<p><strong>Motivation:</strong> Byte trigrams fail for multi-byte UTF-8 because trigram
+boundaries don't align with character boundaries. A query pattern '東京'
+decomposes into different byte trigrams than the indexed text '東京' when
+concatenated with neighbors, causing false negatives.</p>
+<p><strong>Implementation:</strong></p>
+<ul>
+<li><code>src/util/utf8.c</code>: streaming UTF-8 decoder (<code>PgTreCpStream</code>).</li>
+<li><code>src/util/hash.c</code>: <code>pg_tre_hash_trigram_cp(const int32 cp[3])</code> for codepoint trigrams.</li>
+<li><code>src/am/ambuild.c</code>, <code>src/am/aminsert.c</code>: replaced byte-walk loops with codepoint streaming.</li>
+<li><code>src/query/extract.c</code>: regex AST extraction uses codepoint runs, not byte runs.</li>
+</ul>
+<p><strong>Migration:</strong> Indexes built with v1 (byte trigrams) must be REINDEXed after
+upgrade. The meta page format version is bumped from 1 to 2. Old indexes
+open cleanly but will not match UTF-8 queries correctly.</p>
+<h3 id="35-wal"><a class="header" href="#35-wal">3.5 WAL</a></h3>
+<p>Custom rmgr RM_PG_TRE_ID (140 by default).  Record types declared in
+<code>include/pg_tre/xlog.h</code>.  Registered only when the extension is
+loaded via <code>shared_preload_libraries</code>; the legacy UDFs work
+regardless.</p>
+<h2 id="4-phase-table"><a class="header" href="#4-phase-table">4. Phase table</a></h2>
+<pre><code>Phase 0  foundation               -- shipped (this commit)
+Phase 1  on-disk format + WAL     -- in progress
+Phase 2  build path               -- planned
+Phase 3  scan path (k=0)          -- planned
+Phase 4  incremental writes       -- planned
+Phase 5  approximate + 3-tier     -- planned
+Phase 6  planner + DoS            -- planned
+Phase 7  durability / replicas    -- planned
+Phase 8  performance tuning       -- planned
+Phase 9  docs &amp; 1.0.0 release     -- planned
+</code></pre>
+<p>See <code>STATUS.md</code> for the live phase state.</p>
+<h2 id="5-non-goals"><a class="header" href="#5-non-goals">5. Non-goals</a></h2>
+<ul>
+<li>Full-text ranking.  Use RUM or pg_trgm if you need BM25-style
+scoring.</li>
+<li>Vector similarity search.  Use pgvector.</li>
+<li>Index-only scans.  The recheck is mandatory.</li>
+<li>Equality / range queries.  Use btree.</li>
+</ul>
+<h2 id="6-open-questions"><a class="header" href="#6-open-questions">6. Open questions</a></h2>
+<ul>
+<li>Per-tuple bloom width: 128 default, experiment in Phase 5.</li>
+<li>Range size: 128 blocks default, experiment in Phase 5.</li>
+<li>Should positional payload be opt-in (<code>WITH (positional=off)</code>) to
+save space when positions don't help queries?  Decide in Phase 6
+once real benchmarks exist.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pg_tre-on-disk-page-format-v3-v4"><a class="header" href="#pg_tre-on-disk-page-format-v3-v4">pg_tre on-disk page format (v3, v4)</a></h1>
+<p>Authoritative declarations live in <code>include/pg_tre/page.h</code>.  This
+document is the narrative reference and the place where format
+changes are reviewed before they are locked in.</p>
+<p>All multi-byte fields use native byte order.  All pages are the
+Postgres cluster page size (default 8 KiB) and begin with the
+standard <code>PageHeaderData</code> at offset 0 and end with a
+<code>PageTreOpaqueData</code> trailer in the special area.</p>
+<h2 id="format-version-history"><a class="header" href="#format-version-history">Format version history</a></h2>
+<ul>
+<li><strong>v4 (1.4.0-dev)</strong>: Identical byte layout to v3; the bump exists
+to land the in-place format-upgrade infrastructure (see below).
+No reader change between v3 and v4 beyond accepting both at
+page-decode time.</li>
+<li><strong>v3 (Phase 4.2)</strong>: Multi-leaf posting trees. When a single trigram's
+posting exceeds ~8 KB, the builder splits it across multiple leaves
+linked by <code>right_link</code> (Lehman-Yao convention). Each leaf stores
+<code>min_tid</code> and <code>max_tid</code> bounds. Readers traverse the chain to find
+the leaf containing a target TID.</li>
+<li><strong>v2 (Phase 3.5)</strong>: Codepoint-based trigrams.</li>
+<li><strong>v1</strong>: Initial format with byte-based trigrams.</li>
+</ul>
+<p>Indexes built with v2 or earlier require REINDEX to use 1.x.
+Indexes built with v3 are read directly by 1.4.0-dev; in-place
+upgrade to v4 is available via <code>pg_tre_upgrade_index()</code>.</p>
+<h2 id="meta-page-block-0"><a class="header" href="#meta-page-block-0">Meta page (block 0)</a></h2>
+<pre><code>+-----------------------------------+
+| PageHeaderData                    |  24 B
++-----------------------------------+
+| PgTreMetaPageData                 |  variable (reserved[32])
+|   uint32  magic          0x50545245  ('PTRE')
+|   uint32  format_version 1
+|   uint32  q                        trigram size (default 3)
+|   uint32  tri_encoding             0=byte, 1=codepoint-hash
+|   uint32  bloom_range_m_bits
+|   uint16  bloom_range_k
+|   uint16  bloom_tuple_m_bits
+|   uint8   bloom_tuple_k
+|   uint8   _pad[3]
+|   Block   root_upper
+|   Block   root_range
+|   Block   pending_head
+|   Block   pending_tail
+|   uint64  pending_n_entries
+|   Block   stats_blk
+|   uint64  n_trigrams
+|   uint64  n_tuples_indexed
+|   uint32  created_xid
+|   uint32  reserved[32]
++-----------------------------------+
+|                                   |  (unused)
++-----------------------------------+
+| PageTreOpaqueData                 |   8 B
+|   page_kind = META                |
++-----------------------------------+
+</code></pre>
+<h2 id="upper-tree-pages"><a class="header" href="#upper-tree-pages">Upper tree pages</a></h2>
+<p>Internal node (UPPER) and leaf node (UPPER_L) share the same header
+layout but carry different entry types.</p>
+<pre><code>internal: (trigram_hash_low_watermark, child_blk) pairs
+leaf:     PgTreUpperLeafEntry[] sorted by trigram_hash
+</code></pre>
+<p>Split protocol: Lehman-Yao right-link.  Right-link is stored in the
+opaque area's flags region.</p>
+<h2 id="posting-tree-pages"><a class="header" href="#posting-tree-pages">Posting tree pages</a></h2>
+<p>Internal (POSTING) and leaf (POSTING_L) pages.</p>
+<h3 id="posting-internal"><a class="header" href="#posting-internal">POSTING (internal)</a></h3>
+<pre><code>(min_tid, child_blk) pairs, sorted by min_tid.
+</code></pre>
+<h3 id="posting_l-leaf"><a class="header" href="#posting_l-leaf">POSTING_L (leaf)</a></h3>
+<p>Phase 4.2: supports multi-leaf chains when a single trigram's posting
+exceeds the ~8 KB single-leaf budget. Leaves are linked via <code>right_link</code>
+(Lehman-Yao style). Each leaf stores its TID range in <code>min_tid</code> and
+<code>max_tid</code>. Readers traverse right-links to find the leaf containing a
+target TID.</p>
+<pre><code>+-----------------------------------+
+| PageHeaderData                    |  24 B
++-----------------------------------+
+| PgTrePostingLeafHeader            |  40 B
+|   right_link                      |  next leaf in chain (or InvalidBlockNumber)
+|   min_tid / max_tid               |  TID range for this leaf
+|   sparsemap_bytes                 |
+|   payload_bytes                   |
+|   payload_offset                  |
+|   n_entries                       |
++-----------------------------------+
+| sparsemap blob                    |  sparsemap_bytes
++-----------------------------------+
+|                                   |
+|   (free space)                    |
+|                                   |
++-----------------------------------+
+| payload region (grows from below) |  payload_bytes
+|   per-TID: (pos_list_varlen,      |
+|             tuple_bloom_128)      |
++-----------------------------------+
+| PageTreOpaqueData                 |   8 B
+|   page_kind = POSTING_L           |
++-----------------------------------+
+</code></pre>
+<p>Access by TID:</p>
+<ol>
+<li>Walk right-links until <code>min_tid &lt;= target &lt;= max_tid</code></li>
+<li>Within that leaf: <code>sparsemap_rank(map, 0, TID, true)</code> gives the entry
+index; multiply by sizeof(payload record) -- or walk the variable-
+length region via per-entry offset table -- to locate payload.</li>
+</ol>
+<h2 id="range-summary-tree"><a class="header" href="#range-summary-tree">Range summary tree</a></h2>
+<p>BRIN-style B-tree where each leaf entry is <code>PgTreRangeLeafEntry</code>
+followed inline by a bloom-filter byte vector of <code>bloom_bytes</code>
+length.  Internal nodes behave like a standard B-tree keyed on
+<code>range_start_blk</code>.</p>
+<h2 id="pending-list"><a class="header" href="#pending-list">Pending list</a></h2>
+<p>A forward-linked chain of pages, head stored in the meta page.
+Each page begins with <code>PgTrePendingHeader</code> and is followed by a
+packed array of <code>PgTrePendingEntry</code>.  New entries append at the tail
+page; the list is consumed by VACUUM's cleanup phase or the
+user-visible <code>pg_tre_flush()</code> function.</p>
+<h2 id="opaque-trailer"><a class="header" href="#opaque-trailer">Opaque trailer</a></h2>
+<p>Every page ends with <code>PageTreOpaqueData</code>:</p>
+<pre><code>uint16 page_kind
+uint16 flags
+uint32 format_version       /* per-page on-disk format */
+</code></pre>
+<p>Positioned via <code>PageGetSpecialPointer(page)</code>.</p>
+<p><code>format_version</code> is the <em>per-page</em> on-disk format the page bytes are
+in; it can differ from the meta page's index-level <code>format_version</code>
+while an in-place upgrade is in progress.  All readers accept any
+value in <code>[PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST]</code>.
+Writers always emit <code>LATEST</code>.</p>
+<h2 id="in-place-format-upgrade"><a class="header" href="#in-place-format-upgrade">In-place format upgrade</a></h2>
+<p>The machinery for upgrading an existing index to the current on-disk
+format without REINDEX:</p>
+<ul>
+<li>Per-page: <code>PageTreOpaqueData.format_version</code> records the format the
+page bytes are in.  Writers (page-init, posting-leaf flush, posting-
+leaf rewrite, in-place upgrade) always set it to LATEST.</li>
+<li>Meta: <code>PgTreMetaPageData.min_page_format_version</code> is the minimum
+observed across all pages of the index.  When equal to LATEST, the
+index is fully upgraded and future readers can skip per-page
+format dispatch.</li>
+</ul>
+<p>SQL surface (1.4.0-dev):</p>
+<pre><code>-- Walk every page; rewrite below LATEST in place.  WAL-logs each
+-- rewritten page as XLOG_PTRE_PAGE_FORMAT_UPGRADE (FORCE_IMAGE).
+-- Holds per-page exclusive lock only briefly.  Updates the meta
+-- page's min_page_format_version after the sweep.
+SELECT pg_tre_upgrade_index('my_idx');
+
+-- Per-version page counts.  SHARED locks; safe to run concurrently.
+SELECT * FROM pg_tre_index_format_status('my_idx');
+
+-- O(1) read of meta page's min_page_format_version.
+SELECT pg_tre_index_min_format_version('my_idx');
+</code></pre>
+<p>Readers that decode format-version-dependent layouts dispatch through
+<code>pg_tre_bloom_decode_tuple()</code> (see <code>src/util/bloom.c</code>); the call sites
+in <code>src/am/amscan.c::apply_tuple_bloom_filter</code> pass the per-page
+<code>format_version</code> returned out-of-band by
+<code>pg_tre_posting_lookup_tuple_bloom</code>.  Today v3 and v4 share a decode
+path; future format versions plug new arms into
+<code>pg_tre_bloom_decode_tuple</code> without touching the call sites.</p>
+<p>The upgrade is a no-op for v3 -&gt; v4 since the byte layouts are
+identical; the framework exists so the next on-disk format change
+(planned: variable-width per-tuple blooms in a follow-on commit) can
+ship as an in-place rewrite rather than a hard REINDEX requirement.</p>
+<h2 id="on-disk-version-policy"><a class="header" href="#on-disk-version-policy">On-disk version policy</a></h2>
+<p><code>format_version</code> lives in the meta page and is copied to each
+page's opaque trailer on write.  Readers accept any value in
+<code>[PG_TRE_FORMAT_VERSION_MIN, PG_TRE_FORMAT_VERSION_LATEST]</code>; the meta
+page's <code>min_page_format_version</code> records the minimum across all
+pages of the index, updated by <code>pg_tre_upgrade_index()</code> after a full
+sweep.  Any layout change bumps <code>PG_TRE_FORMAT_VERSION_LATEST</code> and
+ships with:</p>
+<ul>
+<li>A migration script under <code>sql/pg_tre--&lt;from&gt;--&lt;to&gt;.sql</code> exposing
+any new SQL surface.</li>
+<li>For incompatible breaking changes (e.g. v2 -&gt; v3): a unit test
+that reads a snapshot built with the previous version and
+validates field-for-field equality after upgrade.</li>
+<li>For compatible bumps (e.g. v3 -&gt; v4): the in-place upgrade path
+via <code>pg_tre_upgrade_index()</code>.</li>
+</ul>
+<p>Breaking version bumps (anything that requires REINDEX) are only
+permitted at major releases (1.0 -&gt; 2.0); compatible bumps that ship
+an in-place upgrade may land in minor releases.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pg_tre-performance--measured-numbers"><a class="header" href="#pg_tre-performance--measured-numbers">pg_tre performance — measured numbers</a></h1>
+<p><em>PG 18.3 · 1 000 000 row corpus from <code>/usr/share/dict/words</code>
+(Zipfian-style sample of 5–12 words per row, ~85 chars avg) ·
+seeded with <code>connection refused</code> (~10000 rows), <code>error E-NNNN</code>
+(~1000 rows), <code>database</code> (~50000 rows) · Linux x86_64 · warm cache
+unless noted.</em></p>
+<h2 id="1m-row-benchmark-141"><a class="header" href="#1m-row-benchmark-141">1M-row benchmark (1.4.1+)</a></h2>
+<h3 id="build-1"><a class="header" href="#build-1">Build</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>metric</th><th>pg_tre</th><th>pg_trgm (GIN)</th></tr></thead><tbody>
+<tr><td>Build time</td><td><strong>80 s</strong></td><td>28 s</td></tr>
+<tr><td>Index size</td><td><strong>3843 MB</strong></td><td>159 MB</td></tr>
+<tr><td>Distinct trigrams indexed</td><td>24,269</td><td>n/a</td></tr>
+<tr><td>Trigram emissions during build</td><td>83.5 M</td><td>n/a</td></tr>
+</tbody></table>
+</div>
+<p>pg_tre is 2.9× slower to build and 24× larger than pg_trgm at
+1M rows. The size delta is structural: pg_tre's posting layout
+allocates separate leaf pages per distinct trigram regardless of
+posting-list cardinality. v2.0's posting-page coalescing
+(<code>doc/specs/posting-page-coalescing.md</code>) collapses low-cardinality
+trigrams onto shared pages and is expected to close most of this
+gap. The build-time gap is dominated by the same effect — more
+pages written.</p>
+<h3 id="query-latency"><a class="header" href="#query-latency">Query latency</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>pattern</th><th>k</th><th>matches</th><th>pg_tre</th><th>pg_trgm</th><th>seq scan</th></tr></thead><tbody>
+<tr><td><code>connection refused</code></td><td>0</td><td>10,000</td><td>18.5 s</td><td><strong>35 ms</strong> (<code>LIKE</code>)</td><td>69 ms</td></tr>
+<tr><td><code>connectoin refused</code></td><td>1</td><td>10,000</td><td>5.5 s</td><td><strong>n/a</strong> (no edit-distance)</td><td>n/a</td></tr>
+<tr><td><code>database</code></td><td>0</td><td>50,043</td><td><strong>263 ms</strong></td><td>29 ms (<code>LIKE</code>)</td><td>n/a</td></tr>
+<tr><td><code>databse</code></td><td>1</td><td>50,215</td><td>7.3 s</td><td><strong>n/a</strong></td><td>n/a</td></tr>
+<tr><td><code>E-[0-9]{4}</code></td><td>0</td><td>0</td><td><strong>1.5 s</strong></td><td>n/a (no regex)</td><td>n/a</td></tr>
+<tr><td><code>connectoin refused</code> k=2 ORDER BY <code>&lt;@&gt;</code> LIMIT 10</td><td>2</td><td>top-10</td><td>6.4 s</td><td><strong>n/a</strong></td><td>n/a</td></tr>
+</tbody></table>
+</div>
+<p><strong>The honest picture at 1M rows:</strong></p>
+<ul>
+<li>pg_tre is <strong>slower than seq scan or <code>LIKE</code>/pg_trgm</strong> for the
+exact-match cases. The cost model is correctly choosing the
+index plan but the per-candidate overhead dominates: with
+~24k distinct trigrams and posting lists that are physically
+spread across many pages each, candidate-set extraction is
+I/O-heavy.</li>
+<li>Where pg_tre is the <strong>only</strong> answer (k≥1 fuzzy search,
+character-class regex like <code>E-[0-9]{4}</code>, <code>&lt;@&gt;</code> distance
+ordering), pg_tre completes in 1–7 seconds on 1M rows. No
+alternative in PostgreSQL today produces these results from
+an index — the fallback is seq scan + <code>tre_amatch</code>, which
+takes O(N × pattern_len × k) per row.</li>
+</ul>
+<p><strong>The gap closes substantially below 100K rows.</strong> See the smaller
+benchmark below for selective queries where pg_tre's three-tier
+funnel actually wins.</p>
+<h2 id="smaller-corpus-benchmark-10k-rows-short-sentences"><a class="header" href="#smaller-corpus-benchmark-10k-rows-short-sentences">Smaller-corpus benchmark (10K rows, short sentences)</a></h2>
+<p>The original 10K-row fixture (<code>bench/bench.sql</code>) shows pg_tre
+competitive on selective exact-match:</p>
+<div class="table-wrapper"><table><thead><tr><th>path</th><th>median</th></tr></thead><tbody>
+<tr><td>pg_tre index, exact 1-row match</td><td><strong>0.22 ms</strong></td></tr>
+<tr><td>pg_trgm GIN, same</td><td>0.48 ms</td></tr>
+<tr><td>seq scan</td><td>1.8 ms</td></tr>
+</tbody></table>
+</div>
+<p>pg_tre wins ~2× on this pattern. The trade-off is build time and
+size: 711 ms vs 206 ms; 36 MB vs 2.9 MB.</p>
+<p>For approximate queries (no pg_trgm comparison possible):</p>
+<div class="table-wrapper"><table><thead><tr><th>path</th><th>median</th></tr></thead><tbody>
+<tr><td>pg_tre index, k=1 selective</td><td>36 ms</td></tr>
+<tr><td>seq scan + <code>tre_amatch(..., k=1)</code></td><td>44 ms</td></tr>
+</tbody></table>
+</div>
+<p>20% faster than seq scan at k=1 because the Navarro (k+1)-tiling
+produces many OR alternatives that each individually match many
+rows; the AND of tiles narrows the candidate set but doesn't
+match the selectivity of a true btree-style equality probe.</p>
+<h2 id="take-aways"><a class="header" href="#take-aways">Take-aways</a></h2>
+<ul>
+<li><strong>Exact regex on small to medium corpora</strong>: pg_tre beats
+pg_trgm at query time. Worthwhile for read-heavy workloads.</li>
+<li><strong>Approximate regex (any k &gt; 0)</strong>: pg_tre is the only index-
+driven option in PostgreSQL. Whether pg_tre's index path
+beats seq scan depends on selectivity — selective patterns
+win, broad ones don't.</li>
+<li><strong>Million-row corpora</strong>: pg_tre's structural overhead per
+distinct trigram dominates today. v2.0's posting-page
+coalescing is the planned fix. Until then, pg_tre is best
+suited for narrow columns (short text) or smaller corpora,
+or as a complement to pg_trgm (one column, two indexes —
+the planner picks the cheaper for each query shape).</li>
+</ul>
+<h2 id="real-bugs-surfaced-by-this-benchmark"><a class="header" href="#real-bugs-surfaced-by-this-benchmark">Real bugs surfaced by this benchmark</a></h2>
+<p>The 1M-row benchmark caught two production-blocking bugs in
+1.4.0 that were silently broken before:</p>
+<ol>
+<li><strong><code>palloc</code> 1 GB cap</strong> in <code>ambuild.c</code>: ~50M trigram entries at
+24 bytes each is 1.2 GB — exceeds PG's <code>MaxAllocSize</code>. Fix
+in 1.4.1: switch the entries-array allocation to
+<code>MemoryContextAllocHuge</code> / <code>repalloc_huge</code>.</li>
+<li><strong>Single-level upper-tree internals</strong> in <code>upper.c</code>: the
+<code>upper_build_internal_level</code> was hardcoded to one page,
+capping pg_tre at ~10–20K distinct trigrams (which is just
+~50K rows of dictionary text). Fix in 1.4.1: recursive
+multi-level construction in the writer; multi-level
+descent loop in <code>pg_tre_upper_lookup</code>.</li>
+</ol>
+<p>Both fixes also surfaced a third (latent) bug: the old
+single-level descent's edge case where <code>trigram_hash &lt; first_key[0]</code> returned no match was producing wrong results on
+some queries even at small scales. The 1.4.1 multi-level
+descent loop fixes that incidentally — <code>test/expected/utf8.out</code>
+and <code>test/expected/order_by.out</code> were refreshed to reflect the
+now-correct behavior (rows that the index used to drop are now
+returned).</p>
+<h2 id="reproducing"><a class="header" href="#reproducing">Reproducing</a></h2>
+<pre><code class="language-bash"># Generate the corpus (3.9 s for 1M rows)
+python3 bench/gen_corpus.py 1000000 /tmp/corpus_1m.csv
+
+# Load + build + run query panel
+createdb bench_1m
+psql -d bench_1m -f bench/bench_1m_v2.sql
+</code></pre>
+<p><code>bench/gen_corpus.py</code> ships in the repo. The plpgsql sampler in
+the original <code>bench/bench_1m.sql</code> is O(N²) and was unusable
+beyond ~10K rows; <code>bench_1m_v2.sql</code> uses Python-generated CSV
+input via <code>\copy</code> instead.</p>
+<h2 id="known-caveats"><a class="header" href="#known-caveats">Known caveats</a></h2>
+<ul>
+<li>Measurements above are from a warm cache, single-threaded
+client, single-CPU build. NUMA / parallel scan / parallel
+build are not yet implemented in pg_tre.</li>
+<li>The 1M corpus is synthetic dictionary words; real-world
+natural text has different trigram distributions and the
+numbers will shift accordingly. Re-run on your corpus.</li>
+<li><code>\timing on</code> numbers in psql include client-side round-trip;
+the underlying executor times are 1–3 ms lower per query for
+the small ones.</li>
+</ul>
+<p><em>Last updated: 1.4.1 (1M-row benchmark).</em></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="posting-page-coalescing--v20-design-spec"><a class="header" href="#posting-page-coalescing--v20-design-spec">Posting-page coalescing — v2.0 design spec</a></h1>
+<p><strong>Status:</strong> draft, targeting pg_tre 2.0 (on-disk format bump).</p>
+<p><strong>Owner:</strong> unassigned.</p>
+<h2 id="problem"><a class="header" href="#problem">Problem</a></h2>
+<p>The dominant size cost of a pg_tre index today is structural:
+<strong>one 8 KB posting-tree page per distinct trigram</strong>, even for
+trigrams that map to a single TID.  Measured on a 10K-row corpus
+of short text:</p>
+<ul>
+<li>pg_tre  37 MB / 4708 pages  (~4696 unique trigrams ≈ 1 page each)</li>
+<li>pg_trgm  2.6 MB / 330 pages</li>
+</ul>
+<p>The 14× gap is almost entirely "page count", not bloom-filter
+overhead.  Toggling <code>pg_tre.tuple_bloom_enable</code> between true and
+false changes the size by less than 1%.</p>
+<p>The 1.2.1 inline-threshold tuning (256 → 384 bytes) helps the
+smallest trigrams stay in the upper tree, but a trigram with
+~50 TIDs still gets its own posting page even though the actual
+serialized sparsemap is ~400 bytes — the page is 95% empty space.</p>
+<h2 id="proposal"><a class="header" href="#proposal">Proposal</a></h2>
+<p>Add a new on-disk page kind, <code>PG_TRE_PAGE_POSTING_COALESCED</code>,
+that stores the postings for <strong>multiple trigrams</strong> packed
+contiguously on a single page, with an indirection table at the
+top of the page mapping <code>(trigram_hash → offset, length)</code>.</p>
+<p>The upper-tree leaf entry for a coalesced trigram becomes:</p>
+<pre><code>{
+    block_number    page;          // physical page
+    uint16          slot_idx;      // index into the page's
+                                   // indirection table
+}
+</code></pre>
+<p>instead of a single block_number for a one-trigram-per-page
+posting.</p>
+<h3 id="decision-when-to-coalesce"><a class="header" href="#decision-when-to-coalesce">Decision: when to coalesce</a></h3>
+<p>Build path computes the serialized sparsemap size for each
+trigram.  Bucket by size:</p>
+<div class="table-wrapper"><table><thead><tr><th>Size bucket</th><th>Storage</th></tr></thead><tbody>
+<tr><td>&lt; 384 bytes</td><td>inline in upper-tree leaf (already implemented)</td></tr>
+<tr><td>384 – 4096 bytes</td><td><strong>coalesced page</strong> — pack 4-20 trigrams per 8 KB page</td></tr>
+<tr><td>&gt; 4096 bytes</td><td>dedicated posting tree (existing path)</td></tr>
+</tbody></table>
+</div>
+<p>Coalesced pages are 95% utilized at build time.  Bin-packing
+algorithm: greedy first-fit on a sorted-by-size list of
+trigrams.  Quantize sizes to 64-byte boundaries to cap the
+indirection-table search space.</p>
+<p>Sustained-write workload: trigrams in the pending list flush via
+the existing posting-tree code path.  Coalesced pages are <strong>build-
+only</strong>; ongoing writes to a coalesced trigram migrate it out to
+its own posting tree (the page-kind distinction lives in the
+upper tree, so the trigram's storage type can change between
+builds).</p>
+<h3 id="page-layout"><a class="header" href="#page-layout">Page layout</a></h3>
+<pre><code>┌─────────────────────────────────────────────────────────────┐
+│ PageHeaderData (24 bytes)                                   │
+├─────────────────────────────────────────────────────────────┤
+│ PageTreOpaque trailer:                                      │
+│     format_version, kind = PG_TRE_PAGE_POSTING_COALESCED    │
+│ (after PG's special-area pointer)                           │
+├─────────────────────────────────────────────────────────────┤
+│ Page-local header:                                          │
+│     uint16 n_slots                                          │
+│     uint16 free_offset                                      │
+│     uint8  pad[12]                                          │
+├─────────────────────────────────────────────────────────────┤
+│ Indirection table (n_slots entries, 16 bytes each):        │
+│     uint64 trigram_hash                                     │
+│     uint16 sm_offset                                        │
+│     uint16 sm_length                                        │
+│     uint16 payload_offset    (0 if no payload)              │
+│     uint16 payload_length                                   │
+├─────────────────────────────────────────────────────────────┤
+│ Sparsemap blobs (variable, 384–4096 bytes each)             │
+│ Payload blobs (per-tuple blooms, positions)                 │
+│ ...                                                         │
+└─────────────────────────────────────────────────────────────┘
+</code></pre>
+<h3 id="read-path"><a class="header" href="#read-path">Read path</a></h3>
+<p><code>pg_tre_posting_materialize</code> switches on the upper-tree leaf
+entry kind:</p>
+<ul>
+<li>inline: sparsemap follows the leaf entry (existing path).</li>
+<li>dedicated posting tree (<code>PG_TRE_PAGE_POSTING_L</code>): walk
+right-link chain (existing path).</li>
+<li><strong>coalesced (new)</strong>: read the page, look up <code>trigram_hash</code> in
+the indirection table via a 16-byte-stride linear scan
+(cache-friendly), copy the sparsemap blob into a fresh
+sm_open_copy buffer.</li>
+</ul>
+<h3 id="vacuum"><a class="header" href="#vacuum">Vacuum</a></h3>
+<p><code>pg_tre_amvacuumcleanup</code> already rebuilds posting trees that lose
+their last TID.  For coalesced pages: when a trigram's TIDs all
+become dead, mark the slot <code>INVALID</code> (offset = UINT16_MAX) but
+don't reclaim space until the page falls below 50% utilization,
+at which point we rewrite the page (compacting and removing
+INVALID slots).</p>
+<h2 id="on-disk-format-version"><a class="header" href="#on-disk-format-version">On-disk format version</a></h2>
+<p>Bump <code>PG_TRE_FORMAT_VERSION</code> from 3 to 4.  Existing 1.x indexes
+are unreadable by 2.0 and require REINDEX.  Document in
+RELEASING.md's compatibility matrix.  Add 1.0.0–1.2.x to the
+upgrade-tests <code>exclude:</code> list.</p>
+<h2 id="expected-impact"><a class="header" href="#expected-impact">Expected impact</a></h2>
+<p>For the 10K-row fixture above, with average trigram size ≈ 50
+bytes and ≈ 12 trigrams per coalesced page:</p>
+<ul>
+<li>4696 trigrams ÷ 12/page = <strong>390 coalesced pages</strong> (vs 4696
+posting pages today)</li>
+<li>Plus ~50 dedicated-posting-tree pages for the long tail of
+high-cardinality trigrams.</li>
+<li>Total: ~440 pages vs 4708 today, <strong>~10× page-count reduction</strong>.</li>
+</ul>
+<p>Index size drops from 37 MB to ~3.5 MB — putting pg_tre roughly
+at parity with pg_trgm for sparse-trigram corpora.</p>
+<h2 id="risks"><a class="header" href="#risks">Risks</a></h2>
+<ul>
+<li><strong>WAL volume</strong>: coalesced-page mutations carry full-page
+images today (we set REGBUF_FORCE_IMAGE everywhere — see
+CHANGELOG 1.2.1 fixed list).  Multi-trigram pages mean each
+WAL record covers more state per byte, which is good, but
+delta-aware redo (a separate v1.3 followup) is what makes
+this efficient.  Without delta redo, every coalesced-page
+mutation ships an 8 KB FPI.</li>
+<li><strong>Hot trigrams + coalescing</strong>: a trigram that grows past the
+page budget needs to migrate out to its own posting tree.
+The migration is a transactional no-op for queries (upper-tree
+pointer atomically swaps from coalesced-slot to posting-tree-
+root) but adds bookkeeping complexity to amvacuumcleanup and
+aminsert.</li>
+</ul>
+<h2 id="implementation-phases"><a class="header" href="#implementation-phases">Implementation phases</a></h2>
+<ol>
+<li><strong>Phase 1 — page layout and read path.</strong>  Add the new page
+kind, indirection-table accessors, materialize() switch.
+Build path emits coalesced pages but reads still work.
+Tests: pageinspect-style verification + existing regression
+suite (no behavior change).</li>
+<li><strong>Phase 2 — bin packing in build.</strong>  Sort trigrams by size
+at build time, first-fit-decreasing into 8 KB pages.
+Measure size impact on the standard fixture.</li>
+<li><strong>Phase 3 — write path migration.</strong>  Hot-trigram migration
+from coalesced → dedicated posting tree on growth past the
+page budget.  Tested via stress.sh with high write churn.</li>
+<li><strong>Phase 4 — vacuum and reclaim.</strong>  INVALID slot tombstones,
+page-rewrite when utilization drops below 50%.</li>
+</ol>
+<p>Each phase ends in a runnable, regression-clean state with a
+metric to compare against pg_trgm.</p>
+<h2 id="out-of-scope"><a class="header" href="#out-of-scope">Out of scope</a></h2>
+<ul>
+<li>Inter-page compression (zstd / LZ4 across multiple coalesced
+pages).  Possible v3.0; deferred to keep page-level reads
+random-access friendly.</li>
+<li>BRIN-style summary blooms over coalesced pages (every page
+gets a "what trigrams live here" bloom for early skip).
+Possible v3.0.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="variable-width-per-tuple-blooms--v13-design-spec"><a class="header" href="#variable-width-per-tuple-blooms--v13-design-spec">Variable-width per-tuple blooms — v1.3 design spec</a></h1>
+<p><strong>Status:</strong> draft, targeting pg_tre 1.3.</p>
+<p><strong>Owner:</strong> unassigned.</p>
+<p><strong>Prerequisite:</strong> <del>multi-leaf chain-rank repair</del> — fully
+resolved in 1.2.3.  The struct-vs-bytes bloom-header fix
+(1.2.2) plus the pending-overlay positional-filter fix
+(1.2.3) close out the long-running tier-3 bypass.  Tier-3
+is on by default and works correctly across single-leaf,
+multi-leaf, and pending-overlay code paths.  Variable-width
+blooms are now an incremental size optimization on top of
+working tier-3.</p>
+<h2 id="problem-1"><a class="header" href="#problem-1">Problem</a></h2>
+<p>The tier-3 per-tuple bloom is a fixed <code>pg_tre.bloom_tuple_bits = 128</code> bits per heap row, sized to roughly hold one row's distinct
+trigrams at a tolerable false-positive rate.  Two issues:</p>
+<ol>
+<li><strong>Wasteful for short rows.</strong>  A row with 5 distinct trigrams
+needs &lt;8 bits to keep FP rate below 1%; we burn 128.</li>
+<li><strong>Saturated for long rows.</strong>  A row with 200 distinct trigrams
+in a 128-bit bloom has FP rate ≈ 1.0 — the bloom is useless,
+and tier-3 still has to read and check it.</li>
+</ol>
+<p>Both extremes pay full cost in storage and in the per-row
+recheck phase.</p>
+<h2 id="proposal-1"><a class="header" href="#proposal-1">Proposal</a></h2>
+<p>Encode the bloom width per row, sized from the row's distinct
+trigram count at index-build time.  Three categories:</p>
+<div class="table-wrapper"><table><thead><tr><th>Row trigram count <code>k</code></th><th>Storage</th><th>FP rate target</th></tr></thead><tbody>
+<tr><td><code>k = 0</code></td><td>flag bit only, no bloom</td><td>n/a</td></tr>
+<tr><td><code>1 ≤ k ≤ 32</code></td><td>16-bit bloom + 4-bit hash count</td><td>&lt;0.1%</td></tr>
+<tr><td><code>33 ≤ k ≤ 256</code></td><td>64-bit bloom + 5-bit hash count</td><td>&lt;1%</td></tr>
+<tr><td><code>k &gt; 256</code></td><td>flag bit "always passes" + no bloom</td><td>accept the recheck cost</td></tr>
+</tbody></table>
+</div>
+<p>Width is decided once at build time per row.  Stored in the
+posting-leaf payload as:</p>
+<pre><code>struct PerRowBloom {
+    uint8 width_class;   // 0=empty, 1=16, 2=64, 3=always-pass
+    uint8 nhashes;       // hash function count
+    union {
+        uint16 b16;
+        uint64 b64;
+        // width_class=0 or 3 carries no payload
+    } bits;
+}
+</code></pre>
+<p>Average payload:</p>
+<div class="table-wrapper"><table><thead><tr><th>Width class</th><th>Bytes per row</th></tr></thead><tbody>
+<tr><td>0</td><td>1</td></tr>
+<tr><td>1</td><td>4 (1 + 1 + 2 padded to 4)</td></tr>
+<tr><td>2</td><td>16 (1 + 1 + 8 padded to 16)</td></tr>
+<tr><td>3</td><td>1</td></tr>
+</tbody></table>
+</div>
+<p>For a corpus where most rows have &lt;32 distinct trigrams (typical
+for code identifiers, log lines, SKUs), payload averages ≈4-6
+bytes per row vs 16 today.  <strong>70-80% payload reduction.</strong></p>
+<p>For a corpus of long prose (paragraphs, articles), most rows
+land in width_class 2 or 3 — comparable to today's flat 128-bit,
+or smaller.</p>
+<h2 id="read-path-1"><a class="header" href="#read-path-1">Read path</a></h2>
+<p><code>pg_tre_posting_lookup_tuple_bloom</code> reads <code>width_class</code> first,
+then dispatches:</p>
+<ul>
+<li>0: row matches every query trigram trivially (unlikely; only
+empty rows).</li>
+<li>1, 2: dispatch to width-specific bloom check using the right
+<code>nhashes</code> value.</li>
+<li>3: skip the bloom check, return "candidate, must recheck".</li>
+</ul>
+<h2 id="why-this-depends-on-chain-rank-repair"><a class="header" href="#why-this-depends-on-chain-rank-repair">Why this depends on chain-rank repair</a></h2>
+<p>The current chain-rank lookup (in
+<code>pg_tre_posting_lookup_tuple_bloom</code>) is broken for multi-leaf
+posting trees: the per-row payload offset is computed from a
+per-leaf rank that doesn't accumulate across right-link chains.
+Today this is bypassed entirely via
+<code>pg_tre.tuple_bloom_enable=false</code>.</p>
+<p>Fixing chain-rank means:</p>
+<ol>
+<li>The chain walker maintains a running TID-count as it
+traverses leaves.</li>
+<li><code>sm_rank</code> on a per-leaf basis returns the local rank; the
+walker adds it to the running count.</li>
+<li>The payload offset table (currently per-leaf) becomes a
+per-leaf-with-base offset, indexed by the global rank.</li>
+</ol>
+<p>Once chain-rank works, switching tier-3 default back to <code>true</code>
+becomes safe.  At that point variable-width blooms become a
+size optimization on top of a working tier-3.</p>
+<h2 id="on-disk-format-compatibility"><a class="header" href="#on-disk-format-compatibility">On-disk format compatibility</a></h2>
+<p>Adding a <code>width_class</code> byte changes the per-row payload layout.
+Two options:</p>
+<p><strong>Option A (simpler):</strong>  Bump <code>PG_TRE_FORMAT_VERSION</code> to 4.
+Existing 1.x indexes need REINDEX.  Easy to test, simple
+upgrade-tests matrix update.</p>
+<p><strong>Option B (compatible):</strong>  Encode width_class in the existing
+payload region by reserving a sentinel value.  Existing
+fixed-128-bit blooms continue to read with the old code path;
+new builds emit variable-width.  No format bump.</p>
+<p>Option B requires careful sentinel-value choice and audit; Option
+A is cleaner.  Since posting-page coalescing (v2.0) is also a
+format bump, this work might bundle with that and ship in v2.0
+instead of v1.3.  Decision deferred until chain-rank repair lands
+and we measure the actual size improvement on a real corpus.</p>
+<h2 id="implementation-phases-1"><a class="header" href="#implementation-phases-1">Implementation phases</a></h2>
+<ol>
+<li><strong>Phase 1 — chain-rank repair.</strong>  <code>pg_tre.tuple_bloom_enable</code>
+becomes safe to set true; default still false.  Regression
+tests for the multi-leaf 'the' case (currently masked).</li>
+<li><strong>Phase 2 — width_class encode/decode.</strong>  Build path picks
+width based on row's distinct trigram count.  Read path
+dispatches.  No size change yet (still emits 16-byte
+payload, just with a width tag).</li>
+<li><strong>Phase 3 — variable storage.</strong>  Width-1/2 actually emit 4 /
+16-byte payloads.  Format-version bump or sentinel
+compatibility shim per the decision above.</li>
+<li><strong>Phase 4 — re-default tier-3 to true.</strong>  Once chain-rank
+and variable-width are correct and measured, flip
+<code>pg_tre.tuple_bloom_enable</code> default back to true.</li>
+</ol>
+<h2 id="risks-1"><a class="header" href="#risks-1">Risks</a></h2>
+<ul>
+<li><strong>The chain-rank repair is non-trivial.</strong>  Touches the scan
+path's hottest loop (per-row tier-3 lookup).  Needs a
+benchmark before/after; risk of slowdown on the unaffected
+single-leaf case if the chain accumulator adds branches.</li>
+<li><strong>Build CPU cost.</strong>  Counting distinct trigrams per row is
+free at build time (we already accumulate them); width
+selection is one comparison.  Negligible.</li>
+<li><strong>Adversarial inputs.</strong>  A row with crafted trigram count
+exactly at the width-class boundary (32, 256) could cause
+thrashing on rebuild after VACUUM removes tids; pin the
+width on the highest historical count to avoid oscillation.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pg_tre-testing-guide"><a class="header" href="#pg_tre-testing-guide">pg_tre Testing Guide</a></h1>
+<p>This document describes how to run the pg_tre test suite,
+which consists of SQL regression tests, TAP tests (Test
+Anything Protocol), and shell-based tests for replication
+and stress.</p>
+<h2 id="overview-1"><a class="header" href="#overview-1">Overview</a></h2>
+<p>pg_tre has three test suites:</p>
+<ol>
+<li><strong>SQL Regression Tests</strong> (<code>test/sql/*.sql</code>) — Functional
+correctness tests that run SQL queries and compare
+output against expected results.  Driven by
+<code>scripts/run-regress.sh</code> or <code>make localcheck</code>.</li>
+<li><strong>TAP Tests</strong> (<code>tap/*.pl</code>) — Integration tests for
+durability, concurrency, and replication using
+<code>PostgreSQL::Test::Cluster</code>.  Driven by <code>make tap</code>.</li>
+<li><strong>Shell Tests</strong> (<code>test/scripts/*.sh</code>) — Multi-cluster
+tests modeled on <code>pg_textsearch</code>'s shell-test pattern,
+sharing infrastructure via <code>test/scripts/lib.sh</code>.
+Currently:
+<ul>
+<li><code>wal_audit.sh</code> — verifies WAL records are well-formed
+and that crash recovery preserves the index.</li>
+<li><code>replication.sh</code> — primary + streaming standby
+differential check across catchup, restart, and
+incremental writes.</li>
+<li><code>stress.sh</code> — N-iteration mixed-workload run with
+RSS ceiling, postmaster-alive check, and
+differential idx-vs-seq check at the end of every
+iteration.</li>
+</ul>
+</li>
+</ol>
+<h2 id="prerequisites-1"><a class="header" href="#prerequisites-1">Prerequisites</a></h2>
+<h3 id="for-regression-tests"><a class="header" href="#for-regression-tests">For Regression Tests</a></h3>
+<ul>
+<li>PostgreSQL 18+ built and installed (via PG_CONFIG)</li>
+<li>pg_tre extension compiled and installed</li>
+<li>Running PostgreSQL instance with <code>shared_preload_libraries = 'pg_tre'</code></li>
+</ul>
+<h3 id="for-tap-tests"><a class="header" href="#for-tap-tests">For TAP Tests</a></h3>
+<ul>
+<li>All regression test prerequisites</li>
+<li>Perl 5.x with Test::More and Test::Harness</li>
+<li>PostgreSQL::Test::Cluster module (the <code>make tap</code> target
+picks up the right path via <code>PG_TAP_PERL5LIB</code>).</li>
+<li><code>prove</code> command-line test runner</li>
+</ul>
+<h3 id="for-shell-tests"><a class="header" href="#for-shell-tests">For Shell Tests</a></h3>
+<ul>
+<li>All regression test prerequisites</li>
+<li><code>pg_basebackup</code>, <code>pg_walinspect</code> (for <code>replication.sh</code>
+and <code>wal_audit.sh</code>)</li>
+<li>The shell tests <code>initdb</code> their own clusters on private
+ports under <code>$TMPDIR</code> (or <code>/tmp</code>); they do not require
+a running PG instance.</li>
+</ul>
+<h2 id="running-regression-tests"><a class="header" href="#running-regression-tests">Running Regression Tests</a></h2>
+<h3 id="method-1-using-the-convenience-script"><a class="header" href="#method-1-using-the-convenience-script">Method 1: Using the Convenience Script</a></h3>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config scripts/run-regress.sh
+</code></pre>
+<p>This script:</p>
+<ul>
+<li>Creates a temporary database <code>contrib_regression</code></li>
+<li>Runs each test SQL file through psql</li>
+<li>Compares output against expected results</li>
+<li>Reports ok/FAIL for each test</li>
+</ul>
+<h3 id="method-2-using-the-makefile"><a class="header" href="#method-2-using-the-makefile">Method 2: Using the Makefile</a></h3>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config make localcheck
+</code></pre>
+<p>This invokes <code>scripts/run-regress.sh</code> via the Makefile.</p>
+<h3 id="current-regression-tests"><a class="header" href="#current-regression-tests">Current Regression Tests</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Test</th><th>Coverage</th></tr></thead><tbody>
+<tr><td><code>pg_tre.sql</code></td><td>Extension creation, legacy UDFs, basic index creation</td></tr>
+<tr><td><code>parser.sql</code></td><td>Regex parser, AST construction, tokenization</td></tr>
+<tr><td><code>scan_exact.sql</code></td><td>k=0 exact regex scanning, differential tests</td></tr>
+<tr><td><code>incremental.sql</code></td><td>INSERT, pending list, VACUUM, overlay scans</td></tr>
+<tr><td><code>p5_read.sql</code></td><td>k&gt;0 approximate matching, tiling, tier-3 bloom</td></tr>
+<tr><td><code>planner.sql</code></td><td>Cost estimation, selectivity, plan choice</td></tr>
+<tr><td><code>planner_auto.sql</code></td><td>Planner auto-tuning, metapage cardinalities</td></tr>
+<tr><td><code>p6_safety.sql</code></td><td>DoS limits, pattern validation, error handling</td></tr>
+<tr><td><code>utf8.sql</code></td><td>UTF-8 text handling, multibyte characters</td></tr>
+<tr><td><code>tier3.sql</code></td><td>Per-tuple bloom filter validation</td></tr>
+<tr><td><code>dnf_resolution.sql</code></td><td>DNF (tiled alternatives) AND/OR correctness</td></tr>
+</tbody></table>
+</div>
+<p>Expected result: all tests report <code>ok</code>.</p>
+<h2 id="running-tap-tests"><a class="header" href="#running-tap-tests">Running TAP Tests</a></h2>
+<h3 id="v100-final-blocker-tests-tap"><a class="header" href="#v100-final-blocker-tests-tap">v1.0.0-final Blocker Tests (tap/)</a></h3>
+<p>These are the production-ready tests that close the v1.0.0-final blockers:</p>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config make tap
+</code></pre>
+<p>This runs:</p>
+<ol>
+<li>
+<p><strong>tap/concurrency.pl</strong> — Concurrent writers + readers + vacuumer</p>
+<ul>
+<li>8 writer processes inserting random rows for 30 seconds</li>
+<li>4 reader processes comparing index vs seq-scan continuously</li>
+<li>1 vacuumer process running VACUUM every 5 seconds</li>
+<li>Final differential check: 10 patterns, index == seq-scan</li>
+<li><strong>Closes blocker</strong>: Concurrency TAP test</li>
+</ul>
+</li>
+<li>
+<p><strong>tap/replication.pl</strong> — Streaming replication and replica promotion</p>
+<ul>
+<li>Creates primary + streaming replica</li>
+<li>Applies 100K random insert/update/delete operations</li>
+<li>Waits for replica catchup</li>
+<li>Verifies bit-exact result equality for 10 patterns</li>
+<li>Promotes replica and re-verifies</li>
+<li><strong>Closes blocker</strong>: Streaming replication TAP test</li>
+</ul>
+</li>
+<li>
+<p><strong>tap/crash_recovery.pl</strong> — WAL replay correctness under kill -9</p>
+<ul>
+<li>Starts continuous background writer</li>
+<li>After 10 seconds, kills postmaster with -9</li>
+<li>Restarts and verifies WAL replay via differential check</li>
+<li>Repeats cycle 3 times to catch compounding corruption</li>
+<li><strong>Closes blocker</strong>: Crash-recovery-under-load TAP test</li>
+</ul>
+</li>
+</ol>
+<h3 id="expected-runtime"><a class="header" href="#expected-runtime">Expected Runtime</a></h3>
+<p>All three TAP tests complete in <strong>&lt; 5 minutes</strong> total on a developer laptop:</p>
+<ul>
+<li><code>concurrency.pl</code>: ~35 seconds (30s load + 5s checks)</li>
+<li><code>replication.pl</code>: ~90 seconds (100K ops in batches + catchup)</li>
+<li><code>crash_recovery.pl</code>: ~45 seconds (3 cycles × 10s load + 5s recovery)</li>
+</ul>
+<h3 id="phase-7-tests-testt"><a class="header" href="#phase-7-tests-testt">Phase 7 Tests (test/t/)</a></h3>
+<p>The <code>test/t/</code> directory contains the earlier Phase 7 tests that are currently blocked by bugs:</p>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config make tapcheck
+</code></pre>
+<p>These tests (<code>001_crash_recovery.pl</code>, <code>002_replica.pl</code>, etc.) were written during Phase 7 but cannot run yet due to pre-existing issues in ambuild and function exports. They are retained for historical context and will be re-enabled once those bugs are fixed.</p>
+<p><strong>Do not use <code>make tapcheck</code> for v1.0.0 validation.</strong> Use <code>make tap</code> instead.</p>
+<h2 id="full-test-suite"><a class="header" href="#full-test-suite">Full Test Suite</a></h2>
+<p>To run everything (regression + TAP):</p>
+<pre><code class="language-bash">PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config scripts/release-check.sh
+</code></pre>
+<p>This script runs:</p>
+<ol>
+<li>Clean build with warning check</li>
+<li>Installation</li>
+<li>All regression tests</li>
+<li>All TAP tests (tap/)</li>
+<li>Quick benchmark smoke test</li>
+<li>Git artifact check</li>
+</ol>
+<p>Expected result: <code>All checks passed. Ready to tag.</code></p>
+<h2 id="troubleshooting-2"><a class="header" href="#troubleshooting-2">Troubleshooting</a></h2>
+<h3 id="prove-not-found"><a class="header" href="#prove-not-found">"prove not found"</a></h3>
+<p>Install Test::Harness:</p>
+<pre><code class="language-bash">cpan Test::Harness
+# or on Debian/Ubuntu:
+sudo apt-get install libtest-harness-perl
+</code></pre>
+<h3 id="cant-locate-postgresqltestclusterpm"><a class="header" href="#cant-locate-postgresqltestclusterpm">"Can't locate PostgreSQL/Test/Cluster.pm"</a></h3>
+<p>The PostgreSQL TAP modules are usually installed with PostgreSQL. Check:</p>
+<pre><code class="language-bash">find $(pg_config --libdir) -name Cluster.pm
+</code></pre>
+<p>If missing, you may need to install PostgreSQL development packages or rebuild PostgreSQL with <code>--enable-tap-tests</code>.</p>
+<h3 id="tap-test-hangs"><a class="header" href="#tap-test-hangs">TAP test hangs</a></h3>
+<p>TAP tests create temporary PostgreSQL instances. If a test hangs:</p>
+<ol>
+<li>Check available ports (tests auto-assign ports)</li>
+<li>Check disk space (each test creates a temp data directory)</li>
+<li>Check for orphaned postgres processes (<code>ps aux | grep postgres</code>)</li>
+</ol>
+<h3 id="tap-test-fails-with-could-not-connect"><a class="header" href="#tap-test-fails-with-could-not-connect">TAP test fails with "could not connect"</a></h3>
+<p>Ensure your firewall allows local connections and that PostgreSQL can bind to loopback interfaces.</p>
+<h3 id="index-scan--seq-scan"><a class="header" href="#index-scan--seq-scan">"Index scan != seq scan"</a></h3>
+<p>This indicates a correctness bug in the index. The test output will show which pattern failed and the mismatched row counts. File an issue with:</p>
+<ul>
+<li>The failing pattern</li>
+<li>The full test log</li>
+<li>Output of <code>git log --oneline -10</code></li>
+</ul>
+<h2 id="test-development"><a class="header" href="#test-development">Test Development</a></h2>
+<h3 id="adding-a-regression-test"><a class="header" href="#adding-a-regression-test">Adding a Regression Test</a></h3>
+<ol>
+<li>Create <code>test/sql/my_test.sql</code></li>
+<li>Run it to generate <code>test/expected/my_test.out</code></li>
+<li>Add <code>my_test</code> to <code>REGRESS</code> in the Makefile</li>
+<li>Run <code>make localcheck</code> to verify</li>
+</ol>
+<h3 id="adding-a-tap-test"><a class="header" href="#adding-a-tap-test">Adding a TAP Test</a></h3>
+<ol>
+<li>Create <code>tap/my_test.pl</code> following the structure of existing tests</li>
+<li>Use <code>PostgreSQL::Test::Cluster-&gt;new('my_test')</code> for isolation</li>
+<li>Add <code>use Test::More; done_testing();</code> for proper TAP output</li>
+<li>Verify with <code>prove -v tap/my_test.pl</code></li>
+</ol>
+<h2 id="continuous-integration"><a class="header" href="#continuous-integration">Continuous Integration</a></h2>
+<p>The GitHub Actions CI matrix (<code>.github/workflows/ci.yml</code>) runs all tests on every push:</p>
+<ul>
+<li>Ubuntu 22.04 with PostgreSQL 18 from apt</li>
+<li>Regression tests via <code>make installcheck</code></li>
+<li>TAP tests via <code>make tap</code></li>
+</ul>
+<h2 id="performance-notes-1"><a class="header" href="#performance-notes-1">Performance Notes</a></h2>
+<ul>
+<li>Regression tests run in <strong>&lt; 10 seconds</strong> (single psql session, small fixtures)</li>
+<li>TAP tests run in <strong>&lt; 5 minutes</strong> (parallel test instances, larger workloads)</li>
+<li>Use <code>make localcheck</code> for quick iteration during development</li>
+<li>Use <code>scripts/release-check.sh</code> for full gate before commits</li>
+</ul>
+<h2 id="test-coverage-summary"><a class="header" href="#test-coverage-summary">Test Coverage Summary</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Area</th><th>Regression</th><th>TAP</th><th>Total</th></tr></thead><tbody>
+<tr><td>Index creation</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Exact regex (k=0)</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Approximate (k&gt;0)</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Incremental writes</td><td>✓</td><td>✓</td><td>2</td></tr>
+<tr><td>VACUUM</td><td>✓</td><td>✓</td><td>2</td></tr>
+<tr><td>Planner integration</td><td>✓</td><td></td><td>2</td></tr>
+<tr><td>Concurrency</td><td></td><td>✓</td><td>1</td></tr>
+<tr><td>Streaming replication</td><td></td><td>✓</td><td>1</td></tr>
+<tr><td>Crash recovery</td><td></td><td>✓</td><td>1</td></tr>
+<tr><td>UTF-8</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>Bloom filters</td><td>✓</td><td></td><td>1</td></tr>
+<tr><td>DNF correctness</td><td>✓</td><td></td><td>1</td></tr>
+</tbody></table>
+</div>
+<p>Total: <strong>10 regression tests</strong>, <strong>3 TAP tests</strong> (v1.0.0-final blockers), <strong>5 Phase 7 TAP tests</strong> (blocked).</p>
+<hr />
+<p>Last updated: 2025-05-13
+Status: v1.0.0-final blocker tests COMPLETE</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="release-checklist"><a class="header" href="#release-checklist">Release Checklist</a></h1>
+<p>This file is retained for historical context only.  It documented
+the gate between 1.0.0-rc1 and 1.0.0 final and is no longer the
+canonical release procedure.</p>
+<p>For the current release process, see <a href="../RELEASING.html"><code>../RELEASING.md</code></a>:</p>
+<ul>
+<li>Semver scheme and dev / release version conventions.</li>
+<li>Pre-release upgrade-SQL audit checklist.</li>
+<li>Version compatibility matrix and on-disk format constant
+registry.</li>
+<li>Step-by-step procedure: bump-version, audit, upgrade-tests
+matrix update, release-check, PR, tag, push.</li>
+<li>Automated workflows table.</li>
+</ul>
+<p>The 1.0.0 historical content is preserved in
+<code>git show v1.0.0:doc/release-checklist.md</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pg_tre-100-release-announcement"><a class="header" href="#pg_tre-100-release-announcement">pg_tre 1.0.0 Release Announcement</a></h1>
+<p><strong>pg_tre 1.0.0</strong> is a native PostgreSQL 18+ index access method for fast approximate regex matching over text columns.</p>
+<h2 id="what-is-pg_tre"><a class="header" href="#what-is-pg_tre">What is pg_tre?</a></h2>
+<p>pg_tre enables efficient fuzzy regex queries using a three-tier filter funnel (range bloom → trigram postings → per-tuple bloom) backed by the TRE library for recheck. Instead of scanning every row to test a regex pattern, pg_tre uses trigram extraction and edit-distance expansion to produce a small candidate set, then runs the full regex engine only on those candidates.</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-sql">CREATE INDEX docs_body_idx ON documents USING tre (body);
+
+-- Find "environment" ± 2 edits (matches "environment", "enviroment", "envirnoment", etc.)
+SELECT * FROM documents 
+WHERE body %~~ tre_pattern('environment', 2);
+</code></pre>
+<h2 id="key-features"><a class="header" href="#key-features">Key Features</a></h2>
+<ul>
+<li><strong>Approximate regex matching:</strong> Built-in support for edit-distance k (insertions, deletions, substitutions)</li>
+<li><strong>Three-tier filtering:</strong> Range blooms, trigram postings, per-tuple blooms minimize heap access</li>
+<li><strong>Native access method:</strong> Full PostgreSQL integration (planner cost estimates, VACUUM, REINDEX, streaming replication)</li>
+<li><strong>WAL-logged:</strong> Crash-safe, streaming-replica safe, with <code>wal_consistency_checking</code> support</li>
+<li><strong>DoS protection:</strong> Configurable limits on NFA states, compile time, match time to prevent catastrophic backtracking</li>
+<li><strong>Backward compatible:</strong> Legacy <code>tre_amatch*</code> UDFs from 0.1.0 preserved</li>
+</ul>
+<h2 id="when-to-use-pg_tre-1"><a class="header" href="#when-to-use-pg_tre-1">When to Use pg_tre</a></h2>
+<p><strong>Use pg_tre for:</strong></p>
+<ul>
+<li>Fuzzy search with known error tolerance (e.g., OCR errors, typos, name variants)</li>
+<li>Long patterns with substantial literal runs (good trigram selectivity)</li>
+<li>Low edit distances (k ≤ 2) where recheck cost is manageable</li>
+</ul>
+<p><strong>Use other tools for:</strong></p>
+<ul>
+<li>Substring matching (<code>LIKE</code>, <code>ILIKE</code>) → pg_trgm</li>
+<li>Natural language search (stemming, ranking) → tsvector/tsquery</li>
+<li>Semantic similarity → pgvector</li>
+</ul>
+<h2 id="installation-1"><a class="header" href="#installation-1">Installation</a></h2>
+<p>Requires PostgreSQL 18 or newer, autoconf/automake/libtool/gettext/m4.</p>
+<pre><code class="language-bash">git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git
+cd pg_tre
+PG_CONFIG=/path/to/pg_config make
+sudo PG_CONFIG=/path/to/pg_config make install
+</code></pre>
+<p>Add to <code>postgresql.conf</code>:</p>
+<pre><code class="language-ini">shared_preload_libraries = 'pg_tre'
+</code></pre>
+<p>Restart PostgreSQL, then:</p>
+<pre><code class="language-sql">CREATE EXTENSION pg_tre;
+</code></pre>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
+<pre><code class="language-sql">-- Create a sample table
+CREATE TABLE documents (id serial, body text);
+INSERT INTO documents (body) VALUES
+  ('PostgreSQL is a powerful database'),
+  ('MySQL is also popular'),
+  ('Oracle databases are expensive');
+
+-- Create a pg_tre index
+CREATE INDEX documents_body_tre ON documents USING tre (body);
+
+-- Exact regex (k=0)
+SELECT * FROM documents WHERE body %~~ tre_pattern('PostgreSQL');
+-- Returns: row 1
+
+-- Fuzzy match (k=1): "PostgreSQL" ± 1 edit
+SELECT * FROM documents WHERE body %~~ tre_pattern('PostgrSQL', 1);
+-- Returns: row 1 (matches "PostgreSQL" with 1 insertion)
+
+-- Verify index is used
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM documents WHERE body %~~ tre_pattern('database', 1);
+-- Plan shows: Bitmap Index Scan on documents_body_tre
+</code></pre>
+<h2 id="performance-1"><a class="header" href="#performance-1">Performance</a></h2>
+<p><strong>Benchmark (10M rows, avg 100 words/row, k=2):</strong></p>
+<ul>
+<li>Sequential scan: ~45 seconds</li>
+<li>pg_tre index scan: ~0.3 seconds (150× faster)</li>
+<li>False positive rate: ~2% (recheck cost negligible)</li>
+</ul>
+<p>Performance depends heavily on pattern selectivity and edit distance. Patterns with many distinct trigrams (long literals) benefit most. High edit distances (k &gt; 3) degrade performance due to exponential recheck cost.</p>
+<h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
+<ul>
+<li><strong>User guide:</strong> <a href="https://codeberg.org/gregburd/pg_tre/src/branch/main/doc/pg_tre.md">doc/pg_tre.md</a></li>
+<li><strong>Architecture:</strong> <a href="https://codeberg.org/gregburd/pg_tre/src/branch/main/doc/design.md">doc/design.md</a></li>
+<li><strong>On-disk format:</strong> <a href="https://codeberg.org/gregburd/pg_tre/src/branch/main/doc/onpage_format.md">doc/onpage_format.md</a></li>
+<li><strong>Migration guide:</strong> <a href="https://codeberg.org/gregburd/pg_tre/src/branch/main/doc/migration-from-0.1.0.md">doc/migration-from-0.1.0.md</a></li>
+<li><strong>Changelog:</strong> <a href="https://codeberg.org/gregburd/pg_tre/src/branch/main/CHANGELOG.md">CHANGELOG.md</a></li>
+</ul>
+<h2 id="project-links-1"><a class="header" href="#project-links-1">Project Links</a></h2>
+<ul>
+<li><strong>Repository:</strong> https://codeberg.org/gregburd/pg_tre</li>
+<li><strong>Issues:</strong> https://codeberg.org/gregburd/pg_tre/issues</li>
+<li><strong>License:</strong> MIT (see LICENSE file)</li>
+<li><strong>TRE library:</strong> https://github.com/laurikari/tre (BSD 2-clause)</li>
+</ul>
+<h2 id="acknowledgments"><a class="header" href="#acknowledgments">Acknowledgments</a></h2>
+<p>pg_tre builds on:</p>
+<ul>
+<li><strong>TRE</strong> (Ville Laurikari) — approximate regex matching library</li>
+<li><strong>Lime</strong> (Greg Burd) — LALR(1) parser generator (Lemon fork)</li>
+<li><strong><a href="https://codeberg.org/gregburd/sparsemap">sparsemap</a></strong> — compressed bitmap primitive (MIT)</li>
+<li><strong>Russ Cox</strong> — trigram extraction algorithm (<a href="https://swtch.com/~rsc/regexp/regexp4.html">2012 article</a>)</li>
+<li><strong>Gonzalo Navarro</strong> — error-tolerant indexing techniques (1999-2001 papers)</li>
+</ul>
+<p>Special thanks to the PostgreSQL community for the extension framework, custom rmgr support, and IndexAmRoutine API.</p>
+<h2 id="feedback-and-contributions"><a class="header" href="#feedback-and-contributions">Feedback and Contributions</a></h2>
+<p>Report bugs and request features at: https://codeberg.org/gregburd/pg_tre/issues</p>
+<p>Patches welcome via Codeberg PR or email. When filing bugs, include:</p>
+<ol>
+<li>PostgreSQL version (<code>SELECT version();</code>)</li>
+<li>Minimal reproducer (SQL only)</li>
+<li><code>EXPLAIN (ANALYZE, VERBOSE, BUFFERS)</code> output</li>
+<li>Whether <code>shared_preload_libraries = 'pg_tre'</code> is set</li>
+</ol>
+<hr />
+<p><strong>Try pg_tre today:</strong> https://codeberg.org/gregburd/pg_tre</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
