@@ -6,6 +6,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.5] - 2026-06-01 - posting-leaf FSM reclamation (deferred page deletion + recycle)
+
+Storage-reclamation release on the 1.5.0 lineage.  No on-disk
+format change (remains v5); no REINDEX required.  Upgrade
+script `1.5.4--1.5.5` is a no-op stub that only bumps the
+recorded extension version.
+
+### Fixed
+
+- **`VACUUM` now physically frees emptied posting leaves to the
+  index FSM** (the residual left open in 1.5.4).  Previously an
+  out-of-line posting leaf that `VACUUM` emptied was repacked to
+  a zero-entry leaf but never reclaimed: the block stayed
+  allocated forever and the index only shrank under a full
+  `REINDEX`.  1.5.5 adds an nbtree-style deferred page-deletion
+  and recycle protocol:
+
+  - When `ambulkdelete` empties a **non-head** posting leaf it
+    splices the leaf out of its right-link chain (the
+    predecessor's `right_link` is advanced past it) and marks it
+    `PG_TRE_LEAF_DELETED`, stamping a deletion `FullTransactionId`
+    just past an empty sparsemap.  The page is left as a coherent
+    empty waypoint (preserved `right_link`) so a concurrent scan
+    holding a stale `right_link` still terminates correctly --
+    posting scans copy `right_link` without lock coupling.  The
+    chain head is never unlinked (it is addressed from the
+    upper-tree leaf entry).
+  - `amvacuumcleanup` runs a recycle pass that sweeps the main
+    fork and, for each `PG_TRE_LEAF_DELETED` leaf whose deletion
+    XID has aged past the global visibility horizon
+    (`GlobalVisCheckRemovableFullXid` -- nbtree's `safexid`
+    gate), re-initializes the page and records it free
+    (`RecordFreeIndexPage` + `IndexFreeSpaceMapVacuum`).
+  - `pg_tre_extend_fork` now reuses FSM pages
+    (`GetFreeIndexPage`), re-validating each candidate under its
+    buffer lock before claiming it (nbtree `_bt_allocbuf`
+    discipline) so a lost extend race falls through safely to a
+    physical extension.
+
+  The unlink and recycle operations are WAL-logged as full-page
+  images (`XLOG_PTRE_POSTING_UNLINK`, `XLOG_PTRE_POSTING_RECYCLE`)
+  replayed through the generic FPI path.  `amvacuum` now reports
+  `pages_deleted` / `pages_free`.  New regression test
+  `posting_recycle` builds a multi-leaf posting chain, empties an
+  interior band, and verifies the leaves are unlinked, recycled
+  into the FSM, and reused without the index growing -- while the
+  index continues to agree with the heap throughout.
+
+---
+
 ## [1.5.4] - 2026-05-31 - inline-posting vacuum cleanup, NFA-count hardening
 
 Correctness/hardening release on the 1.5.0 lineage.  No

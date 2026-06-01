@@ -14,12 +14,13 @@
  * cleaned as of 1.5.4 (posting_leaf_inline_delete in posting.c rewrites
  * the leaf's inline region in place), so num_index_tuples is exact.
  *
- * Residual gap: emptied posting leaves are repacked but not physically
- * freed to the free-space map.  Safe reclaim would require an
- * nbtree-style page deletion / recycle protocol (half-dead marking,
- * right-link re-routing, XID-gated recycling) because VACUUM runs
- * concurrently with lock-coupling-free right-link scans; that is tracked
- * future work.  pages_deleted / pages_free therefore stay 0 (honest).
+ * As of 1.5.5, emptied posting leaves ARE physically reclaimed: a
+ * non-head leaf that empties is unlinked from its right-link chain and
+ * marked deleted by ambulkdelete (deferred-recycle, nbtree-style), and
+ * amvacuumcleanup hands deleted pages whose deletion XID has aged past
+ * the global visibility horizon to the index free-space map
+ * (pg_tre_posting_recycle_deleted).  pages_deleted / pages_free are
+ * reported accordingly, and pg_tre_extend reuses freed pages.
  */
 
 #include "postgres.h"
@@ -42,6 +43,7 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
     uint64      removed;
     uint64      remaining = 0;
     BlockNumber posting_pages = 0;
+    BlockNumber pages_deleted = 0;
 
     if (stats == NULL)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
@@ -56,7 +58,8 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
      */
     removed = pg_tre_posting_bulk_delete(info->index, callback,
                                          callback_state,
-                                         &remaining, &posting_pages);
+                                         &remaining, &posting_pages,
+                                         &pages_deleted);
 
     /*
      * Accumulate across the (possibly multiple) ambulkdelete calls VACUUM
@@ -70,6 +73,10 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
     stats->num_index_tuples = (double) remaining;
     stats->estimated_count = false;
 
+    /* Leaves unlinked + marked deleted this pass (recycled into the FSM
+     * by amvacuumcleanup once their deletion XID ages out). */
+    stats->pages_deleted += pages_deleted;
+
     /* Total physical pages in the index relation's main fork. */
     stats->num_pages = RelationGetNumberOfBlocks(info->index);
 
@@ -79,7 +86,9 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 IndexBulkDeleteResult *
 pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
-    uint64 merged;
+    uint64      merged;
+    BlockNumber recycled;
+    BlockNumber pending = 0;
 
     /* Nothing to scan (e.g. cleanup-only with an all-visible heap). */
     if (info->index == NULL)
@@ -93,14 +102,25 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     (void) merged;    /* reporting via ereport would spam VACUUM output */
 
     /*
-     * Report index-size statistics.  We always know the physical page
-     * count; report it so the planner / autovacuum logging see a real
-     * value instead of zero.  pg_tre does not currently maintain a
-     * free-space map or mark pages deleted, so pages_deleted / pages_free
-     * stay zero (honestly reflecting that no pages are reclaimed without
-     * a REINDEX).
+     * Physically reclaim posting leaves that earlier ambulkdelete passes
+     * unlinked and marked deleted, now that their deletion XID has aged
+     * past the global visibility horizon.  Recycled pages are recorded in
+     * the index FSM (reused by pg_tre_extend) and counted in pages_free.
+     * Pages still within the horizon are reported as pages_deleted so the
+     * count reflects reclaimable-but-not-yet-reclaimed space.
+     */
+    recycled = pg_tre_posting_recycle_deleted(info->index, info->heaprel,
+                                              &pending);
+
+    /*
+     * Report index-size statistics.  num_pages is the physical page
+     * count; pages_free is what we just handed to the FSM (immediately
+     * reusable); pages_deleted is deleted-but-not-yet-recyclable (a
+     * future VACUUM will reclaim them once snapshots release).
      */
     stats->num_pages = RelationGetNumberOfBlocks(info->index);
+    stats->pages_free += recycled;
+    stats->pages_deleted += pending;
 
     /*
      * If ambulkdelete already ran in this VACUUM it left num_index_tuples

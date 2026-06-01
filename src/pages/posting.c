@@ -30,15 +30,19 @@
 #include <string.h>
 
 #include "access/genam.h"
+#include "access/transam.h"
+#include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "storage/indexfsm.h"
 #include "storage/lockdefs.h"
 #include "utils/elog.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 
 #include "pg_tre/buffer.h"
 #include "pg_tre/meta.h"
@@ -97,8 +101,152 @@ posting_leaf_header_valid(const PgTrePostingLeafHeader *hdr)
 }
 
 /* ================================================================
- * Builder
+ * Page deletion / recycle (FSM page-freeing, issue: emptied posting
+ * leaves were repacked but never physically reclaimed).
+ *
+ * Posting trees are flat right-link leaf chains.  When VACUUM empties a
+ * non-head leaf it is spliced out of the chain (left sibling's
+ * right_link is advanced past it) and marked PG_TRE_LEAF_DELETED, but
+ * NOT immediately freed: a concurrent scan may have copied a stale
+ * right_link pointing at it before the unlink (scans follow right_link
+ * without lock coupling -- see pg_tre_posting_scan_next).  The deleted
+ * page therefore stays a coherent waypoint -- empty sparsemap (matches
+ * no TIDs), preserved right_link (a stale scanner continues correctly to
+ * the real successor).  We stamp the full XID at unlink time; a later
+ * VACUUM recycles the page into the index FSM only once that XID is old
+ * enough that no snapshot could still be mid-traversal (nbtree's safexid
+ * discipline, GlobalVisCheckRemovableFullXid).
  * ================================================================ */
+
+/*
+ * Offset within a deleted posting leaf where the 8-byte deletion XID is
+ * stored: immediately past the leaf header and the (empty) sparsemap
+ * blob.  A normal-leaf reader never looks here (it reads only
+ * sparsemap_bytes of sparsemap and, for a deleted page, payload_bytes ==
+ * 0), so the stamp is invisible to stale scanners that still treat the
+ * page as a live leaf.
+ */
+static inline Size
+posting_deleted_xid_offset(const PgTrePostingLeafHeader *hdr)
+{
+    Size header_end = MAXALIGN(SizeOfPageHeaderData)
+                    + MAXALIGN(sizeof(PgTrePostingLeafHeader));
+    return header_end + MAXALIGN(hdr->sparsemap_bytes);
+}
+
+/* Serialize an empty sparsemap into a freshly-palloc'd buffer; returns
+ * the blob and writes its size.  Used to turn a leaf into a coherent
+ * empty waypoint. */
+static uint8 *
+posting_make_empty_sparsemap(Size *out_size)
+{
+    sparsemap_t *sm = sm_create(64);
+    uint8  *blob;
+    Size    sz;
+
+    if (sm == NULL)
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+            errmsg("pg_tre: failed to allocate empty sparsemap")));
+    sz = sm_get_size(sm);
+    blob = (uint8 *) palloc(sz + 16);
+    memcpy(blob, sm_get_data(sm), sz);
+    sm_free(sm);
+    *out_size = sz;
+    return blob;
+}
+
+/*
+ * Unlink an emptied leaf `cur` (held EXCLUSIVE in cur_buf) from its
+ * predecessor `prev` (held EXCLUSIVE in prev_buf).  After the call:
+ *   - prev->right_link == cur->right_link (cur is out of the chain),
+ *   - cur is rewritten as an empty waypoint with PG_TRE_LEAF_DELETED set
+ *     and a deletion XID stamped,
+ * and both pages are WAL-logged as a single 2-FPI record.  Both buffers
+ * remain locked and pinned (caller releases).
+ */
+static void
+posting_leaf_unlink(Relation index, Buffer prev_buf, Buffer cur_buf,
+                    BlockNumber cur_blk)
+{
+    Page    prev_page = BufferGetPage(prev_buf);
+    Page    cur_page  = BufferGetPage(cur_buf);
+    PgTrePostingLeafHeader *prev_hdr =
+        (PgTrePostingLeafHeader *) PageGetContents(prev_page);
+    PgTrePostingLeafHeader *cur_hdr =
+        (PgTrePostingLeafHeader *) PageGetContents(cur_page);
+    PageTreOpaque cur_opq = PageTreGetOpaque(cur_page);
+    BlockNumber cur_right = cur_hdr->right_link;
+    FullTransactionId del_xid = ReadNextFullTransactionId();
+    uint8  *empty_sm;
+    Size    empty_sm_sz;
+    char   *sm_area;
+    Size    xid_off;
+
+    /* 1. Splice cur out of the chain. */
+    prev_hdr->right_link = cur_right;
+
+    /* 2. Rewrite cur as an empty, still-linked waypoint. */
+    empty_sm = posting_make_empty_sparsemap(&empty_sm_sz);
+
+    cur_hdr->right_link     = cur_right;     /* preserved for stale scanners */
+    cur_hdr->min_tid        = 0;
+    cur_hdr->max_tid        = 0;
+    cur_hdr->sparsemap_bytes = (uint32) empty_sm_sz;
+    cur_hdr->payload_bytes  = 0;
+    cur_hdr->payload_offset = 0;
+    cur_hdr->n_entries      = 0;
+    cur_hdr->_pad           = 0;
+
+    sm_area = (char *) cur_hdr + MAXALIGN(sizeof(*cur_hdr));
+    memcpy(sm_area, empty_sm, empty_sm_sz);
+    pfree(empty_sm);
+
+    /* Stamp the deletion XID just past the empty sparsemap. */
+    xid_off = posting_deleted_xid_offset(cur_hdr);
+    Assert(xid_off + sizeof(uint64) <= (Size) (BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData))));
+    memcpy((char *) cur_page + xid_off, &del_xid.value, sizeof(uint64));
+
+    cur_opq->flags |= PG_TRE_LEAF_DELETED;
+
+    /* pd_lower covers header + sparsemap + the 8-byte XID stamp so the
+     * stamp survives REGBUF_STANDARD hole-stripping in the FPI; pd_upper
+     * resets to the opaque trailer (no payload). */
+    ((PageHeader) cur_page)->pd_lower = xid_off + sizeof(uint64);
+    ((PageHeader) cur_page)->pd_upper =
+        BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData));
+
+    MarkBufferDirty(prev_buf);
+    MarkBufferDirty(cur_buf);
+
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, prev_buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        XLogRegisterBuffer(1, cur_buf,  REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_UNLINK);
+        PageSetLSN(prev_page, recptr);
+        PageSetLSN(cur_page, recptr);
+    }
+    (void) cur_blk;
+}
+
+/*
+ * Read the deletion XID of a leaf currently marked PG_TRE_LEAF_DELETED.
+ */
+static FullTransactionId
+posting_leaf_deleted_xid(Page page)
+{
+    PgTrePostingLeafHeader *hdr =
+        (PgTrePostingLeafHeader *) PageGetContents(page);
+    FullTransactionId fxid;
+    uint64  v;
+
+    memcpy(&v, (char *) page + posting_deleted_xid_offset(hdr), sizeof(uint64));
+    fxid.value = v;
+    return fxid;
+}
 
 /* Per-TID payload entry (positions + bloom). */
 typedef struct PayloadEntry
@@ -1969,17 +2117,26 @@ corrupt:
 
 /*
  * Delete dead TIDs from one posting tree (the right-link chain rooted at
- * `root`).  Each leaf is locked EXCLUSIVE, repacked, WAL-logged, and
- * released before moving to the right sibling.  Accumulates removed /
- * remaining counts into the supplied counters and bumps *pages_visited.
+ * `root`).  Walks the chain with lock coupling: the predecessor leaf is
+ * held EXCLUSIVE while the current leaf is locked, repacked and (if it
+ * emptied) unlinked.  Coupling is required so an emptied non-head leaf
+ * can be spliced out of the chain atomically with respect to other
+ * vacuums; concurrent scanners only ever hold one leaf lock at a time so
+ * there is no lock-order deadlock.  The chain head is never unlinked (it
+ * is referenced from the upper-tree leaf entry); an emptied head simply
+ * stays as an empty leaf, as before.
+ *
+ * Accumulates removed / remaining counts and bumps *pages_visited per
+ * leaf seen and *pages_deleted per leaf unlinked (deferred-recycle).
  */
 static void
 posting_tree_delete(Relation index, BlockNumber root,
                     IndexBulkDeleteCallback callback, void *callback_state,
                     uint64 *tuples_removed, uint64 *tuples_remaining,
-                    BlockNumber *pages_visited)
+                    BlockNumber *pages_visited, BlockNumber *pages_deleted)
 {
     BlockNumber cur = root;
+    Buffer      prev_buf = InvalidBuffer;   /* predecessor, kept locked */
 
     while (BlockNumberIsValid(cur))
     {
@@ -1991,10 +2148,13 @@ posting_tree_delete(Relation index, BlockNumber root,
         BlockNumber next;
         uint64  remaining = 0;
         uint64  removed;
+        bool    unlinked = false;
 
         if (!posting_leaf_header_valid(hdr))
         {
             UnlockReleaseBuffer(buf);
+            if (BufferIsValid(prev_buf))
+                UnlockReleaseBuffer(prev_buf);
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("pg_tre: corrupt posting leaf at block %u", cur)));
@@ -2010,9 +2170,127 @@ posting_tree_delete(Relation index, BlockNumber root,
         if (pages_visited)
             (*pages_visited)++;
 
-        UnlockReleaseBuffer(buf);
+        /*
+         * If this non-head leaf is now empty, splice it out of the chain
+         * and mark it deleted (deferred recycle).  We need the
+         * predecessor still locked to retarget its right_link.  The head
+         * (prev_buf == Invalid) is never unlinked.
+         */
+        if (remaining == 0 && BufferIsValid(prev_buf))
+        {
+            posting_leaf_unlink(index, prev_buf, buf, cur);
+            unlinked = true;
+            if (pages_deleted)
+                (*pages_deleted)++;
+        }
+
+        if (unlinked)
+        {
+            /*
+             * prev_buf->right_link now points at `next`; keep prev_buf
+             * locked as the predecessor for the next iteration and drop
+             * the just-unlinked page.
+             */
+            UnlockReleaseBuffer(buf);
+        }
+        else
+        {
+            /* Advance the coupling window: this leaf becomes prev. */
+            if (BufferIsValid(prev_buf))
+                UnlockReleaseBuffer(prev_buf);
+            prev_buf = buf;
+        }
         cur = next;
     }
+
+    if (BufferIsValid(prev_buf))
+        UnlockReleaseBuffer(prev_buf);
+}
+
+/*
+ * Physically reclaim deleted posting leaves into the index FSM.  Called
+ * from amvacuumcleanup.  Sweeps every block of the main fork; any
+ * POSTING_L page flagged PG_TRE_LEAF_DELETED whose deletion XID is old
+ * enough that no snapshot could still reach it via a pre-unlink
+ * right_link is re-initialized as a blank page (WAL-logged) and recorded
+ * free.  Returns the number of pages recycled into the FSM; *out_pending
+ * (optional) receives the count of deleted pages NOT yet recyclable
+ * (still within the visibility horizon).
+ */
+BlockNumber
+pg_tre_posting_recycle_deleted(Relation index, Relation heaprel,
+                               BlockNumber *out_pending)
+{
+    BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+    BlockNumber blk;
+    BlockNumber recycled = 0;
+    BlockNumber pending = 0;
+    bool        any_recorded = false;
+
+    for (blk = 1; blk < nblocks; blk++)   /* block 0 is meta */
+    {
+        Buffer  buf;
+        Page    page;
+        PageTreOpaque opq;
+
+        CHECK_FOR_INTERRUPTS();
+
+        buf = ReadBuffer(index, blk);
+        LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+        page = BufferGetPage(buf);
+
+        if (PageIsNew(page))
+        {
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
+        opq = PageTreGetOpaque(page);
+        if (opq->page_kind != PG_TRE_PAGE_POSTING_L ||
+            !(opq->flags & PG_TRE_LEAF_DELETED))
+        {
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
+        /*
+         * Deleted leaf.  Recyclable only once its deletion XID is below
+         * the global removable horizon -- i.e. no snapshot still running
+         * could have begun a scan that copied a right_link pointing here
+         * before the unlink.  This is exactly nbtree's safexid gate.
+         */
+        if (!GlobalVisCheckRemovableFullXid(heaprel, posting_leaf_deleted_xid(page)))
+        {
+            pending++;
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
+        /* Re-initialize as a blank page and WAL-log, then record free. */
+        pg_tre_page_init(page, BLCKSZ, PG_TRE_PAGE_POSTING_L);
+        MarkBufferDirty(buf);
+        if (RelationNeedsWAL(index))
+        {
+            XLogRecPtr recptr;
+
+            XLogBeginInsert();
+            XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_RECYCLE);
+            PageSetLSN(page, recptr);
+        }
+        UnlockReleaseBuffer(buf);
+
+        RecordFreeIndexPage(index, blk);
+        any_recorded = true;
+        recycled++;
+    }
+
+    if (any_recorded)
+        IndexFreeSpaceMapVacuum(index);
+
+    if (out_pending)
+        *out_pending = pending;
+    return recycled;
 }
 
 /*
@@ -2029,7 +2307,7 @@ static void
 posting_upper_walk(Relation index, BlockNumber blk,
                    IndexBulkDeleteCallback callback, void *callback_state,
                    uint64 *tuples_removed, uint64 *tuples_remaining,
-                   BlockNumber *posting_pages)
+                   BlockNumber *posting_pages, BlockNumber *pages_deleted)
 {
     Buffer  buf;
     Page    page;
@@ -2070,7 +2348,8 @@ posting_upper_walk(Relation index, BlockNumber blk,
 
         for (i = 0; i < n; i++)
             posting_upper_walk(index, children[i], callback, callback_state,
-                               tuples_removed, tuples_remaining, posting_pages);
+                               tuples_removed, tuples_remaining, posting_pages,
+                               pages_deleted);
         if (children)
             pfree(children);
         return;
@@ -2116,7 +2395,7 @@ posting_upper_walk(Relation index, BlockNumber blk,
         for (i = 0; i < roots_n; i++)
             posting_tree_delete(index, roots[i], callback, callback_state,
                                 tuples_removed, tuples_remaining,
-                                posting_pages);
+                                posting_pages, pages_deleted);
         if (roots)
             pfree(roots);
         return;
@@ -2130,30 +2409,37 @@ posting_upper_walk(Relation index, BlockNumber blk,
  * Top-level bulk delete entry point used by ambulkdelete().  Walks every
  * posting tree reachable from the upper tree, stripping TIDs the
  * callback reports dead.  Returns the number of TIDs removed; reports
- * the surviving TID count via *out_remaining and the number of posting
- * leaf pages visited via *out_pages (both optional).
+ * the surviving TID count via *out_remaining, the number of posting leaf
+ * pages visited via *out_pages, and the number of emptied leaves unlinked
+ * from their chains (marked deleted, awaiting recycle) via *out_deleted.
+ * All out-params are optional.
  */
 uint64
 pg_tre_posting_bulk_delete(Relation index,
                            IndexBulkDeleteCallback callback,
                            void *callback_state,
                            uint64 *out_remaining,
-                           BlockNumber *out_pages)
+                           BlockNumber *out_pages,
+                           BlockNumber *out_deleted)
 {
     PgTreMetaPageData meta;
     uint64  tuples_removed = 0;
     uint64  tuples_remaining = 0;
     BlockNumber posting_pages = 0;
+    BlockNumber pages_deleted = 0;
 
     pg_tre_meta_read(index, &meta);
 
     if (BlockNumberIsValid(meta.root_upper))
         posting_upper_walk(index, meta.root_upper, callback, callback_state,
-                           &tuples_removed, &tuples_remaining, &posting_pages);
+                           &tuples_removed, &tuples_remaining, &posting_pages,
+                           &pages_deleted);
 
     if (out_remaining)
         *out_remaining = tuples_remaining;
     if (out_pages)
         *out_pages = posting_pages;
+    if (out_deleted)
+        *out_deleted = pages_deleted;
     return tuples_removed;
 }

@@ -131,6 +131,25 @@ typedef PgTreMetaPageData *PgTreMetaPage;
 
 /* ---- Posting leaf page ---- */
 
+/*
+ * Page-kind-specific flag bits stored in PageTreOpaqueData.flags for
+ * POSTING_L pages.
+ *
+ * PG_TRE_LEAF_DELETED marks a posting leaf that VACUUM has unlinked from
+ * its right-link chain (it is now empty and no longer reachable as a
+ * chain member from its left sibling).  A deleted leaf is NOT yet free:
+ * a concurrent scan that copied a stale right_link before the unlink may
+ * still land on it, so the page must remain a coherent waypoint.  Its
+ * right_link is preserved (a stale scanner continues correctly to the
+ * real successor) and its sparsemap is empty (matches no TIDs).  The
+ * deleted-leaf control block (PgTrePostingDeletedHeader) overlays the
+ * content area and carries the full XID at which the page was deleted;
+ * the page is only handed to the FSM by a later VACUUM once that XID is
+ * old enough that no snapshot could still be traversing the pre-unlink
+ * chain (PG_TRE_LEAF_DELETED -> recycled, nbtree's safexid discipline).
+ */
+#define PG_TRE_LEAF_DELETED   0x0001
+
 typedef struct PgTrePostingLeafHeader
 {
     BlockNumber right_link;             /* Lehman-Yao right sibling */
@@ -142,6 +161,21 @@ typedef struct PgTrePostingLeafHeader
     uint16      n_entries;              /* sm_cardinality cache */
     uint16      _pad;
 } PgTrePostingLeafHeader;
+
+/*
+ * Control block for a DELETED (unlinked, awaiting recycle) posting leaf.
+ * It reuses the leaf header's right_link slot (kept valid for stale
+ * scanners) and stamps the deletion XID.  Stored at PageGetContents();
+ * the leaf header's leading right_link field aliases this struct's
+ * right_link so a stale scanner reading the page as a normal leaf still
+ * follows a correct (empty sparsemap, valid right_link) waypoint.
+ */
+typedef struct PgTrePostingDeletedHeader
+{
+    BlockNumber right_link;             /* MUST alias PgTrePostingLeafHeader.right_link */
+    uint32      _pad0;
+    uint64      deleted_xid_value;      /* FullTransactionId.value at unlink time */
+} PgTrePostingDeletedHeader;
 
 /*
  * Layout of a posting leaf page:

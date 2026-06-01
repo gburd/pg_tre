@@ -255,20 +255,46 @@ extern int pg_tre_posting_lookup_positions(Relation index,
  * in place and WAL-logging the change (XLOG_PTRE_VACUUM full-page
  * image).  Surviving TIDs and their payload entries are preserved.
  *
- * Returns the number of TIDs removed.  *out_remaining (optional)
- * receives the count of surviving TIDs across all reachable
- * (non-inline) posting trees; *out_pages (optional) receives the number
- * of posting leaf pages visited.
+ * Emptied non-head leaves are unlinked from their right-link chain and
+ * marked deleted (XLOG_PTRE_POSTING_UNLINK); they are physically
+ * reclaimed into the index FSM by a later call to
+ * pg_tre_posting_recycle_deleted() once safe (deferred-recycle).
  *
- * NOTE: postings stored INLINE in the upper-tree leaf entry are not
- * cleaned (rewriting upper-tree pages is out of this module's scope);
- * their dead TIDs remain correctly filtered by the executor's heap MVCC
- * recheck and are reclaimed on the next REINDEX.
+ * Returns the number of TIDs removed.  *out_remaining (optional)
+ * receives the count of surviving TIDs across all reachable posting
+ * trees (inline and out-of-line); *out_pages (optional) receives the
+ * number of posting leaf pages visited; *out_deleted (optional) receives
+ * the number of leaves unlinked this pass.
+ *
+ * Inline postings (stored in the upper-tree leaf entry) are repacked in
+ * place; their dead TIDs are removed and counted into *out_remaining.
  */
 extern uint64 pg_tre_posting_bulk_delete(Relation index,
                                          IndexBulkDeleteCallback callback,
                                          void *callback_state,
                                          uint64 *out_remaining,
-                                         BlockNumber *out_pages);
+                                         BlockNumber *out_pages,
+                                         BlockNumber *out_deleted);
+
+/*
+ * Physically reclaim posting leaves previously unlinked + marked deleted
+ * by pg_tre_posting_bulk_delete, once their deletion XID is old enough
+ * that no snapshot could still be traversing the pre-unlink chain
+ * (nbtree-style XID-gated recycle).  Re-initializes each reclaimable page
+ * (XLOG_PTRE_POSTING_RECYCLE) and records it free in the index FSM.
+ *
+ * `heaprel` is the heap relation the index belongs to (IndexVacuumInfo
+ * .heaprel); it is the relation passed to GlobalVisCheckRemovableFullXid
+ * to compute the removable horizon, exactly as nbtree's
+ * _bt_pendingfsm_finalize does.
+ *
+ * Returns the number of pages recycled; *out_pending (optional) receives
+ * the count of deleted pages not yet recyclable (still within the
+ * visibility horizon -- a future VACUUM will reclaim them).  Call from
+ * amvacuumcleanup.
+ */
+extern BlockNumber pg_tre_posting_recycle_deleted(Relation index,
+                                                  Relation heaprel,
+                                                  BlockNumber *out_pending);
 
 #endif /* PG_TRE_POSTING_H */

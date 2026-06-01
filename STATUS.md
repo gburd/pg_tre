@@ -1,8 +1,20 @@
 # pg_tre status
 
-Released: **1.5.4** (2026-05).  See `CHANGELOG.md` for full
+Released: **1.5.5** (2026-06).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+1.5.5 is a storage-reclamation release on the 1.5.0 lineage:
+same on-disk format (v5), no re-index required.  Headline
+change: `VACUUM` now physically frees emptied out-of-line
+posting leaves back to the index free-space map (the residual
+left open in 1.5.4).  An emptied non-head leaf is spliced out
+of its right-link chain and marked deleted with a deletion
+XID; a later `VACUUM` cleanup pass recycles it into the FSM
+once that XID has aged past the global visibility horizon
+(nbtree-style deferred page deletion + recycle), so the blocks
+are reused by future allocations instead of the index growing
+until `REINDEX`.
 
 1.5.4 is a correctness/hardening release on the 1.5.0
 lineage: same on-disk format (v5), no re-index required.
@@ -11,10 +23,7 @@ postings stored directly in upper-tree leaf entries (it
 rewrites the leaf's inline region in place), so `num_index_tuples`
 is reported exactly; the compiled-NFA state count is guarded
 against a corrupt/negative value that could otherwise bypass
-the `pg_tre.max_nfa_states` DoS cap.  Known residual: emptied
-posting leaves are repacked but not yet physically freed to the
-free-space map (safe reclaim needs an nbtree-style page
-deletion/recycle protocol; tracked as future work).
+the `pg_tre.max_nfa_states` DoS cap.
 
 1.5.2 is a production-readiness audit patch on the 1.5.0
 lineage: same on-disk format (v5), no re-index required.

@@ -1,0 +1,12 @@
+-- pg_tre 1.5.4 -> 1.5.5 upgrade.
+--
+-- No catalog changes: 1.5.5 is a C-level storage-reclamation release.
+-- VACUUM now physically frees emptied out-of-line posting leaves back to
+-- the index free space map (nbtree-style deferred page deletion +
+-- recycle): an emptied non-head leaf is spliced out of its right-link
+-- chain and marked deleted with a deletion XID, and a later VACUUM
+-- cleanup pass recycles it into the FSM once that XID has aged past the
+-- global visibility horizon, so the blocks are reused by future
+-- allocations instead of the index growing until REINDEX.  No on-disk
+-- format change (remains v5); no REINDEX required.  This upgrade script
+-- is an intentional no-op that only bumps the recorded extension version.

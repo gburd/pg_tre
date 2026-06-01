@@ -8,6 +8,7 @@
 #include "miscadmin.h"
 #include "storage/buf.h"
 #include "storage/bufmgr.h"
+#include "storage/indexfsm.h"
 #include "storage/lockdefs.h"
 #include "storage/smgr.h"
 #include "utils/elog.h"
@@ -42,6 +43,54 @@ pg_tre_extend_fork(Relation index, ForkNumber forknum, PageTreKind kind)
 {
     Buffer buf;
     Page   page;
+
+    /*
+     * For the main fork, first try to reuse a page previously freed to
+     * the index FSM (a posting leaf reclaimed by VACUUM's deferred-recycle
+     * pass).  GetFreeIndexPage returns InvalidBlockNumber when the FSM has
+     * nothing on offer, in which case we physically extend the relation.
+     *
+     * The FSM is advisory: under concurrency it may hand the same block to
+     * two extenders (e.g. an INSERT extending the pending list under the
+     * meta-page lock racing VACUUM's merge under ShareUpdateExclusiveLock).
+     * Following nbtree's _bt_allocbuf discipline, we therefore RE-VALIDATE
+     * the candidate under its buffer lock: a genuinely free page is either
+     * brand new (never written) or an initialized-but-empty page (the
+     * blank state the recycle pass leaves behind -- pd_lower at the page
+     * header end, no tuples).  If a peer already claimed and populated it,
+     * we drop it and ask the FSM for the next candidate; if the FSM is
+     * exhausted we fall through to a physical extension.  This closes the
+     * double-hand-out window without relying on a relation-extension lock.
+     */
+    if (forknum == MAIN_FORKNUM)
+    {
+        BlockNumber reuse;
+
+        while (BlockNumberIsValid((reuse = GetFreeIndexPage(index))))
+        {
+            CHECK_FOR_INTERRUPTS();
+
+            buf = ReadBuffer(index, reuse);
+            LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+            page = BufferGetPage(buf);
+
+            /*
+             * Reusable iff still unclaimed: a never-written page, or an
+             * empty initialized page (pd_lower has not advanced past the
+             * page header -- no content was written by a racing extender).
+             */
+            if (PageIsNew(page) ||
+                ((PageHeader) page)->pd_lower <= SizeOfPageHeaderData)
+            {
+                pg_tre_page_init(page, BufferGetPageSize(buf), kind);
+                MarkBufferDirty(buf);
+                return buf;
+            }
+
+            /* Lost the race for this block; release and try the next. */
+            UnlockReleaseBuffer(buf);
+        }
+    }
 
     buf = ExtendBufferedRel(BMR_REL(index), forknum, NULL,
                             EB_LOCK_FIRST);
