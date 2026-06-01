@@ -188,22 +188,31 @@ jobs:
       contents: read
       pages: write
       id-token: write
+    # actions/deploy-pages@v4 requires the deployment to target a
+    # `github-pages` environment; the URL is surfaced on the run.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Serialize Pages deployments so two pushes to main can't race the
+    # deploy API (which rejects concurrent in-progress deployments).
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble site
-        run: |
-          mkdir -p _site
-          cp README.md _site/index.md
-          cp -r doc _site/
-          cp CHANGELOG.md STATUS.md _site/ || true
-          # If a static site generator is configured later, this is
-          # where mdbook/docusaurus/mkdocs would run.
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.4.52'
+
+      - name: Build site with mdBook
+        run: mdbook build
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site/
+          path: doc-site/
 
       - name: Deploy to Pages
         id: deployment

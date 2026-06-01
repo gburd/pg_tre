@@ -1,0 +1,37 @@
+# mdBook configuration for the pg_tre documentation site.
+#
+# The book source lives in doc/ (the existing hand-written guides).
+# `mdbook build` renders it to doc-site/ as static HTML, which both the
+# GitHub Pages and Codeberg Pages CI jobs publish.  Build locally with:
+#
+#     cargo install mdbook        # one-time
+#     mdbook serve                # live preview at http://localhost:3000
+#     mdbook build                # writes doc-site/
+
+[book]
+title = "pg_tre"
+description = "Native PostgreSQL index access method for approximate regex matching"
+authors = ["Greg Burd <greg@burd.me>"]
+language = "en"
+src = "doc"
+
+[build]
+build-dir = "doc-site"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://codeberg.org/gregburd/pg_tre"
+edit-url-template = "https://codeberg.org/gregburd/pg_tre/_edit/main/{path}"
+additional-css = []
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+
+[output.html.print]
+enable = true

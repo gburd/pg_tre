@@ -219,23 +219,21 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-              git ca-certificates nodejs npm
-          npm install -g @mermaid-js/mermaid-cli || true
+              git ca-certificates curl
 
-      - name: Assemble _site
+      - name: Install mdBook
         run: |
-          mkdir -p _site/doc
-          cp README.md _site/index.md
-          cp -r doc/* _site/doc/ 2>/dev/null || true
-          cp CHANGELOG.md STATUS.md LICENSE NOTICE \
-             RELEASING.md CONTRIBUTING.md SECURITY.md _site/ 2>/dev/null || true
-          cat > _site/index.html <<'HTML'
-          <!DOCTYPE html>
-          <meta charset="utf-8">
-          <title>pg_tre</title>
-          <meta http-equiv="refresh" content="0; url=index.md">
-          <p>See <a href="index.md">index.md</a>.</p>
-          HTML
+          MDBOOK_VERSION=0.4.52
+          url="https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSL "$url" | tar -xz -C /usr/local/bin
+          mdbook --version
+
+      - name: Build site with mdBook
+        run: |
+          mdbook build
+          # Codeberg Pages serves the branch root; doc-site/index.html is
+          # the rendered landing page, so no redirect shim is needed.
+          mv doc-site _site
 
       - name: Push to pages branch
         env:
@@ -247,10 +245,11 @@ jobs:
           fi
           git config --global user.email "ci@pg-tre"
           git config --global user.name "pg_tre CI"
+          rev="$(git rev-parse --short HEAD)"
           cd _site
           git init -b pages
           git add .
-          git commit -m "Docs: $(cd .. && git rev-parse --short HEAD)"
+          git commit -m "Docs: ${rev}"
           url_no_scheme="${GITHUB_SERVER_URL#https://}"
           # Pages branch is a generated tree; updating it requires
           # the lease form (rejected by hook if literal '--force'
