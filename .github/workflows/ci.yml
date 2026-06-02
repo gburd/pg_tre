@@ -223,8 +223,13 @@ jobs:
           # sandboxes the postmaster (ProtectHome) so a coverage-built
           # pg_tre.so under /home/runner can't load or write .gcda files.
           sudo pg_ctlcluster --skip-systemctl-redirect 18 main start
+          # Disable JIT: the coverage build (-O0, no PGXS cost tuning)
+          # inflates index-scan cost estimates past the JIT threshold, so
+          # EXPLAIN output in planner_auto would gain a JIT: block that the
+          # expected files (produced by the optimized matrix builds) lack.
           sudo -u postgres psql \
-              -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
+              -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';" \
+              -c "ALTER SYSTEM SET jit = off;"
           sudo pg_ctlcluster --skip-systemctl-redirect 18 main restart
           # run-regress.sh / make coverage connect as the OS user
           # (runner) with no -U, so libpq needs a matching superuser role.
