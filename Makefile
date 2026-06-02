@@ -298,7 +298,7 @@ coverage-build: coverage-clean
 	}
 	@echo "==> Building with coverage instrumentation"
 	$(MAKE) clean
-	$(MAKE) PG_CFLAGS="--coverage -O0 -g" SHLIB_LINK="--coverage"
+	$(MAKE) PG_CFLAGS="--coverage -O0 -g" SHLIB_LINK="$(TRE_LIB) -lm --coverage"
 	$(MAKE) install
 
 coverage: coverage-build
