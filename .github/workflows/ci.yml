@@ -5,6 +5,10 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  # Allow a manual run from the Actions tab. Needed because the GitHub
+  # repo is a push-mirror of Codeberg: mirror syncs update refs via the
+  # API and do NOT fire `push` events, so on:push never triggers here.
+  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -182,7 +186,9 @@ jobs:
   publish-docs:
     name: publish docs to GitHub Pages
     runs-on: ubuntu-24.04
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || github.event_name == 'workflow_dispatch'
     needs: [lint-docs]
     permissions:
       contents: read

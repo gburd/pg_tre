@@ -200,10 +200,11 @@ jobs:
           retention-days: 90
 
   publish-pages:
-    # Pushes the rendered docs to a "pages" branch of this repo.
-    # Codeberg Pages serves <user>.codeberg.page/<repo>/ from that
-    # branch automatically when the branch exists.  See
-    # https://docs.codeberg.org/codeberg-pages/
+    # Publishes the rendered mdBook to Codeberg Pages via the official
+    # git-pages action, which uploads to the wildcard site
+    # https://<owner>.codeberg.page/<repo>/ using the automatic
+    # ${{ forge.token }} (Forge Wildcard Authorization) -- no secret or
+    # SSH deploy key required.  See https://codeberg.org/git-pages/action
     name: publish docs to Codeberg Pages
     runs-on: docker
     container:
@@ -213,13 +214,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          submodules: false
 
       - name: Install deps
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-              git ca-certificates curl
+              ca-certificates curl
 
       - name: Install mdBook
         run: |
@@ -231,29 +232,11 @@ jobs:
       - name: Build site with mdBook
         run: |
           mdbook build
-          # Codeberg Pages serves the branch root; doc-site/index.html is
-          # the rendered landing page, so no redirect shim is needed.
-          mv doc-site _site
+          test -f doc-site/index.html
 
-      - name: Push to pages branch
-        env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
-        run: |
-          if [ -z "${FORGEJO_TOKEN:-}" ]; then
-              echo "FORGEJO_TOKEN secret not set; skipping pages push"
-              exit 0
-          fi
-          git config --global user.email "ci@pg-tre"
-          git config --global user.name "pg_tre CI"
-          rev="$(git rev-parse --short HEAD)"
-          cd _site
-          git init -b pages
-          git add .
-          git commit -m "Docs: ${rev}"
-          url_no_scheme="${GITHUB_SERVER_URL#https://}"
-          # Pages branch is a generated tree; updating it requires
-          # the lease form (rejected by hook if literal '--force'
-          # appears in the file).
-          git push --force-with-lease \
-              "https://ci:${FORGEJO_TOKEN}@${url_no_scheme}/${GITHUB_REPOSITORY}.git" \
-              pages:pages
+      - name: Publish to Codeberg Pages
+        uses: https://codeberg.org/git-pages/action@v2
+        with:
+          site: https://gregburd.codeberg.page/pg_tre/
+          token: ${{ forge.token }}
+          source: doc-site/
