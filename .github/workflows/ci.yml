@@ -254,15 +254,15 @@ jobs:
 
       - name: Upload to Codecov
         # Configuration is in .codecov.yml; the action picks up
-        # coverage.info automatically.  CODECOV_TOKEN secret is
-        # required for non-public uploads; for OSS Codecov
-        # accepts unauthenticated uploads from public repos.
+        # coverage.info automatically.  Codecov v4 rejects tokenless
+        # uploads from this repo, so the CODECOV_TOKEN secret (set on
+        # the GitHub repo) is required.
         uses: codecov/codecov-action@v4
         with:
           files: coverage.info
           flags: regression
           fail_ci_if_error: false
-          # token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   publish-docs:
     name: publish docs to GitHub Pages
