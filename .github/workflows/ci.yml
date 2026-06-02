@@ -219,10 +219,13 @@ jobs:
               [ -n "$ver" ] && sudo pg_dropcluster --stop "$ver" "$clu" || true
           done < <(pg_lsclusters -h)
           sudo pg_createcluster 18 main -p 5432 -- --auth-local=trust
-          sudo pg_ctlcluster 18 main start
+          # Start via pg_ctl directly (not systemd): the systemd unit
+          # sandboxes the postmaster (ProtectHome) so a coverage-built
+          # pg_tre.so under /home/runner can't load or write .gcda files.
+          sudo pg_ctlcluster --skip-systemctl-redirect 18 main start
           sudo -u postgres psql \
               -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
-          sudo pg_ctlcluster 18 main restart
+          sudo pg_ctlcluster --skip-systemctl-redirect 18 main restart
           for i in $(seq 1 30); do
               pg_isready -p 5432 -q && break
               sleep 1
