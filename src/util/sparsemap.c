@@ -1768,7 +1768,7 @@ __sm_get_size_impl(const sparsemap_t *map)
  * is unchanged, and a freshly-deserialized map starts with an
  * invalid cursor and rebuilds it on first use.
  */
-static inline void
+static inline void __attribute__((unused))
 __sm_cursor_invalidate(const sparsemap_t *map_ro)
 {
   /* Cursor lives on the in-memory struct only; const-cast is safe

@@ -110,6 +110,7 @@ PG_CPPFLAGS = \
     -I$(srcdir)/include \
     -I$(srcdir)/$(TRE_DIR)/local_includes \
     -I$(srcdir)/$(TRE_DIR) \
+    -I$(srcdir)/$(TRE_DIR)/lib \
     -Wno-declaration-after-statement
 
 # Link TRE statically.
