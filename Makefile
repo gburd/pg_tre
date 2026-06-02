@@ -32,7 +32,7 @@ DATA         = sql/pg_tre--1.5.7.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge testregex
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
