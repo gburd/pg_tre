@@ -81,23 +81,30 @@ jobs:
       - name: Start PostgreSQL (Linux)
         if: runner.os == 'Linux'
         run: |
-          # The PGDG postgresql-NN package does not always leave a ready
-          # "main" cluster on the runner (a default cluster from the
-          # distro package may occupy the data dir / port). Drop any
-          # existing cluster for this version and create a fresh one so
-          # the postgresql@NN-main systemd unit exists and starts.
-          sudo pg_dropcluster --stop ${{ matrix.pg }} main 2>/dev/null || true
-          sudo pg_createcluster ${{ matrix.pg }} main --start
+          # The runner image ships a default cluster (often a different
+          # PG major) that already binds port 5432, so pg_createcluster
+          # places our new cluster on 5433 and the client tools, which
+          # default to 5432, can't reach it. Drop every existing cluster,
+          # then create ours pinned to 5432.
+          while read -r ver clu _; do
+              [ -n "$ver" ] && sudo pg_dropcluster --stop "$ver" "$clu" || true
+          done < <(pg_lsclusters -h)
+          sudo pg_createcluster ${{ matrix.pg }} main -p 5432 -- --auth-local=trust
+          sudo pg_ctlcluster ${{ matrix.pg }} main start
           sudo -u postgres psql -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
           sudo pg_ctlcluster ${{ matrix.pg }} main restart
-          # Wait for the socket to appear before creating the test DB.
+          # Wait for the server to accept connections before createdb.
           for i in $(seq 1 30); do
-              sudo -u postgres pg_isready -q && break
+              pg_isready -p 5432 -q && break
               sleep 1
           done
           sudo -u postgres createdb "$USER"
+        env:
+          PGPORT: "5432"
 
       - name: Run regression tests (3x for flake detection)
+        env:
+          PGPORT: "5432"
         run: |
           for i in 1 2 3; do
               echo "==> Regression run $i/3"

@@ -197,8 +197,10 @@ $(GRAMMAR_C) $(GRAMMAR_H): $(GRAMMAR_Y) $(LIME_BIN)
 	$(LIME_BIN) -q -T$(LIME_DIR)/limpar.c -d$(@D) $<
 
 # Dependency: our objects on TRE's config, shlib on the static archive.
+# Use $(shlib) (set by PGXS to pg_tre.so on Linux, pg_tre.dylib on macOS)
+# so the vendored TRE archive is built before linking on every platform.
 src/util/tre_match.o src/util/pattern_cache.o src/module.o: $(TRE_CONFIG_H)
-pg_tre.so: $(TRE_LIB)
+$(shlib): $(TRE_LIB)
 
 # Query path depends on generated grammar.
 src/query/tokens.o src/query/extract.o: $(GRAMMAR_H)
