@@ -212,41 +212,42 @@ jobs:
       - name: Start PostgreSQL
         env:
           PGPORT: "5432"
+          PGDATA: ${{ github.workspace }}/.pgdata
         run: |
-          # Drop any pre-existing cluster (it would hold port 5432) and
-          # create ours pinned to 5432 so client tools can reach it.
+          # Stop any pre-existing cluster so it can't hold port 5432.
           while read -r ver clu _; do
               [ -n "$ver" ] && sudo pg_dropcluster --stop "$ver" "$clu" || true
           done < <(pg_lsclusters -h)
-          sudo pg_createcluster 18 main -p 5432 -- --auth-local=trust
-          # Start via pg_ctl directly (not systemd): the systemd unit
-          # sandboxes the postmaster (ProtectHome) so a coverage-built
-          # pg_tre.so under /home/runner can't load or write .gcda files.
-          sudo pg_ctlcluster --skip-systemctl-redirect 18 main start
-          # Disable JIT: the coverage build (-O0, no PGXS cost tuning)
-          # inflates index-scan cost estimates past the JIT threshold, so
-          # EXPLAIN output in planner_auto would gain a JIT: block that the
-          # expected files (produced by the optimized matrix builds) lack.
-          sudo -u postgres psql \
-              -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';" \
-              -c "ALTER SYSTEM SET jit = off;"
-          sudo pg_ctlcluster --skip-systemctl-redirect 18 main restart
-          # run-regress.sh / make coverage connect as the OS user
-          # (runner) with no -U, so libpq needs a matching superuser role.
-          sudo -u postgres psql -c "CREATE ROLE \"$USER\" LOGIN SUPERUSER;" || true
-          # The coverage-instrumented postmaster runs as the postgres
-          # user and writes .gcda files back into the build tree, so make
-          # that tree writable by other users.
-          chmod -R a+rwX "$GITHUB_WORKSPACE" || true
+          export PATH=/usr/lib/postgresql/18/bin:$PATH
+          # Run the postmaster AS THE RUNNER USER (not postgres) from a
+          # runner-owned datadir.  GCC --coverage writes .gcda files to the
+          # absolute build-tree path baked into the objects; only the build
+          # tree's owner can create them, so the backend must run as that
+          # same user.  (systemd/pg_ctlcluster run as postgres and also
+          # sandbox /home, which blocked both .so load and .gcda writes.)
+          initdb -D "$PGDATA" --auth-local=trust --username="$USER"
+          # Disable JIT: the -O0 coverage build inflates index-scan cost
+          # estimates past the JIT threshold, adding a JIT: block to
+          # planner_auto's EXPLAIN that the optimized expected files lack.
+          {
+            echo "port = 5432"
+            echo "shared_preload_libraries = 'pg_tre'"
+            echo "jit = off"
+            echo "unix_socket_directories = '/tmp'"
+          } >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postmaster.log" -w start
           for i in $(seq 1 30); do
-              pg_isready -p 5432 -q && break
+              pg_isready -p 5432 -h /tmp -q && break
               sleep 1
           done
-          sudo -u postgres createdb "$USER"
+          # run-regress.sh connects as the OS user with no -U; ensure the
+          # default DB exists for that login.
+          createdb -h /tmp -p 5432 "$USER" || true
 
       - name: Run tests under coverage
         env:
           PGPORT: "5432"
+          PGHOST: "/tmp"
         run: |
           export PATH=/usr/lib/postgresql/18/bin:$PATH
           PG_CONFIG=$(which pg_config) make coverage
