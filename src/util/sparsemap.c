@@ -25,6 +25,7 @@
 
 #include <errno.h>
 #include "pg_tre/popcount.h"
+#include "pg_tre/sm_portability.h"
 #include "pg_tre/sparsemap.h"
 #include <stdarg.h>
 #include <stdbool.h>
@@ -1218,7 +1219,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset, const b
         __sm_bitvec_t target_bits = value ? w : ~w;
         __sm_bitvec_t remaining = target_bits;
         while (remaining) {
-          int k = __builtin_ctzll(remaining);
+          int k = SM_CTZ64(remaining);
           if (n == 0) {
             *offset = -1;
             return ret + (size_t)k;
@@ -1380,7 +1381,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
             to -= SM_BITS_PER_VECTOR;
             mask = from == 0 ? UINT64_MAX : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (from >= 64 ? 64 : from)));
             mw = (value ? w : ~w) & mask;
-            pc = popcountll(mw);
+            pc = SM_POPCOUNT64(mw);
             amt += pc;
             from = from > SM_BITS_PER_VECTOR ? from - SM_BITS_PER_VECTOR : 0;
           } else {
@@ -1390,7 +1391,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
             /* Create a mask for the range [from, to] and use popcount. */
             mask = to_mask & from_mask;
             mw = (value ? w : ~w) & mask;
-            pc = popcountll(mw);
+            pc = SM_POPCOUNT64(mw);
             amt += pc;
             rank->rem = mw >> (from > 63 ? 63 : from);
             goto done;
@@ -1504,7 +1505,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start, void (*scanne
         __sm_bitvec_t remaining = chunk->m_data[1 + __sm_chunk_get_position(chunk, (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
         size_t n = 0;
         while (remaining) {
-          int b = __builtin_ctzll(remaining);
+          int b = SM_CTZ64(remaining);
           if (skip > 0) {
             skip--;
             skipped++;
@@ -1639,7 +1640,7 @@ __sm_get_chunk_end(const sparsemap_t *map)
     __sm_chunk_init(&chunk, p);
     const size_t chunk_size = __sm_chunk_get_size(&chunk);
     if (i + 1 < count) {
-      __builtin_prefetch(p + chunk_size + SM_SIZEOF_OVERHEAD, 0, 1);
+      SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
     }
     p += chunk_size;
   }
@@ -1717,7 +1718,7 @@ __sm_get_size_impl(const sparsemap_t *map)
       break;
     }
     if (i + 1 < count) {
-      __builtin_prefetch(p + chunk_size + SM_SIZEOF_OVERHEAD, 0, 1);
+      SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
     }
     p += chunk_size;
     valid_count++;
@@ -2165,7 +2166,7 @@ __sm_coalesce_map(sparsemap_t *map)
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
     const size_t chunk_size = __sm_chunk_get_size(&chunk);
     if (count > 1) {
-      __builtin_prefetch(p + SM_SIZEOF_OVERHEAD + chunk_size + SM_SIZEOF_OVERHEAD, 0, 1);
+      SM_PREFETCH(p + SM_SIZEOF_OVERHEAD + chunk_size + SM_SIZEOF_OVERHEAD);
     }
     const size_t amt = __sm_coalesce_chunk(map, &chunk, offset, start, p, SM_IDX_MAX, false);
     if (amt > 0) {
@@ -3781,7 +3782,7 @@ sm_scan(const sparsemap_t *map, void (*scanner)(__sm_idx_t[], size_t, void *aux)
     __sm_chunk_init(&chunk, p);
     const size_t chunk_size = __sm_chunk_get_size(&chunk);
     if (i + 1 < count) {
-      __builtin_prefetch(p + chunk_size + SM_SIZEOF_OVERHEAD, 0, 1);
+      SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
     }
     const size_t skipped = __sm_chunk_scan(&chunk, start, scanner, skip, aux);
     if (skip) {
@@ -4694,7 +4695,7 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start, uint64_t lower_ex
     if (masked == 0) {
       continue;
     }
-    return vec_lo + (uint64_t)__builtin_ctzll(masked);
+    return vec_lo + (uint64_t)SM_CTZ64(masked);
   }
   return SM_IDX_MAX;
 }
@@ -4736,7 +4737,7 @@ __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start, uint64_t upper_ex
       w &= (~(__sm_bitvec_t)0) >> (SM_BITS_PER_VECTOR - bits_to_keep);
     }
     if (w == 0) continue;
-    return vec_lo + (uint64_t)(SM_BITS_PER_VECTOR - 1 - (size_t)__builtin_clzll(w));
+    return vec_lo + (uint64_t)(SM_BITS_PER_VECTOR - 1 - (size_t)SM_CLZ64(w));
   }
   return SM_IDX_MAX;
 }
@@ -5533,7 +5534,7 @@ sm_statistics(const sparsemap_t *map, sm_stats_t *stats)
         if (flags == SM_PAYLOAD_ONES) {
           stats->bits_in_sparse += SM_BITS_PER_VECTOR;
         } else if (flags == SM_PAYLOAD_MIXED) {
-          stats->bits_in_sparse += (uint64_t)__builtin_popcountll(chunk.m_data[pos]);
+          stats->bits_in_sparse += (uint64_t)SM_POPCOUNT64(chunk.m_data[pos]);
           pos++;
         }
       }
@@ -5729,10 +5730,10 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
 
     /* Prefetch next chunks */
     if (ai + 1 < a_count) {
-      __builtin_prefetch(ap + SM_SIZEOF_OVERHEAD + a_size, 0, 1);
+      SM_PREFETCH(ap + SM_SIZEOF_OVERHEAD + a_size);
     }
     if (bi + 1 < b_count) {
-      __builtin_prefetch(bp + SM_SIZEOF_OVERHEAD + b_size, 0, 1);
+      SM_PREFETCH(bp + SM_SIZEOF_OVERHEAD + b_size);
     }
 
     /* No overlap: a is entirely before b */
@@ -5987,7 +5988,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
 
     /* Prefetch next a chunk */
     if (ai + 1 < a_count) {
-      __builtin_prefetch(ap + SM_SIZEOF_OVERHEAD + a_size, 0, 1);
+      SM_PREFETCH(ap + SM_SIZEOF_OVERHEAD + a_size);
     }
 
     /* If b is exhausted, copy remaining a chunks */
@@ -6243,9 +6244,9 @@ sm_union(const sparsemap_t *a, const sparsemap_t *b)
 
     /* Prefetch next chunks for the merge loop. */
     if (ai + 1 < a_count)
-      __builtin_prefetch(ap + SM_SIZEOF_OVERHEAD + a_size, 0, 1);
+      SM_PREFETCH(ap + SM_SIZEOF_OVERHEAD + a_size);
     if (bi + 1 < b_count)
-      __builtin_prefetch(bp + SM_SIZEOF_OVERHEAD + b_size, 0, 1);
+      SM_PREFETCH(bp + SM_SIZEOF_OVERHEAD + b_size);
 
     /* ---- No overlap: a's remaining range ends before b's ---- */
     if (a_end <= b_cursor) {
@@ -6814,7 +6815,7 @@ __sm_rank_vec(sparsemap_t *map, uint64_t begin, uint64_t end, bool value, __sm_b
     __sm_chunk_init(&chunk, p);
     const size_t chunk_size = __sm_chunk_get_size(&chunk);
     if (i + 1 < count) {
-      __builtin_prefetch(p + chunk_size + SM_SIZEOF_OVERHEAD, 0, 1);
+      SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
     }
 
     /* Count all the set/unset inside this chunk within the range. */
