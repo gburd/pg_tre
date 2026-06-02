@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Renovate config for pg_tre. Runs on both GitHub (via Renovate app) and Codeberg (via the shared Renovate instance at https://codeberg.org/Renovate/renovate).",
+  "description": "Renovate config for pg_tre, the sole dependency bot on Codeberg (via the shared Renovate instance at https://codeberg.org/Renovate/renovate). On GitHub, Dependabot (.github/dependabot.yml) owns github-actions, docker, and gitsubmodule updates, so the Renovate app must NOT be enabled on the GitHub mirror or it will open duplicate PRs.",
   "extends": [
     "config:recommended",
     ":semanticCommits",
@@ -53,7 +53,6 @@
     "gomodTidy"
   ],
   "ignorePaths": [
-    "vendor/**",
     "bench/corpus.csv",
     "build/**"
   ]

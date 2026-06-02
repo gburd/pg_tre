@@ -1,0 +1,60 @@
+# Woodpecker CI for Codeberg.
+#
+# Builds the mdBook documentation site (doc/ -> doc-site/) and publishes
+# it to Codeberg Pages on every push to main.  This mirrors the GitHub
+# Pages `publish-docs` job in .github/workflows/ci.yml so the docs site
+# is live on both forges:
+#
+#   GitHub Pages:   https://gburd.github.io/pg_tre/
+#   Codeberg Pages: https://gregburd.codeberg.page/pg_tre/
+#
+# ONE-TIME SETUP (Codeberg web UI), required for the `deploy` step:
+#   1. Generate an SSH key pair:
+#        ssh-keygen -t ed25519 -N '' -f /tmp/cb_pages_key
+#   2. Codeberg repo -> Settings -> Deploy Keys -> Add Deploy Key:
+#        paste /tmp/cb_pages_key.pub, ENABLE "write access".
+#   3. Woodpecker (https://ci.codeberg.org) -> this repo -> Settings ->
+#        Secrets -> add secret `cb_pages_ssh_key` = contents of the
+#        PRIVATE key /tmp/cb_pages_key.
+#   4. Push to main; Woodpecker builds the book and force-publishes the
+#        rendered HTML to the `pages` branch, which Codeberg Pages serves.
+#
+# The build step runs on every push and PR (catches broken docs early);
+# the deploy step only runs on a push to main.
+
+when:
+  - event: [push, pull_request]
+    branch:
+      exclude: [pages]
+
+# mdBook reads no submodules; a shallow non-recursive clone is enough and
+# much faster (vendor/tre + vendor/lime are not needed to render docs).
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+
+steps:
+  build-docs:
+    image: rust:1-slim
+    commands:
+      - cargo install mdbook --version 0.4.52 --locked
+      - mdbook build
+      # Codeberg Pages serves whatever is on the `pages` branch; preserve
+      # a .domains marker so a future custom domain keeps working, and a
+      # .nojekyll-equivalent is unnecessary on Codeberg.
+      - test -f doc-site/index.html
+
+  deploy-pages:
+    image: codeberg.org/sugar700/plugin-codeberg-pages-deploy:1
+    settings:
+      folder: doc-site
+      branch: pages
+      ssh_key:
+        from_secret: cb_pages_ssh_key
+      git_config_name: Woodpecker CI
+      git_config_email: ci@pg-tre.invalid
+    when:
+      - event: push
+        branch: main
