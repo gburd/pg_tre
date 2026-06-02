@@ -37,6 +37,13 @@ jobs:
 
       - name: Install build deps
         run: |
+          # PG 17/18 are not in the default Ubuntu repos; add PGDG first.
+          sudo apt-get update
+          sudo apt-get install -y wget ca-certificates gnupg lsb-release
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
           sudo apt-get install -y \
             build-essential autoconf automake libtool gettext bison flex \

@@ -31,6 +31,14 @@ jobs:
       - name: Install build deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
+          # PG 17/18 are not in the default Ubuntu repos; add PGDG
+          # (apt.postgresql.org) before installing the versioned packages.
+          sudo apt-get update
+          sudo apt-get install -y wget ca-certificates gnupg lsb-release
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
           sudo apt-get install -y \
               autoconf automake libtool gettext autopoint m4 \
@@ -51,8 +59,15 @@ jobs:
         # The same -Wno-* knobs are needed because PG headers and pgxs's
         # default flags trip GCC false positives that we don't want to fix.
         run: |
-          PG_CONFIG=$(which pg_config) make \
-              PG_CFLAGS="-Werror -Wno-error=unused-parameter"
+          PG_CFLAGS="-Werror -Wno-error=unused-parameter"
+          # pgxs injects -fexcess-precision=standard (a GCC flag) into
+          # CFLAGS; Apple/LLVM clang on macOS doesn't accept it and emits
+          # -Wignored-optimization-argument, which -Werror would promote to
+          # a hard error.  Demote just that one warning on macOS.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+              PG_CFLAGS="$PG_CFLAGS -Wno-error=ignored-optimization-argument"
+          fi
+          PG_CONFIG=$(which pg_config) make PG_CFLAGS="$PG_CFLAGS"
 
       - name: Install
         run: sudo PG_CONFIG=$(which pg_config) make install
@@ -147,6 +162,13 @@ jobs:
 
       - name: Install build deps + lcov
         run: |
+          # PG 18 is not in the default Ubuntu repos; add PGDG first.
+          sudo apt-get update
+          sudo apt-get install -y wget ca-certificates gnupg lsb-release
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
           sudo apt-get install -y \
             autoconf automake libtool gettext autopoint m4 \
