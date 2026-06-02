@@ -305,24 +305,32 @@ coverage: coverage-build
 	@echo "==> Running tests under coverage"
 	@lcov --zerocounters --directory . 2>/dev/null || true
 	-bash scripts/run-regress.sh
+	@echo "==> Locating .gcda files written by the backend"
+	@find . -name '*.gcda' -printf '%p\t%u\n' 2>/dev/null | head -50 || true
 	@echo "==> Capturing coverage data"
 	@lcov --capture --directory . --output-file $(COVERAGE_INFO) \
 	    --base-directory $(shell pwd) --no-external --rc branch_coverage=1 \
-	    --ignore-errors mismatch 2>/dev/null || \
+	    --ignore-errors mismatch,empty 2>/dev/null || \
 	  lcov --capture --directory . --output-file $(COVERAGE_INFO) \
-	    --base-directory $(shell pwd) --no-external
+	    --base-directory $(shell pwd) --no-external \
+	    --ignore-errors empty 2>/dev/null || \
+	  : > $(COVERAGE_INFO)
 	@lcov --remove $(COVERAGE_INFO) \
 	    '*/test/*' '*/bench/*' '*/fuzz/*' '*/vendor/*' \
 	    '*/util/sparsemap.c' '*/query/tre_grammar.c' \
 	    --output-file $(COVERAGE_INFO) --rc branch_coverage=1 \
 	    --ignore-errors unused 2>/dev/null || true
 	@echo "==> Generating HTML report"
-	@genhtml $(COVERAGE_INFO) --output-directory $(COVERAGE_DIR) \
-	    --title "pg_tre Coverage" --legend --show-details \
-	    --rc branch_coverage=1
-	@echo ""
-	@echo "    Coverage report: $(COVERAGE_DIR)/index.html"
-	@lcov --summary $(COVERAGE_INFO) --rc branch_coverage=1
+	@if [ -s $(COVERAGE_INFO) ]; then \
+	    genhtml $(COVERAGE_INFO) --output-directory $(COVERAGE_DIR) \
+	        --title "pg_tre Coverage" --legend --show-details \
+	        --rc branch_coverage=1; \
+	    echo ""; \
+	    echo "    Coverage report: $(COVERAGE_DIR)/index.html"; \
+	    lcov --summary $(COVERAGE_INFO) --rc branch_coverage=1; \
+	else \
+	    echo "    No coverage data captured (empty $(COVERAGE_INFO))."; \
+	fi
 
 coverage-report:
 	@if [ ! -f $(COVERAGE_INFO) ]; then \
