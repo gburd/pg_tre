@@ -13,7 +13,7 @@
 #include <string.h>
 
 /* Lime-generated parser interface from tre_grammar.c */
-extern void *pg_tre_rx_parseAlloc(void *(*mallocProc)(size_t), struct TreParseCtx *ctx);
+extern void *pg_tre_rx_parseAlloc(void *(*mallocProc)(size_t));
 extern void pg_tre_rx_parseFree(void *parser, void (*freeProc)(void *));
 extern void pg_tre_rx_parse(void *parser, int token_kind, TreToken token_value,
 					  struct TreParseCtx *ctx);
@@ -52,7 +52,7 @@ tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 	 */
 	PG_TRY();
 	{
-		parser_v = pg_tre_rx_parseAlloc(malloc, ctx);
+		parser_v = pg_tre_rx_parseAlloc(malloc);
 		if (parser_v == NULL)
 			elog(ERROR, "failed to allocate regex parser");
 

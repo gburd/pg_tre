@@ -3248,7 +3248,7 @@ sm_remove(sparsemap_t *map, const uint64_t idx)
  * @return The index at which the bit was set.
  */
 static uint64_t
-__sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset, const __sm_bitvec_t *v)
+__sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset, const void *v)
 {
   /*
    * When v is non-NULL we've just added a new chunk, and we knew in advance that a
