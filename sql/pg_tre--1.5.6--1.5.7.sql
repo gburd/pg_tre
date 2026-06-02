@@ -1,0 +1,22 @@
+-- pg_tre 1.5.6 -> 1.5.7 upgrade.
+--
+-- No catalog changes and no C-level behavior change to the extension
+-- itself: 1.5.7 is a build/infrastructure maintenance release.
+--
+--   * CI build matrix is green across PostgreSQL 17/18 x GCC/clang x
+--     Linux/macOS (the macOS clang -Werror toolchain-flag mismatches and
+--     the Linux -Werror=missing-prototypes / LTO type-mismatch issues
+--     uncovered by the expanded matrix are fixed).
+--   * The coverage job now produces real .gcda data (the postmaster runs
+--     as the runner user so per-backend coverage counters are written)
+--     and uploads a non-empty report to Codecov.
+--   * Vendored sparsemap synced to upstream b409ccc: the SM_PREFETCH /
+--     SM_POPCOUNT64 / SM_CTZ64 / SM_CLZ64 portability shims replace the
+--     raw GCC/clang __builtin_* call sites (functionally identical on
+--     GCC/clang; adds MSVC intrinsics + SWAR fallbacks upstream).
+--   * Vendored Lime parser generator bumped v0.8.7 -> v0.9.3.  The
+--     generated C grammar and the public parser interface are unchanged.
+--
+-- No on-disk format change (remains v5); no REINDEX required.  This
+-- upgrade script is an intentional no-op that only bumps the recorded
+-- extension version.
