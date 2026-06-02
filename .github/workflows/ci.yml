@@ -81,11 +81,20 @@ jobs:
       - name: Start PostgreSQL (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo systemctl start postgresql@${{ matrix.pg }}-main || \
-              sudo service postgresql start
+          # The PGDG postgresql-NN package does not always leave a ready
+          # "main" cluster on the runner (a default cluster from the
+          # distro package may occupy the data dir / port). Drop any
+          # existing cluster for this version and create a fresh one so
+          # the postgresql@NN-main systemd unit exists and starts.
+          sudo pg_dropcluster --stop ${{ matrix.pg }} main 2>/dev/null || true
+          sudo pg_createcluster ${{ matrix.pg }} main --start
           sudo -u postgres psql -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
-          sudo systemctl restart postgresql@${{ matrix.pg }}-main || \
-              sudo service postgresql restart
+          sudo pg_ctlcluster ${{ matrix.pg }} main restart
+          # Wait for the socket to appear before creating the test DB.
+          for i in $(seq 1 30); do
+              sudo -u postgres pg_isready -q && break
+              sleep 1
+          done
           sudo -u postgres createdb "$USER"
 
       - name: Run regression tests (3x for flake detection)

@@ -449,10 +449,10 @@ write_single_leaf(Relation index, uint64 trigram_hash,
     if (total_sz > posting_leaf_budget())
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                 errmsg("pg_tre: posting for trigram %016" PRIx64 " "
+                 errmsg("pg_tre: posting for trigram %016llx "
                         "is %zu bytes (sparsemap %zu + payload %zu), "
                         "exceeds single-leaf budget %zu",
-                        trigram_hash, total_sz, sz, payload_sz,
+                        (unsigned long long) trigram_hash, total_sz, sz, payload_sz,
                         posting_leaf_budget()),
                  errhint("Multi-leaf posting trees land in a Phase 4 "
                          "follow-up; reduce fixture size or rebuild after "
