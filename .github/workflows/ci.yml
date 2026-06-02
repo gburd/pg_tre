@@ -200,17 +200,38 @@ jobs:
       - name: Build with coverage
         run: |
           export PATH=/usr/lib/postgresql/18/bin:$PATH
+          # coverage-build runs `make install` without sudo, so make the
+          # PG install dirs writable by the runner user first.
+          for d in "$(pg_config --pkglibdir)" "$(pg_config --sharedir)/extension" \
+                   "$(pg_config --pkglibdir)/bitcode"; do
+              sudo mkdir -p "$d"
+              sudo chown -R "$(id -u):$(id -g)" "$d"
+          done
           PG_CONFIG=$(which pg_config) make coverage-build
 
       - name: Start PostgreSQL
+        env:
+          PGPORT: "5432"
         run: |
-          sudo systemctl start postgresql || sudo service postgresql start
+          # Drop any pre-existing cluster (it would hold port 5432) and
+          # create ours pinned to 5432 so client tools can reach it.
+          while read -r ver clu _; do
+              [ -n "$ver" ] && sudo pg_dropcluster --stop "$ver" "$clu" || true
+          done < <(pg_lsclusters -h)
+          sudo pg_createcluster 18 main -p 5432 -- --auth-local=trust
+          sudo pg_ctlcluster 18 main start
           sudo -u postgres psql \
               -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
-          sudo systemctl restart postgresql || sudo service postgresql restart
+          sudo pg_ctlcluster 18 main restart
+          for i in $(seq 1 30); do
+              pg_isready -p 5432 -q && break
+              sleep 1
+          done
           sudo -u postgres createdb "$USER"
 
       - name: Run tests under coverage
+        env:
+          PGPORT: "5432"
         run: |
           export PATH=/usr/lib/postgresql/18/bin:$PATH
           PG_CONFIG=$(which pg_config) make coverage
