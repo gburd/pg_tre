@@ -65,7 +65,13 @@ jobs:
           # -Wignored-optimization-argument, which -Werror would promote to
           # a hard error.  Demote just that one warning on macOS.
           if [ "$RUNNER_OS" = "macOS" ]; then
-              PG_CFLAGS="$PG_CFLAGS -Wno-error=ignored-optimization-argument"
+              # pgxs injects -fexcess-precision=standard (a GCC optimization
+              # flag) and PG17's -Wno-cast-function-type-strict (a GCC warning
+              # flag) into CFLAGS. Apple/LLVM clang doesn't recognize either:
+              # the former emits -Wignored-optimization-argument, the latter
+              # -Wunknown-warning-option. -Werror would promote both to hard
+              # errors, so demote just those two on macOS.
+              PG_CFLAGS="$PG_CFLAGS -Wno-error=ignored-optimization-argument -Wno-error=unknown-warning-option"
           fi
           PG_CONFIG=$(which pg_config) make PG_CFLAGS="$PG_CFLAGS"
 

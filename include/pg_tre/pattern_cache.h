@@ -19,4 +19,17 @@ void tre_cache_init(void);
  */
 void *tre_cache_lookup(const char *pattern, int pattern_len);
 
+/*
+ * Like tre_cache_lookup(), but pins the returned compiled handle so the
+ * LRU cannot evict/free it until tre_cache_release() is called with the
+ * same handle.
+ */
+void *tre_cache_lookup_pinned(const char *pattern, int pattern_len);
+
+/*
+ * Release a pin taken by tre_cache_lookup_pinned(). Matches by pointer
+ * identity; a NULL handle is a no-op.
+ */
+void tre_cache_release(void *compiled);
+
 #endif /* TRE_CACHE_H */
