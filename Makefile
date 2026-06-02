@@ -185,9 +185,19 @@ $(TRE_LIB): $(TRE_CONFIG_H) $(TRE_PATCH_STAMP)
 # ------------------------------------------------------------------
 # Lime generator
 # ------------------------------------------------------------------
-$(LIME_BIN): $(LIME_DIR)/lime.c $(LIME_DIR)/src/emit_rust.c
+# As of Lime v0.9.x the CLI's main() references the C-skin "bison"
+# backend, the JIT-inline helpers, and one flex-skin symbol from
+# separate translation units, so the generator no longer builds from
+# lime.c alone.  We compile the minimum needed for C grammar output
+# (no Rust target -> emit_rust.c omitted; its stub stays in lime.c).
+LIME_SRCS = $(LIME_DIR)/lime.c \
+            $(LIME_DIR)/src/emit_c_skin_bison.c \
+            $(LIME_DIR)/src/jit_inline.c \
+            $(LIME_DIR)/src/lex/emit_c_skin_flex.c
+$(LIME_BIN): $(LIME_SRCS)
 	@echo "==> build Lime generator"
-	$(CC) -O2 -o $@ $^
+	$(CC) -O2 -I$(LIME_DIR)/include -I$(LIME_DIR)/src -I$(LIME_DIR)/src/lex \
+	    -o $@ $(LIME_SRCS)
 
 # ------------------------------------------------------------------
 # Grammar codegen
