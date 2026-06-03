@@ -46,10 +46,9 @@ jobs:
               | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential autoconf automake libtool gettext bison flex \
+            build-essential autoconf automake libtool gettext autopoint bison flex \
             wget ca-certificates gnupg systemd-coredump gdb \
-            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
-            postgresql-${{ matrix.pg }}-pgwalinspect
+            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
 
       - name: Install sanitizer toolchain (asan only)
         if: matrix.sanitize == 'asan'

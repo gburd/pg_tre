@@ -75,7 +75,7 @@ jobs:
             zlib1g-dev libicu-dev pkg-config \
             systemd-coredump gdb \
             clang-18 llvm-18 lcov \
-            autoconf automake libtool gettext m4
+            autoconf automake libtool gettext autopoint m4
 
       - name: Checkout pg_tre
         uses: actions/checkout@v4
