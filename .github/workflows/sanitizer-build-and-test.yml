@@ -61,6 +61,18 @@ jobs:
     name: PG${{ matrix.pg }} sanitizer
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Informational, non-blocking.  This job builds *all of PostgreSQL*
+    # from source with -fsanitize=address,undefined and then exercises
+    # pg_tre inside it.  On the current GitHub ubuntu-24.04 runner the
+    # ASan-instrumented `postgres --boot` aborts during initdb's own
+    # bootstrap -- before any pg_tre code is loaded -- even with ASLR
+    # disabled (vm.mmap_rnd_bits=28 + kernel.randomize_va_space=0).
+    # That is a PostgreSQL-under-ASan toolchain/runner-environment
+    # problem, not a pg_tre defect, and this job has never gone green.
+    # Kept for its diagnostic artifact while a known-good ASan+PG
+    # recipe is sorted out; see .agent/notes (ci-asan-followup).  Do
+    # not let it gate the build.
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
