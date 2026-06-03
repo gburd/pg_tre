@@ -80,9 +80,11 @@ jobs:
         run: |
           # Ubuntu 24.04 runners ship a kernel whose default
           # vm.mmap_rnd_bits (32) breaks ASan's shadow-memory mapping,
-          # aborting every ASan binary at startup.  Lower it to 28
-          # before the ASan-instrumented pg_tre.so is loaded.
+          # aborting every ASan binary at startup.  Lower it (and, on
+          # the newest kernels, disable ASLR outright) before the
+          # ASan-instrumented pg_tre.so is loaded.
           sudo sysctl -w vm.mmap_rnd_bits=28
+          sudo sysctl -w kernel.randomize_va_space=0
           # Suppressions live under test/lsan.supp.  detect_leaks=0
           # because PostgreSQL leaks transaction-lifetime allocations
           # by design (see test/lsan.supp).

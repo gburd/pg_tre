@@ -71,10 +71,15 @@ jobs:
         # Ubuntu 24.04 runners ship a kernel whose default
         # vm.mmap_rnd_bits (32) exceeds what ASan's shadow-memory
         # mapping supports, so every ASan-instrumented binary aborts
-        # at startup with "Aborted (core dumped)".  Lowering to 28
-        # is the upstream-recommended workaround.  Must run before
-        # any ASan binary (initdb, postgres --boot, the test cluster).
-        run: sudo sysctl -w vm.mmap_rnd_bits=28
+        # at startup with "Aborted (core dumped)" before any user code
+        # runs (no ASan report is written -- the runtime can't map its
+        # shadow region).  Lowering mmap_rnd_bits is the documented
+        # workaround; on the newest runner kernels that is still not
+        # enough, so we also disable ASLR outright for the job.  Both
+        # are kernel-global and persist across subsequent steps.
+        run: |
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          sudo sysctl -w kernel.randomize_va_space=0
 
       - name: Install build deps
         run: |
