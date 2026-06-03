@@ -67,6 +67,15 @@ jobs:
         pg: ["18.3"]
 
     steps:
+      - name: Lower ASLR entropy for AddressSanitizer (Ubuntu 24.04 runner)
+        # Ubuntu 24.04 runners ship a kernel whose default
+        # vm.mmap_rnd_bits (32) exceeds what ASan's shadow-memory
+        # mapping supports, so every ASan-instrumented binary aborts
+        # at startup with "Aborted (core dumped)".  Lowering to 28
+        # is the upstream-recommended workaround.  Must run before
+        # any ASan binary (initdb, postgres --boot, the test cluster).
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
       - name: Install build deps
         run: |
           sudo apt-get update
