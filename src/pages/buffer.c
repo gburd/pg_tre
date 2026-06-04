@@ -118,12 +118,30 @@ pg_tre_read(Relation index, BlockNumber blkno, PageTreKind expected_kind,
 
         /*
          * Accept any per-page format_version in the supported range.
-         * Future format-dependent decoders (see src/util/bloom.c, the
-         * apply_tuple_bloom_filter dispatch) branch on this value.
-         * pg_tre_upgrade_index() rewrites pages forward to LATEST.
+         * As of 1.6.0 the minimum is 6: pages written by pg_tre < 1.6
+         * embed sparsemap wire-version-1 (32-bit chunk offsets) blobs,
+         * which the vendored sparsemap 4.0.0 (wire-version-2, 64-bit
+         * offsets) cannot decode -- and which silently lost data for
+         * heaps larger than ~512 MB.  Such indexes must be rebuilt.
          */
         if (opq->format_version < PG_TRE_FORMAT_VERSION_MIN ||
             opq->format_version > PG_TRE_FORMAT_VERSION_LATEST)
+        {
+            if (opq->format_version < PG_TRE_FORMAT_VERSION_MIN)
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("pg_tre: index \"%s\" was built by pg_tre < 1.6 "
+                                "(on-disk format v%u) and is incompatible with "
+                                "this version",
+                                RelationGetRelationName(index),
+                                opq->format_version),
+                         errdetail("pg_tre 1.6 upgraded the embedded sparsemap to a "
+                                   "64-bit on-disk format that fixes silent data loss "
+                                   "for heaps larger than ~512 MB; the old format "
+                                   "cannot be read in place."),
+                         errhint("Rebuild the index: REINDEX INDEX %s; "
+                                 "(or REINDEX TABLE / DROP+CREATE INDEX).",
+                                 RelationGetRelationName(index))));
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("pg_tre: index %u page %u has format version %u, "
@@ -132,6 +150,7 @@ pg_tre_read(Relation index, BlockNumber blkno, PageTreKind expected_kind,
                             opq->format_version,
                             (uint32) PG_TRE_FORMAT_VERSION_MIN,
                             (uint32) PG_TRE_FORMAT_VERSION_LATEST)));
+        }
 
         if (expected_kind != PG_TRE_PAGE_INVALID &&
             opq->page_kind != (uint16) expected_kind)

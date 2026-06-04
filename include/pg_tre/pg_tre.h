@@ -29,17 +29,33 @@
  *            Only RANGE pages differ between v4 and v5; other page
  *            kinds are byte-identical.  Readers handle v<5 range
  *            pages (no header) for back-compat with 1.4.x indexes.
+ *   v6     - introduced in 1.6.0.  The vendored sparsemap was updated
+ *            to 4.0.0, whose serialized "wire" format widened the
+ *            per-chunk start offset from 32 to 64 bits (sparsemap
+ *            SM_WIRE_VERSION 1 -> 2).  This fixes silent DATA LOSS for
+ *            sparsemap indices >= 2^32 -- which pg_tre reaches on any
+ *            heap larger than ~512 MB, because TIDs are packed as
+ *            (block << 16) | offset.  The new sparsemap deliberately
+ *            cannot decode wire-version-1 blobs, so every page kind
+ *            that embeds a serialized sparsemap (posting leaves,
+ *            inline upper entries, range blooms) is format-
+ *            incompatible with v<6.
  *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
+ * BREAKING CHANGE: indexes built with v5 or earlier (pg_tre < 1.6)
+ *   must be REINDEXed -- the sparsemap 4.0.0 wire format is not
+ *   backward-readable, and pre-1.6 indexes on large heaps may already
+ *   have lost data to the 32-bit-offset bug.  pg_tre_read() rejects
+ *   pre-v6 pages with a REINDEX hint rather than returning wrong rows.
  *
- * Two-version reader policy: any version in [PG_TRE_FORMAT_VERSION_MIN,
+ * Reader policy: any version in [PG_TRE_FORMAT_VERSION_MIN,
  * PG_TRE_FORMAT_VERSION_LATEST] is readable on the page-decode side.
- * The meta page tracks min_page_format_version across all pages of an
- * index; pg_tre_upgrade_index() rewrites pages forward and bumps that
- * field when every page is at LATEST.  See doc/onpage_format.md.
+ * As of 1.6.0 MIN == LATEST == 6: there is no in-place upgrade from
+ * v<6 because the embedded sparsemap bytes are unreadable; REINDEX is
+ * the migration (and the data-loss remedy).  See doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 5
-#define PG_TRE_FORMAT_VERSION_MIN    3
+#define PG_TRE_FORMAT_VERSION_LATEST 6
+#define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the
  * version we initialise meta pages with at create time".  All new
@@ -49,7 +65,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.5.8"
+#define PG_TRE_VERSION_STRING "pg_tre 1.6.0"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;

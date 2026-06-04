@@ -223,19 +223,35 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file,
 #define SM_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
 
 typedef uint64_t __sm_bitvec_t;
-typedef uint32_t __sm_idx_t;
+
+/*
+ * __sm_idx_t: the type of a chunk-start offset -- the absolute,
+ * chunk-aligned bit index that prefixes every chunk in the serialized
+ * buffer.  It is uint64_t so the map addresses the full 64-bit index
+ * space the public API advertises (SM_IDX_MAX == UINT64_MAX).
+ *
+ * This is an internal type, never exposed in <sm.h>; the public API
+ * uses uint64_t for every bit location.  It exists as the single point
+ * of control for the on-disk index width: SM_SIZEOF_OVERHEAD and the
+ * __sm_load_idx / __sm_store_idx helpers all derive their width from
+ * sizeof(__sm_idx_t), so the serialized format width is defined in
+ * exactly one place.  (A 32-bit __sm_idx_t was the cause of the
+ * pre-4.0 truncation bug for indices >= 2^32; keeping the width here,
+ * named, makes it a one-line, reviewable decision.)
+ */
+typedef uint64_t __sm_idx_t;
 
 /*
  * __sm_bitvec_unaligned_t: a 64-bit unsigned alias that the compiler
  * treats as having 1-byte alignment, so loads and stores through a
  * pointer of this type emit unaligned-safe code.
  *
- * Required because chunk descriptors land at offset 4 mod 8 within
- * the map's data buffer (the chunk-count header is 4 bytes, then
- * chunks start, each prefixed by a 4-byte start-offset).  The chunk
- * descriptor (__sm_bitvec_t) thus lives at a 4-aligned, not 8-aligned,
- * address.  Without this typedef, accesses through chunk->m_data trip
- * UBSan and would trap on strict-alignment cpus.
+ * The on-disk layout prefixes each chunk with an 8-byte start offset
+ * (and the map with an 8-byte chunk-count header), so chunk
+ * descriptors are naturally 8-aligned within m_data.  This typedef is
+ * retained as defense-in-depth: a caller-supplied wrap() buffer may be
+ * arbitrarily aligned, and accessing the descriptor through a plain
+ * uint64_t * would then trip UBSan and trap on strict-alignment cpus.
  *
  * gcc and clang lower the unaligned access to whatever the platform
  * requires (a single load on x86_64, two byte-shuffled half-loads on
@@ -255,11 +271,10 @@ typedef struct {
 /*
  * Unaligned-safe load and store helpers.
  *
- * sparsemap's on-disk layout places __sm_idx_t (uint32_t) values at
- * 4-byte boundaries and __sm_bitvec_t (uint64_t) values at 8-byte
- * boundaries within m_data, so the underlying addresses are always
- * sufficiently aligned for the cpu -- on every platform sparsemap
- * has been tested on, the casts work.
+ * sparsemap's on-disk layout places the 8-byte chunk-count header and
+ * the 8-byte per-chunk start offsets at 8-byte boundaries within
+ * m_data, naturally aligned for the cpu.  A caller-supplied wrap()
+ * buffer, however, may be arbitrarily aligned.
  *
  * However, the pre-fix idiom (`*(__sm_idx_t *)p`) is technically UB
  * under the strict-aliasing rule when `p` is `uint8_t *`, and UBSan
@@ -301,7 +316,8 @@ __sm_store_u32(uint8_t *p, const uint32_t v)
 }
 
 enum __SM_CHUNK_INFO {
-	/* metadata overhead: 4 bytes for __sm_chunk_t count */
+	/* metadata overhead: sizeof(__sm_idx_t) bytes for the chunk-start
+	 * offset / chunk-count header (8 bytes) */
 	SM_SIZEOF_OVERHEAD = sizeof(__sm_idx_t),
 
 	/* number of bits that can be stored in a __sm_bitvec_t */
@@ -368,7 +384,7 @@ typedef struct {
 	} pivot;
 
 	struct {
-		uint64_t start;
+		__sm_idx_t start;
 		uint64_t end;
 		uint8_t *p;
 		size_t size;
@@ -431,11 +447,11 @@ typedef struct {
  * RLE chunks are immutable by design - any modification that would create gaps or
  * partial runs causes the chunk to be converted to sparse encoding.
  */
-#define SM_RLE_FLAGS      0x4000000000000000 /* Bits 63:62 = 01 */
-#define SM_RLE_FLAGS_MASK 0xC000000000000000 /* Mask for bits 63:62 */
+#define SM_RLE_FLAGS      0x4000000000000000ULL /* Bits 63:62 = 01 */
+#define SM_RLE_FLAGS_MASK 0xC000000000000000ULL /* Mask for bits 63:62 */
 #define SM_RLE_CAPACITY_MASK \
-	0x3FFFFFFF80000000            /* Mask for bits 61:31 (capacity) */
-#define SM_RLE_LENGTH_MASK 0x7FFFFFFF /* Mask for bits 30:0 (length) */
+	0x3FFFFFFF80000000ULL         /* Mask for bits 61:31 (capacity) */
+#define SM_RLE_LENGTH_MASK 0x7FFFFFFFULL /* Mask for bits 30:0 (length) */
 
 /**
  * @brief Checks if the given chunk is flagged as RLE encoded.
@@ -673,7 +689,7 @@ struct __attribute__((aligned(8))) sparsemap {
 	 */
 	size_t m_cursor_offset;
 	size_t m_cursor_chunk_index;
-	uint32_t m_cursor_start_idx;
+	__sm_idx_t m_cursor_start_idx;
 	uint8_t m_cursor_valid;
 	/*
 	 * m_alloc_kind tags how m_data was provisioned.  See enum
@@ -1005,9 +1021,10 @@ __sm_chunk_increase_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
 			if (flags == SM_PAYLOAD_NONE) {
-				*p &=
-				    ~((__sm_bitvec_t)SM_PAYLOAD_ONES << j * 2);
-				*p |= (__sm_bitvec_t)SM_PAYLOAD_ZEROS << j * 2;
+				*p &= (uint8_t)~(
+				    (__sm_bitvec_t)SM_PAYLOAD_ONES << j * 2);
+				*p |= (uint8_t)((__sm_bitvec_t)SM_PAYLOAD_ZEROS
+				    << j * 2);
 				increased += SM_BITS_PER_VECTOR;
 				if (increased + initial_capacity == capacity) {
 					__sm_assert(__sm_chunk_get_capacity(
@@ -1614,7 +1631,7 @@ done:;
  */
 static size_t
 __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
-    void (*scanner)(uint32_t[], size_t, void *aux), size_t skip, void *aux)
+    void (*scanner)(uint64_t[], size_t, void *aux), size_t skip, void *aux)
 {
 	/* RLE fast path */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
@@ -1629,7 +1646,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 		const size_t scan_start = skip;
 
 		/* Process in batches using same buffer size as sparse code */
-		uint32_t buffer[SM_BITS_PER_VECTOR];
+		uint64_t buffer[SM_BITS_PER_VECTOR];
 
 		for (size_t i = scan_start; i < length;) {
 			size_t batch_size = SM_BITS_PER_VECTOR;
@@ -1656,7 +1673,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 	size_t pos = 0;
 	size_t skipped = 0;
 	register uint8_t *p = (uint8_t *)chunk->m_data;
-	uint32_t buffer[SM_BITS_PER_VECTOR];
+	uint64_t buffer[SM_BITS_PER_VECTOR];
 	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
 		if (*p == 0) {
 			/* All 4 flag slots in this byte are ZEROS -- no set bits, advance position. */
@@ -3500,7 +3517,8 @@ sm_capacity_remaining(const sm_t *map)
 	if (map->m_capacity == 0) {
 		return (100.0);
 	}
-	return ((1.0 - (map->m_data_used / (double)map->m_capacity)) * 100.0);
+	return ((1.0 - ((double)map->m_data_used / (double)map->m_capacity)) *
+	    100.0);
 }
 
 /**
@@ -3586,7 +3604,7 @@ sm_contains(sm_t *map, uint64_t idx)
  * @param[in] coalesce A flag indicating whether to perform chunk coalescing.
  * @return The index of the bit that was unset.
  */
-static uint64_t
+static __sm_idx_t
 __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 {
 	const uint64_t ret_idx = idx;
@@ -3760,7 +3778,7 @@ sm_remove(sm_t *map, const uint64_t idx)
  *
  * @return The index at which the bit was set.
  */
-static uint64_t
+static __sm_idx_t
 __sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
     const void *v)
 {
@@ -3770,7 +3788,7 @@ __sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
 	 * store the bit pattern, so given that we allocated the space ahead of time we
 	 * don't need to allocate it now.
 	 */
-	size_t pos = v ? -1 : 0;
+	size_t pos = v ? (size_t)-1 : 0;
 	__sm_chunk_t chunk;
 	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 
@@ -3788,7 +3806,7 @@ __sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
 			    SM_SIZEOF_OVERHEAD + pos * sizeof(__sm_bitvec_t);
 			__sm_insert_data(map, offset, (uint8_t *)&vec,
 			    sizeof(__sm_bitvec_t));
-			pos = -1;
+			pos = (size_t)-1;
 		}
 		__sm_chunk_set_bit(&chunk, idx - start, &pos);
 		break;
@@ -3828,7 +3846,7 @@ __sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
  * @param[in] coalesce A flag indicating whether to attempt chunk coalescing.
  * @return Returns the adjusted index within the sparse bit map or the given index.
  */
-static uint64_t
+static __sm_idx_t
 __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce)
 {
 	__sm_chunk_t chunk;
@@ -4332,7 +4350,7 @@ sm_cardinality(sm_t *map)
  * @param[in] aux Auxiliary data to pass to the scanning function.
  */
 void
-sm_scan(const sm_t *map, void (*scanner)(__sm_idx_t[], size_t, void *aux),
+sm_scan(const sm_t *map, void (*scanner)(uint64_t[], size_t, void *aux),
     size_t skip, void *aux)
 {
 	uint8_t *p = __sm_get_chunk_data(map, 0);
@@ -5343,7 +5361,7 @@ sm_is_empty(const sm_t *map)
  * found, or SM_IDX_MAX if none.  Pass UINT64_MAX as lower_excl to
  * mean "start before bit 0" (return the first bit at or after start).
  */
-static uint64_t
+static __sm_idx_t
 __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
     uint64_t lower_excl)
 {
@@ -5401,7 +5419,7 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
  * Iterate set bits in `chunk` (anchored at absolute `start`),
  * looking for the highest set bit strictly less than `upper_excl`.
  */
-static uint64_t
+static __sm_idx_t
 __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start,
     uint64_t upper_excl)
 {
@@ -6358,7 +6376,7 @@ sm_shrink_to_fit(sm_t *map)
  * ------------------------------------------------------------------- */
 
 #define SM_WIRE_MAGIC      0x30316d73u /* "sm10" little-endian */
-#define SM_WIRE_VERSION    1u
+#define SM_WIRE_VERSION    2u
 #define SM_WIRE_HEADER_LEN 16u
 #define SM_WIRE_FLAG_LE    0x01u
 
@@ -7860,8 +7878,9 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 		if (vec > 0) {
 			/* The returned vec had some set bits, let's move forward in the map as
 			 * much as possible (max: 64 bit positions). */
-			const int max =
-			    len > SM_BITS_PER_VECTOR ? SM_BITS_PER_VECTOR : len;
+			const int max = (int)(len > SM_BITS_PER_VECTOR ?
+				SM_BITS_PER_VECTOR :
+				len);
 			while (amt < max && (vec & 1 << amt)) {
 				amt++;
 			}
