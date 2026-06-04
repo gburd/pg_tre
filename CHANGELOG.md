@@ -6,6 +6,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.6.1] - 2026-06-04 - documentation honesty about scale limits
+
+Documentation-only release.  No extension code changes; same
+on-disk format as 1.6.0; no ALTER EXTENSION work; no REINDEX.
+
+### What and why
+
+A production user (501 k-row email-archive, see
+[`LIMITATIONS.md`](LIMITATIONS.md) for the field report) hit two
+operational failures on the 1.6.0 REINDEX path:
+
+1. **Lock-hung `REINDEX`** on a 501 k-row text column for ~6
+   minutes, blocking ingest -- the build path has uncancellable
+   stretches inside `pg_qsort`, the inner `sm_add_grow` loops,
+   and the multi-leaf write paths.
+2. **OOM-killed the postgres cgroup** while building a body-text
+   index -- `ambuild` collects every trigram emission in memory
+   (`bstate->entries[]`, `repalloc_huge`-grown), so peak RSS
+   scales with `total_emissions`, not `distinct_trigrams`.  ~6 GB
+   is normal for 500 k email bodies.  The 1.6.0 sparsemap fix
+   removed the silent data-loss overflow, but does not address
+   the resident-set model.
+
+Neither failure is a 1.6.x regression; both have been latent
+since at least 1.4.x.  But the README and CHANGELOG implied
+production-readiness at scales where the build is not viable,
+and the user reasonably tried it.  This release closes that gap
+in words; **1.7.0** addresses cancellability and a bounded-error
+build ceiling, **1.8.0** introduces a `tuplesort`-based build
+that actually scales.
+
+### Documentation
+
+- New `LIMITATIONS.md` at the repo root: explicit sizing table,
+  upgrade/REINDEX guidance, and the verbatim field report.
+- README: prominent **Scale limits** callout under Features,
+  build-memory note + **Deployment recommendations** under
+  Performance, and a corrected feature claim -- the bullet that
+  said `REINDEX CONCURRENTLY safe` was wrong (`amcanbuildconcurrently`
+  is `false` today; CIC/RIC fall back to the lock-heavy form).
+- `doc/perf.md`: new "Build memory model" section with the
+  per-emission formula and a sizing table.
+
+### Operator guidance
+
+For heaps where 1.6.0's REINDEX is not viable, the recommended
+path is `DROP INDEX` + recreate during a maintenance window with
+generous `maintenance_work_mem` -- and first reconfirm whether
+the column actually warrants pg_tre at all.  Email-archive style
+workloads are typically better served by `pg_trgm` GIN +
+`tsvector` BM25 with pg_tre reserved for true edit-distance/regex
+fuzzy matching over an already-narrowed subset.  See
+[`LIMITATIONS.md`](LIMITATIONS.md) for details.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.6.0] - 2026-06-04 - sparsemap 4.0.0: data-loss fix (REINDEX REQUIRED)
 
 **Breaking, correctness-critical release.**  On-disk format bumped

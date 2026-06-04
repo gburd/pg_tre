@@ -53,13 +53,26 @@ flowchart TD
   heap-block ranges; sparsemap trigram postings AND/OR merge
   candidates; per-tuple blooms refine without heap I/O.
 - **Native access method** — real `IndexAmRoutine`, planner cost
-  estimation, WAL-logged, VACUUM-aware, `REINDEX CONCURRENTLY` safe.
+  estimation, WAL-logged, VACUUM-aware.
 - **UTF-8 codepoint trigrams** — CJK, accents, emoji indexed
   correctly; ASCII stays zero-overhead.
 - **DoS protection** — configurable caps on NFA states, compile
   time, per-match time.
 - **Backward compatible** — legacy `tre_amatch*` UDFs from 0.1.0
   preserved.
+
+> **⚠️ Scale limits — read before deploying.** The index build is
+> currently fully in-memory and grows with *total trigram
+> emissions*, not distinct trigrams.  On large natural-text
+> columns it can exhaust memory and OOM-kill the postgres cgroup,
+> and `REINDEX` holds heavy locks during an uncancellable build.
+> **`CREATE INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` are not
+> yet supported.**  pg_tre is presently a good fit for
+> small-to-medium corpora (≈ ≤100k rows of long text, or ≤500k
+> rows of short text); for larger text-search workloads pair
+> `pg_trgm` GIN + `tsvector` BM25 and use pg_tre selectively.
+> See [`LIMITATIONS.md`](LIMITATIONS.md) for the memory-sizing
+> table, the upgrade/REINDEX caveats, and a real field report.
 
 ---
 
@@ -513,6 +526,30 @@ than pg_trgm because of the per-tuple bloom payload and
 uncompressed upper-tree layout.  Multi-leaf posting trees
 (landed in 1.0.0) and payload compression (a v2.0 follow-up)
 close most of this.
+
+**Build memory (important at scale)**: the build is in-memory;
+peak RSS ≈ `24 B × avg_trigrams_per_row × N_rows` plus
+`~56 B × N_rows`.  500k rows of ~1 KB bodies ≈ 6 GB of working
+set and will OOM a typical cgroup.  A `tuplesort`-based build
+that bounds memory by `maintenance_work_mem` is planned for
+v1.8.0.  Until then, size builds from the table in
+[`LIMITATIONS.md`](LIMITATIONS.md).
+
+### Deployment recommendations
+
+- **Small/medium corpora** (≤100k long-text rows, ≤500k
+  short-text rows): pg_tre as a primary index is fine.
+- **Large text-search workloads** (≥500k long-text rows, ≥1M
+  rows): use `pg_trgm` GIN for substring/`LIKE` and `tsvector`
+  BM25 for ranked full-text; reach for pg_tre only where
+  edit-distance/regex fuzzy matching is the actual requirement,
+  ideally over an already-filtered subset.  This
+  pg_trgm + BM25 + selective-pg_tre split is what production
+  email-archive deployments run today.
+- **Upgrades that require REINDEX** (e.g. 1.5.x → 1.6.0): on
+  large columns, prefer `DROP INDEX` + recreate in a maintenance
+  window over in-place `REINDEX`, and confirm the column still
+  warrants pg_tre at all.  See [`LIMITATIONS.md`](LIMITATIONS.md).
 
 ---
 

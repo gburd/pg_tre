@@ -1,0 +1,12 @@
+-- pg_tre 1.6.0 -> 1.6.1 upgrade.
+--
+-- 1.6.1 is a documentation-only release.  No SQL-catalog
+-- changes; same on-disk format (v6) as 1.6.0; no REINDEX
+-- required.  The new files (LIMITATIONS.md, the README and
+-- doc/perf.md sizing additions, the CHANGELOG entry) explain
+-- the build-time memory and lock-hold realities that one
+-- production user hit on the 1.6.0 REINDEX path.  See
+--
+--     ALTER EXTENSION pg_tre UPDATE TO '1.6.1';
+--
+-- after installing the new shared library.  Intentionally empty.

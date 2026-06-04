@@ -150,4 +150,38 @@ input via `\copy` instead.
   the underlying executor times are 1–3 ms lower per query for
   the small ones.
 
-*Last updated: 1.4.1 (1M-row benchmark).*
+*Last updated: 1.6.1 (sizing model added).*
+
+## Build memory model (added in 1.6.1)
+
+pg_tre's `ambuild` is currently fully in-memory.  Peak resident
+working set is dominated by:
+
+```
+peak_RSS ≈
+    ( emitted_trigrams_per_row × N_rows × 24 B )      -- entries[]
+  + ( N_rows × ~56 B )                                -- tid_blooms hashtable + bloom
+  + ( pass-B palloc fragmentation, often ~hundreds of MB )
+  + ( shared_buffers + work_mem + libpq + ... )       -- the rest of the backend
+```
+
+Concrete sizing for common shapes:
+
+| corpus | trigrams/row | rows | entries[] alone | total build RSS (typical) |
+|---|---|---|---|---|
+| URLs / IDs (~50 chars) | ~50 | 500k | 600 MB | ~1 GB |
+| short subjects | ~80 | 500k | 1 GB | ~1.5 GB |
+| email bodies (~1 KB) | ~500 | 100k | 1.2 GB | ~2 GB |
+| email bodies (~1 KB) | ~500 | 500k | **6 GB** | **~8 GB** |
+| long documents (~10 KB) | ~5000 | 100k | 12 GB | OOM under typical cgroups |
+
+`pg_tre.min_trigram_freq` (default 1, no skip) reduces output
+index size on common trigrams, but **does not reduce build
+memory** — every emission is still collected before the skip
+decision.
+
+A `tuplesort`-based build that bounds peak RSS by
+`maintenance_work_mem` (the same disk-spill pattern btree/gin/gist
+use) is planned for **v1.8.0**.  See
+[`LIMITATIONS.md`](../LIMITATIONS.md) for the full sizing
+discussion, the upgrade/REINDEX caveats, and a real field report.
