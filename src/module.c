@@ -40,6 +40,7 @@ int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
 int  pg_tre_tier3_max_candidates   = 50000;
+int  pg_tre_build_max_entries_mb   = 4096;   /* 0 = unlimited */
 
 void
 pg_tre_init_guc(void)
@@ -113,6 +114,22 @@ pg_tre_init_guc(void)
         " disable tier-3 entirely; INT_MAX disables this safety belt.",
         &pg_tre_tier3_max_candidates,
         50000, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
+
+    DefineCustomIntVariable("pg_tre.build_max_entries_mb",
+        "Abort an index build whose in-memory trigram-entry array would"
+        " exceed this many megabytes (0 = unlimited).",
+        "ambuild collects every trigram emission into an in-memory array"
+        " before sorting; peak size is ~24 bytes * total_emissions, which"
+        " scales with corpus size, not distinct trigrams.  On large"
+        " natural-text columns this can exhaust memory and OOM-kill the"
+        " postgres process.  When the array would grow past this ceiling"
+        " the build fails cleanly with ERRCODE_PROGRAM_LIMIT_EXCEEDED"
+        " instead of being SIGKILLed.  Raise it for a one-off large build"
+        " on a box with enough RAM, or set 0 to disable the guard.  A"
+        " tuplesort-based build that bounds memory by maintenance_work_mem"
+        " is planned for v1.8.0.",
+        &pg_tre_build_max_entries_mb,
+        4096, 0, INT_MAX, PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 
     /*
      * Cardinality-aware build (1.2.1+).  Posting trees with fewer

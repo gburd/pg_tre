@@ -64,15 +64,17 @@ flowchart TD
 > **⚠️ Scale limits — read before deploying.** The index build is
 > currently fully in-memory and grows with *total trigram
 > emissions*, not distinct trigrams.  On large natural-text
-> columns it can exhaust memory and OOM-kill the postgres cgroup,
-> and `REINDEX` holds heavy locks during an uncancellable build.
-> **`CREATE INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` are not
-> yet supported.**  pg_tre is presently a good fit for
-> small-to-medium corpora (≈ ≤100k rows of long text, or ≤500k
-> rows of short text); for larger text-search workloads pair
-> `pg_trgm` GIN + `tsvector` BM25 and use pg_tre selectively.
-> See [`LIMITATIONS.md`](LIMITATIONS.md) for the memory-sizing
-> table, the upgrade/REINDEX caveats, and a real field report.
+> columns it can exhaust memory; as of 1.7.0 the build fails
+> cleanly (`pg_tre.build_max_entries_mb`, default 4 GB) instead
+> of OOM-killing the server.  Use **`CREATE INDEX CONCURRENTLY`
+> / `REINDEX CONCURRENTLY`** (both supported and verified) to
+> avoid holding a heavy lock during the build.  pg_tre is
+> presently a good fit for small-to-medium corpora (≈ ≤100k rows
+> of long text, or ≤500k rows of short text); for larger
+> text-search workloads pair `pg_trgm` GIN + `tsvector` BM25 and
+> use pg_tre selectively.  See [`LIMITATIONS.md`](LIMITATIONS.md)
+> for the memory-sizing table, upgrade/REINDEX caveats, and a
+> real field report.
 
 ---
 

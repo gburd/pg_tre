@@ -63,28 +63,40 @@ A fix is planned: a `tuplesort`-based build (the same disk-spill
 pattern btree/gin/gist use) that bounds working set by
 `maintenance_work_mem` instead of by dataset size.  Tracked for
 **v1.8.0**.  In the meantime, the sizing table above is what to
-plan for.
+plan for — and as of **v1.7.0** a build that would blow past
+`pg_tre.build_max_entries_mb` (default 4096 MB) **fails cleanly
+with `ERRCODE_PROGRAM_LIMIT_EXCEEDED`** and an actionable hint,
+instead of being SIGKILLed by the OOM killer.  Raise the GUC on a
+host with enough RAM for a one-off large build, or set it to 0 to
+disable the guard.
 
 ## Cancellability
 
-Until v1.7.0, three phases of `ambuild` are uncancellable for
-seconds-to-minutes at a time:
+As of v1.7.0 the build is cancellable throughout: the sort uses
+`qsort_interruptible`, and the per-TID `sm_add_grow` loops and
+multi-leaf write paths carry `CHECK_FOR_INTERRUPTS`.  A
+`pg_cancel_backend()` / SIGINT during a build is now honored
+within a second or so on any phase.  (Before 1.7.0 the
+`pg_qsort` over the entries array — 5–60s on a large corpus —
+and the posting-build loops were uncancellable.)
 
-- the `pg_qsort` over the entries array (typically 5–60s),
-- the `sm_add_grow` per-TID loops inside `pg_tre_posting_build_finish`,
-- the multi-leaf write paths.
+**Avoid the heavy-lock build entirely**: plain `REINDEX` takes
+`AccessExclusiveLock` on the index and blocks the table's writes
+for the whole build (this is what stalled ingest for 6 minutes
+in the field report below).  Use the CONCURRENTLY variants
+instead — they are **supported and verified** (CIC/RIC are
+generic in PostgreSQL; pg_tre's build works correctly under the
+two-phase MVCC-snapshot protocol, confirmed by a CIC-result ==
+seq-scan-ground-truth cross-check):
 
-**`REINDEX` on a pg_tre index holds heavy locks (`AccessExclusiveLock`
-on the index, blocking writes via `RowExclusiveLock` on the heap)
-during the entire build**, so a build that takes 6 minutes blocks
-that table's writes for 6 minutes.  Cancelling with
-`pg_cancel_backend()` or SIGINT is honored only at the next
-`CHECK_FOR_INTERRUPTS` boundary.
+```sql
+CREATE INDEX CONCURRENTLY my_tre ON t USING tre (body);
+REINDEX INDEX CONCURRENTLY my_tre;
+```
 
-`CREATE INDEX CONCURRENTLY` and `REINDEX CONCURRENTLY` are not yet
-supported by the AM (`amcanbuildconcurrently = false`); attempting
-either falls back to the lock-heavy form.  Both are tracked for
-**v1.7.0**.
+CONCURRENTLY builds are slower in wall-clock and still subject to
+the build-memory model below, but they do not block concurrent
+reads/writes on the table.
 
 ## Format-version upgrades
 
@@ -129,8 +141,13 @@ pattern internally; the gap was that pg_tre's own README/
 CHANGELOG implied the indexes were production-ready.  This file
 exists to close that gap.
 
-The two failure modes map directly to v1.7.0 (cancellability +
-bounded-error build) and v1.8.0 (tuplesort-based build).  Both
-are committed work, but if your workload looks like Agora's,
-plan as if pg_tre is small/medium-corpus territory until 1.8.0
-ships and qualifies on a real >500k-row body corpus.
+The two failure modes are addressed as follows: the **lock stall
+is avoidable today** with `REINDEX INDEX CONCURRENTLY` /
+`CREATE INDEX CONCURRENTLY` (supported and verified), and v1.7.0
+adds full build cancellability plus the
+`pg_tre.build_max_entries_mb` ceiling so the OOM becomes a clean
+error.  v1.8.0's `tuplesort`-based build is the structural fix
+that lets large body corpora build within `maintenance_work_mem`.
+Until 1.8.0 ships and qualifies on a real >500k-row body corpus,
+plan as if pg_tre is small/medium-corpus territory for long-text
+columns, per the table at the top.

@@ -134,12 +134,21 @@ typedef struct UpperIterState
 
 /*
  * qsort comparison function: order by (trigram_hash, tid, position).
+ *
+ * Arg-variant signature so it can be used with qsort_interruptible()
+ * (PG18 port.h), which checks for query cancellation periodically
+ * during the sort.  The build collects every trigram emission and
+ * sorts the whole array; on a large corpus that is tens of millions
+ * of entries and was previously an uncancellable multi-second to
+ * multi-minute stretch under the REINDEX lock.
  */
 static int
-compare_trigram_tid(const void *a, const void *b)
+compare_trigram_tid(const void *a, const void *b, void *arg)
 {
     const TrigramTidEntry *ea = (const TrigramTidEntry *) a;
     const TrigramTidEntry *eb = (const TrigramTidEntry *) b;
+
+    (void) arg;
 
     if (ea->trigram_hash < eb->trigram_hash)
         return -1;
@@ -277,10 +286,41 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
              * exceeding palloc's 1 GB MaxAllocSize cap. */
             if (bstate->n_entries >= bstate->entries_alloced)
             {
-                bstate->entries_alloced *= 2;
+                Size new_alloced = (Size) bstate->entries_alloced * 2;
+                Size new_bytes = new_alloced * sizeof(TrigramTidEntry);
+
+                /*
+                 * Bounded-build guard (1.7.0): the entries array is the
+                 * dominant build-memory term and grows with total
+                 * trigram emissions, not distinct trigrams.  Fail with a
+                 * clear error before we exhaust memory and get SIGKILLed
+                 * by the OOM killer / cgroup.  pg_tre.build_max_entries_mb
+                 * == 0 disables the guard.
+                 */
+                if (pg_tre_build_max_entries_mb > 0 &&
+                    new_bytes > (Size) pg_tre_build_max_entries_mb * 1024 * 1024)
+                    ereport(ERROR,
+                            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                             errmsg("pg_tre: index build exceeded "
+                                    "pg_tre.build_max_entries_mb (%d MB)",
+                                    pg_tre_build_max_entries_mb),
+                             errdetail("The in-memory trigram-entry array "
+                                       "reached %zu entries (~%zu MB) and "
+                                       "would need to double.",
+                                       (size_t) bstate->n_entries,
+                                       (size_t) ((Size) bstate->entries_alloced
+                                                 * sizeof(TrigramTidEntry)
+                                                 / (1024 * 1024))),
+                             errhint("Raise pg_tre.build_max_entries_mb on a "
+                                     "host with enough RAM, raise "
+                                     "pg_tre.min_trigram_freq, index a "
+                                     "smaller/shorter column, or use pg_trgm "
+                                     "+ tsvector for this workload.  See "
+                                     "LIMITATIONS.md.")));
+
+                bstate->entries_alloced = (int) new_alloced;
                 bstate->entries = (TrigramTidEntry *)
-                    repalloc_huge(bstate->entries,
-                             bstate->entries_alloced * sizeof(TrigramTidEntry));
+                    repalloc_huge(bstate->entries, new_bytes);
             }
 
             entry = &bstate->entries[bstate->n_entries++];
@@ -371,10 +411,25 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     bstate.heap = heap;
     bstate.index = index;
     bstate.indexInfo = indexInfo;
+    /*
+     * Start with 1M entries (~24 MB).  Honor pg_tre.build_max_entries_mb
+     * for the initial allocation too, so a low cap fails cleanly at
+     * setup rather than only at the first doubling (the growth path in
+     * extract_trigrams enforces the same ceiling).
+     */
     bstate.entries_alloced = 1024 * 1024;  /* start with 1M entries */
+    if (pg_tre_build_max_entries_mb > 0)
+    {
+        Size cap_entries = (Size) pg_tre_build_max_entries_mb * 1024 * 1024
+                           / sizeof(TrigramTidEntry);
+        if (cap_entries == 0)
+            cap_entries = 1;
+        if ((Size) bstate.entries_alloced > cap_entries)
+            bstate.entries_alloced = (int) cap_entries;
+    }
     bstate.entries = (TrigramTidEntry *)
         MemoryContextAllocHuge(CurrentMemoryContext,
-                               bstate.entries_alloced * sizeof(TrigramTidEntry));
+                               (Size) bstate.entries_alloced * sizeof(TrigramTidEntry));
     bstate.n_entries = 0;
 
     /* Phase 5: initialize per-TID bloom hash table. */
@@ -393,10 +448,12 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
             (errmsg("pg_tre: collected %d trigram entries from %.0f heap tuples",
                     bstate.n_entries, bstate.heap_tuples)));
 
-    /* Step 4: sort by (hash, tid). */
+    /* Step 4: sort by (hash, tid).  qsort_interruptible() honors
+     * query cancellation during the sort (see compare_trigram_tid). */
     if (bstate.n_entries > 0)
-        qsort(bstate.entries, bstate.n_entries, sizeof(TrigramTidEntry),
-              compare_trigram_tid);
+        qsort_interruptible(bstate.entries, bstate.n_entries,
+                            sizeof(TrigramTidEntry),
+                            compare_trigram_tid, NULL);
 
     /* Step 5: process sorted entries and build posting trees. */
     oldcxt = MemoryContextSwitchTo(bstate.tmpctx);

@@ -80,6 +80,7 @@ extern int  pg_tre_match_timeout_ms;
 extern bool pg_tre_fastupdate;
 extern bool pg_tre_tuple_bloom_enable;
 extern int  pg_tre_tier3_max_candidates;
+extern int  pg_tre_build_max_entries_mb;
 
 /* Initialization entry points. */
 extern void pg_tre_init_guc(void);
