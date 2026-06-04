@@ -6,6 +6,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.0] - 2026-06-04 - cancellable builds, memory ceiling, CIC verified
+
+No on-disk format change (still v6); same indexes, no REINDEX.
+Directly addresses the two operational failures from the 1.6
+field report (see `LIMITATIONS.md`).
+
+### Added
+
+- **`pg_tre.build_max_entries_mb`** (PGC_USERSET, default 4096,
+  `GUC_UNIT_MB`, 0 = unlimited).  The build's in-memory
+  trigram-entry array grows with total trigram emissions, not
+  distinct trigrams, so large natural-text columns could exhaust
+  memory and get the postgres process SIGKILLed by the OOM
+  killer.  When the array would exceed this ceiling the build now
+  fails with `ERRCODE_PROGRAM_LIMIT_EXCEEDED` and an actionable
+  hint -- **the server stays up**.  The ceiling is enforced at
+  both the initial allocation and every doubling.  Verified: a
+  4 MB cap on a 20k-row build errors cleanly; the default lets
+  normal builds through.
+
+### Changed
+
+- **Index builds are now cancellable throughout.**  The sort over
+  the entries array uses `qsort_interruptible` (PG18) instead of
+  `qsort`; combined with the existing `CHECK_FOR_INTERRUPTS` in
+  the per-TID `sm_add_grow` loops and multi-leaf write paths,
+  `pg_cancel_backend()` / SIGINT during a build is honored within
+  ~a second on any phase.  Previously the `pg_qsort` step (5-60s
+  on a large corpus) and the posting-build loops were
+  uncancellable, which is why a stuck `REINDEX` held its lock for
+  minutes in the field report.
+
+### Fixed (documentation)
+
+- **`CREATE INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` are
+  supported and verified.**  CIC/RIC are generic in PostgreSQL
+  (no per-AM flag gates them); pg_tre's build is correct under
+  the two-phase MVCC-snapshot protocol, confirmed by a
+  CIC-result == seq-scan-ground-truth cross-check and a RIC
+  round-trip.  The 1.6.1 docs incorrectly said "not yet
+  supported" (based on a mis-diagnosed, non-existent
+  `amcanbuildconcurrently` flag); README and LIMITATIONS.md are
+  corrected.  **Using the CONCURRENTLY variants avoids the heavy
+  build lock that stalled ingest in the field report** -- this is
+  the recommended path for rebuilding pg_tre indexes on a live
+  table.
+
+### Still pending (v1.8.0)
+
+- A `tuplesort`-based build that bounds peak memory by
+  `maintenance_work_mem` (disk-spill, like btree/gin/gist).
+  1.7.0 makes the OOM a clean error and the lock avoidable; 1.8.0
+  makes large body-corpus builds actually fit in bounded memory.
+
+### Verified
+
+- 21/21 regression; `wal_audit.sh` 3/3; `replication.sh` 4/4.
+- CIC + RIC correctness cross-check.
+- Bounded-memory guard fires cleanly without OOM; server
+  survives.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.6.1] - 2026-06-04 - documentation honesty about scale limits
 
 Documentation-only release.  No extension code changes; same

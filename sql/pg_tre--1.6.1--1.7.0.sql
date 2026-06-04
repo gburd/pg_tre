@@ -1,0 +1,13 @@
+-- pg_tre 1.6.1 -> 1.7.0 upgrade.
+--
+-- No SQL-catalog changes; same on-disk format (v6); no REINDEX
+-- required.  1.7.0 makes index builds cancellable (interruptible
+-- sort + CHECK_FOR_INTERRUPTS in the posting-build loops), adds the
+-- pg_tre.build_max_entries_mb ceiling so an oversized build fails
+-- cleanly instead of OOM-killing the server, and documents that
+-- CREATE INDEX CONCURRENTLY / REINDEX CONCURRENTLY are supported and
+-- verified (use them to avoid the heavy build lock).
+--
+--     ALTER EXTENSION pg_tre UPDATE TO '1.7.0';
+--
+-- after installing the new shared library.  Intentionally empty.
