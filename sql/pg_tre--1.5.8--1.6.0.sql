@@ -1,0 +1,25 @@
+-- pg_tre 1.5.8 -> 1.6.0 upgrade.
+--
+-- 1.6.0 has no SQL-catalog changes, but it is a BREAKING on-disk
+-- change: the vendored sparsemap was updated to 4.0.0, whose
+-- serialized format widened per-chunk start offsets from 32 to 64
+-- bits.  That fixes silent DATA LOSS for sparsemap indices >= 2^32 --
+-- which pg_tre reaches on any heap larger than ~512 MB (TIDs are
+-- packed as (block << 16) | offset).
+--
+-- The new sparsemap wire format is NOT backward-readable, so indexes
+-- built by pg_tre < 1.6 cannot be read in place.  After installing the
+-- new shared library and running this update, you MUST rebuild every
+-- pg_tre index:
+--
+--     REINDEX INDEX  your_tre_index;        -- per index, or
+--     REINDEX TABLE  your_table;            -- all indexes on a table
+--
+-- pg_tre_read() rejects pre-v6 pages with a clear error + REINDEX hint
+-- rather than returning wrong rows, so an un-rebuilt index fails loudly
+-- on first scan instead of silently.
+--
+-- REINDEX is also the remedy for any data already lost to the
+-- 32-bit-offset bug on large heaps under pg_tre < 1.6.
+--
+-- Intentionally empty (no catalog DDL).

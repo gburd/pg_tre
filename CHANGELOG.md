@@ -6,6 +6,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.6.0] - 2026-06-04 - sparsemap 4.0.0: data-loss fix (REINDEX REQUIRED)
+
+**Breaking, correctness-critical release.**  On-disk format bumped
+to **v6**; indexes built by pg_tre < 1.6 **must be REINDEXed**.
+
+### Why this is mandatory
+
+The vendored sparsemap is updated to **4.0.0**, which widens the
+per-chunk start offset in the serialized format from 32 to 64 bits
+(sparsemap `SM_WIRE_VERSION` 1 -> 2).  The 32-bit offset **silently
+lost data for sparsemap indices >= 2^32**.  pg_tre packs heap TIDs
+as `(block << 16) | offset`, so **any heap larger than ~512 MB**
+(> 65536 blocks) reaches indices >= 2^32 -- meaning pg_tre indexes
+on large tables under pg_tre < 1.6 could silently miss rows.
+4.0.0 fixes the bug; REINDEX regenerates correct index data.
+
+### Upgrade
+
+```sql
+ALTER EXTENSION pg_tre UPDATE TO '1.6.0';   -- after installing the new .so
+REINDEX TABLE your_table;                    -- rebuild every pg_tre index
+```
+
+The sparsemap 4.0.0 wire format is intentionally **not**
+backward-readable (`sm_deserialize` returns NULL on the old
+format), so there is no online in-place migration: REINDEX is the
+migration *and* the data-loss remedy.  `pg_tre_read()` rejects
+pre-v6 pages with `ERRCODE_FEATURE_NOT_SUPPORTED` and a REINDEX
+hint, so an un-rebuilt index **fails loudly on first scan** rather
+than returning wrong rows.
+
+### Changed
+
+- Vendored sparsemap 4.0.0 (`sm.c`/`sm.h`) via the upstream
+  `contrib/pg_tre_sync.sh`.  Kept the `sparsemap_t -> sm_t`
+  compatibility typedef.
+- `PG_TRE_FORMAT_VERSION_LATEST` and `..._MIN` are both 6.
+
+### Verified
+
+- 21/21 regression tests pass.
+- `wal_audit.sh` 3/3; `replication.sh` 4/4.
+- New indexes report on-disk format v6
+  (`pg_tre_index_format_status`).
+- The >= 2^32 data-loss fix is covered at the sparsemap layer by
+  upstream `tests/test_large_index.c`; a full >512 MB pg_tre
+  large-heap test is recommended for the nightly lane (too slow
+  for the regression suite).
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.5.8] - 2026-06-03 - sparsemap 3.0.1, version-string fix, CI green
 
 Maintenance release.  Same on-disk format as 1.5.7
