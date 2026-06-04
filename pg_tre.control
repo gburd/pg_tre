@@ -1,5 +1,5 @@
 comment = 'Approximate-regex index for PostgreSQL (TRE-backed, native AM)'
-default_version = '1.6.0'
+default_version = '1.6.1-dev'
 module_pathname = '$libdir/pg_tre'
 relocatable = false
 superuser = true
