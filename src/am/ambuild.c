@@ -44,6 +44,8 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/tuplesort.h"
+#include "utils/typcache.h"
 
 #include "pg_tre/amapi.h"
 #include "pg_tre/bloom.h"
@@ -103,10 +105,17 @@ typedef struct BuildState
     Relation    index;
     IndexInfo  *indexInfo;
 
-    /* In-memory accumulator. */
-    TrigramTidEntry *entries;
-    int         n_entries;
-    int         entries_alloced;
+    /*
+     * Sort of (trigram_hash, tid, position) tuples via PostgreSQL's
+     * tuplesort, so peak build memory is bounded by
+     * maintenance_work_mem (disk-spilled) instead of growing with the
+     * total number of trigram emissions.  Each tuple is encoded as a
+     * fixed 20-byte big-endian bytea whose memcmp order equals the
+     * historical (hash, packed_tid, position) order.  See
+     * encode_entry()/decode_entry().
+     */
+    Tuplesortstate *sortstate;
+    int64       n_emitted;       /* total tuples put into the sort */
 
     /* Per-TID bloom tracking (Phase 5). */
     tid_bloom_hash *tid_blooms;
@@ -133,43 +142,68 @@ typedef struct UpperIterState
 } UpperIterState;
 
 /*
- * qsort comparison function: order by (trigram_hash, tid, position).
+ * Tuplesort entry encoding.
  *
- * Arg-variant signature so it can be used with qsort_interruptible()
- * (PG18 port.h), which checks for query cancellation periodically
- * during the sort.  The build collects every trigram emission and
- * sorts the whole array; on a large corpus that is tens of millions
- * of entries and was previously an uncancellable multi-second to
- * multi-minute stretch under the REINDEX lock.
+ * Each (trigram_hash, tid, position) tuple is encoded as a fixed
+ * 20-byte big-endian byte string and sorted as a `bytea` Datum.
+ * Because every encoded value is exactly 20 bytes, bytea's
+ * memcmp-based ordering is identical to the historical
+ * (trigram_hash ASC, ItemPointerCompare(tid) ASC, position ASC)
+ * comparator:
+ *
+ *   bytes  0..7  : trigram_hash          (uint64, big-endian)
+ *   bytes  8..15 : pg_tre_pack_tid(tid)  (uint64, big-endian)
+ *   bytes 16..19 : position              (uint32, big-endian)
+ *
+ * pg_tre_pack_tid() is (block << 16) | offset, so the numeric order
+ * of the packed value equals ItemPointerCompare order, and big-endian
+ * bytes preserve that under memcmp.
  */
-static int
-compare_trigram_tid(const void *a, const void *b, void *arg)
+#define PG_TRE_SORTKEY_LEN 20
+
+static inline void
+encode_entry(uint8 *buf, uint64 trigram_hash, uint64 packed_tid,
+             uint32 position)
 {
-    const TrigramTidEntry *ea = (const TrigramTidEntry *) a;
-    const TrigramTidEntry *eb = (const TrigramTidEntry *) b;
+    buf[0]  = (uint8) (trigram_hash >> 56);
+    buf[1]  = (uint8) (trigram_hash >> 48);
+    buf[2]  = (uint8) (trigram_hash >> 40);
+    buf[3]  = (uint8) (trigram_hash >> 32);
+    buf[4]  = (uint8) (trigram_hash >> 24);
+    buf[5]  = (uint8) (trigram_hash >> 16);
+    buf[6]  = (uint8) (trigram_hash >> 8);
+    buf[7]  = (uint8) (trigram_hash);
+    buf[8]  = (uint8) (packed_tid >> 56);
+    buf[9]  = (uint8) (packed_tid >> 48);
+    buf[10] = (uint8) (packed_tid >> 40);
+    buf[11] = (uint8) (packed_tid >> 32);
+    buf[12] = (uint8) (packed_tid >> 24);
+    buf[13] = (uint8) (packed_tid >> 16);
+    buf[14] = (uint8) (packed_tid >> 8);
+    buf[15] = (uint8) (packed_tid);
+    buf[16] = (uint8) (position >> 24);
+    buf[17] = (uint8) (position >> 16);
+    buf[18] = (uint8) (position >> 8);
+    buf[19] = (uint8) (position);
+}
 
-    (void) arg;
-
-    if (ea->trigram_hash < eb->trigram_hash)
-        return -1;
-    if (ea->trigram_hash > eb->trigram_hash)
-        return 1;
-
-    /* Same hash: order by TID, then position. */
-    {
-        ItemPointerData tid_a = ea->tid;
-        ItemPointerData tid_b = eb->tid;
-        int cmp = ItemPointerCompare(&tid_a, &tid_b);
-        if (cmp != 0)
-            return cmp;
-
-        /* Same TID: order by position. */
-        if (ea->position < eb->position)
-            return -1;
-        if (ea->position > eb->position)
-            return 1;
-        return 0;
-    }
+static inline void
+decode_entry(const uint8 *buf, uint64 *trigram_hash, uint64 *packed_tid,
+             uint32 *position)
+{
+    *trigram_hash =
+          ((uint64) buf[0]  << 56) | ((uint64) buf[1]  << 48)
+        | ((uint64) buf[2]  << 40) | ((uint64) buf[3]  << 32)
+        | ((uint64) buf[4]  << 24) | ((uint64) buf[5]  << 16)
+        | ((uint64) buf[6]  << 8)  | ((uint64) buf[7]);
+    *packed_tid =
+          ((uint64) buf[8]  << 56) | ((uint64) buf[9]  << 48)
+        | ((uint64) buf[10] << 40) | ((uint64) buf[11] << 32)
+        | ((uint64) buf[12] << 24) | ((uint64) buf[13] << 16)
+        | ((uint64) buf[14] << 8)  | ((uint64) buf[15]);
+    *position =
+          ((uint32) buf[16] << 24) | ((uint32) buf[17] << 16)
+        | ((uint32) buf[18] << 8)  | ((uint32) buf[19]);
 }
 
 /*
@@ -277,57 +311,59 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
         if (ring_n == 3)
         {
             uint64  trigram_hash;
-            TrigramTidEntry *entry;
+            uint8   key[PG_TRE_SORTKEY_LEN];
+            struct
+            {
+                int32 vl_len_;
+                uint8 data[PG_TRE_SORTKEY_LEN];
+            }       wrap;
 
             trigram_hash = pg_tre_hash_trigram_cp(ring);
 
-            /* Grow array if needed.  Uses _huge variants because
-             * a 1M-row corpus emits ~50M trigram entries (~1.2 GB),
-             * exceeding palloc's 1 GB MaxAllocSize cap. */
-            if (bstate->n_entries >= bstate->entries_alloced)
-            {
-                Size new_alloced = (Size) bstate->entries_alloced * 2;
-                Size new_bytes = new_alloced * sizeof(TrigramTidEntry);
+            /*
+             * Bounded-build guard: the build is bounded in *memory* by
+             * maintenance_work_mem (tuplesort spills to disk), but a
+             * runaway emission count still consumes temp disk.  Keep
+             * the 1.7.0 contract -- fail cleanly with a clear error
+             * rather than filling the temp tablespace -- by capping the
+             * total emission count at the same byte-equivalent ceiling.
+             * pg_tre.build_max_entries_mb == 0 disables the guard.
+             */
+            bstate->n_emitted++;
+            if (pg_tre_build_max_entries_mb > 0 &&
+                (uint64) bstate->n_emitted * sizeof(TrigramTidEntry) >
+                    (uint64) pg_tre_build_max_entries_mb * 1024 * 1024)
+                ereport(ERROR,
+                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                         errmsg("pg_tre: index build exceeded "
+                                "pg_tre.build_max_entries_mb (%d MB)",
+                                pg_tre_build_max_entries_mb),
+                         errdetail("The build emitted %lld trigram tuples "
+                                   "(~%lld MB of sort input).",
+                                   (long long) bstate->n_emitted,
+                                   (long long) ((uint64) bstate->n_emitted
+                                                * sizeof(TrigramTidEntry)
+                                                / (1024 * 1024))),
+                         errhint("Raise pg_tre.build_max_entries_mb on a "
+                                 "host with enough RAM/temp space, raise "
+                                 "pg_tre.min_trigram_freq, index a "
+                                 "smaller/shorter column, or use pg_trgm "
+                                 "+ tsvector for this workload.  See "
+                                 "LIMITATIONS.md.")));
 
-                /*
-                 * Bounded-build guard (1.7.0): the entries array is the
-                 * dominant build-memory term and grows with total
-                 * trigram emissions, not distinct trigrams.  Fail with a
-                 * clear error before we exhaust memory and get SIGKILLed
-                 * by the OOM killer / cgroup.  pg_tre.build_max_entries_mb
-                 * == 0 disables the guard.
-                 */
-                if (pg_tre_build_max_entries_mb > 0 &&
-                    new_bytes > (Size) pg_tre_build_max_entries_mb * 1024 * 1024)
-                    ereport(ERROR,
-                            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                             errmsg("pg_tre: index build exceeded "
-                                    "pg_tre.build_max_entries_mb (%d MB)",
-                                    pg_tre_build_max_entries_mb),
-                             errdetail("The in-memory trigram-entry array "
-                                       "reached %zu entries (~%zu MB) and "
-                                       "would need to double.",
-                                       (size_t) bstate->n_entries,
-                                       (size_t) ((Size) bstate->entries_alloced
-                                                 * sizeof(TrigramTidEntry)
-                                                 / (1024 * 1024))),
-                             errhint("Raise pg_tre.build_max_entries_mb on a "
-                                     "host with enough RAM, raise "
-                                     "pg_tre.min_trigram_freq, index a "
-                                     "smaller/shorter column, or use pg_trgm "
-                                     "+ tsvector for this workload.  See "
-                                     "LIMITATIONS.md.")));
-
-                bstate->entries_alloced = (int) new_alloced;
-                bstate->entries = (TrigramTidEntry *)
-                    repalloc_huge(bstate->entries, new_bytes);
-            }
-
-            entry = &bstate->entries[bstate->n_entries++];
-            entry->trigram_hash = trigram_hash;
-            entry->tid = *tid;
-            /* Position is the byte offset where the first codepoint starts. */
-            entry->position = (uint32) ring_pos[0];
+            /*
+             * Encode (hash, packed_tid, position) as a fixed 20-byte
+             * big-endian bytea and hand it to tuplesort, which copies
+             * the by-reference Datum into its own storage / tape -- so
+             * the stack buffer is safe to reuse for the next emission
+             * (no per-emission palloc).
+             */
+            encode_entry(key, trigram_hash, pg_tre_pack_tid(tid),
+                         (uint32) ring_pos[0]);
+            SET_VARSIZE(&wrap, VARHDRSZ + PG_TRE_SORTKEY_LEN);
+            memcpy(wrap.data, key, PG_TRE_SORTKEY_LEN);
+            tuplesort_putdatum(bstate->sortstate,
+                               PointerGetDatum(&wrap), false);
 
             /* Phase 5: add trigram to the per-tuple bloom. */
             if (bloom != NULL)
@@ -400,37 +436,42 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     PgTrePostingBuilder *current_builder;
     BlockNumber root_upper;
     UpperIterState iter_state;
-    int         i;
 
     /* Phase 2 real build starts here. */
 
     /* Step 1: initialize empty meta page. */
     pg_tre_build_empty(index);
 
-    /* Step 2: set up in-memory accumulator. */
+    /* Step 2: set up the disk-spillable sort and bloom tracking. */
     bstate.heap = heap;
     bstate.index = index;
     bstate.indexInfo = indexInfo;
+    bstate.n_emitted = 0;
+
     /*
-     * Start with 1M entries (~24 MB).  Honor pg_tre.build_max_entries_mb
-     * for the initial allocation too, so a low cap fails cleanly at
-     * setup rather than only at the first doubling (the growth path in
-     * extract_trigrams enforces the same ceiling).
+     * Sort (trigram_hash, tid, position) tuples encoded as fixed
+     * 20-byte big-endian bytea Datums (see encode_entry).  tuplesort
+     * bounds peak memory by maintenance_work_mem and spills the rest
+     * to temp files, so the build no longer grows resident memory
+     * with the corpus size.  bytea's memcmp ordering reproduces the
+     * historical (hash, packed_tid, position) order exactly.
      */
-    bstate.entries_alloced = 1024 * 1024;  /* start with 1M entries */
-    if (pg_tre_build_max_entries_mb > 0)
     {
-        Size cap_entries = (Size) pg_tre_build_max_entries_mb * 1024 * 1024
-                           / sizeof(TrigramTidEntry);
-        if (cap_entries == 0)
-            cap_entries = 1;
-        if ((Size) bstate.entries_alloced > cap_entries)
-            bstate.entries_alloced = (int) cap_entries;
+        TypeCacheEntry *tc = lookup_type_cache(BYTEAOID, TYPECACHE_LT_OPR);
+
+        if (!OidIsValid(tc->lt_opr))
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("pg_tre: no btree \"<\" operator for bytea")));
+
+        bstate.sortstate = tuplesort_begin_datum(BYTEAOID,
+                                                 tc->lt_opr,
+                                                 InvalidOid,   /* no collation */
+                                                 false,        /* nulls last */
+                                                 maintenance_work_mem,
+                                                 NULL,         /* not parallel */
+                                                 TUPLESORT_NONE);
     }
-    bstate.entries = (TrigramTidEntry *)
-        MemoryContextAllocHuge(CurrentMemoryContext,
-                               (Size) bstate.entries_alloced * sizeof(TrigramTidEntry));
-    bstate.n_entries = 0;
 
     /* Phase 5: initialize per-TID bloom hash table. */
     bstate.tid_blooms = tid_bloom_create(CurrentMemoryContext, 1024, NULL);
@@ -445,15 +486,13 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                            build_callback, &bstate, NULL);
 
     ereport(NOTICE,
-            (errmsg("pg_tre: collected %d trigram entries from %.0f heap tuples",
-                    bstate.n_entries, bstate.heap_tuples)));
+            (errmsg("pg_tre: collected %lld trigram entries from %.0f heap tuples",
+                    (long long) bstate.n_emitted, bstate.heap_tuples)));
 
-    /* Step 4: sort by (hash, tid).  qsort_interruptible() honors
-     * query cancellation during the sort (see compare_trigram_tid). */
-    if (bstate.n_entries > 0)
-        qsort_interruptible(bstate.entries, bstate.n_entries,
-                            sizeof(TrigramTidEntry),
-                            compare_trigram_tid, NULL);
+    /* Step 4: finish the sort.  tuplesort_performsort() spills to disk
+     * as needed and checks for interrupts internally, so the sort is
+     * both memory-bounded (maintenance_work_mem) and cancellable. */
+    tuplesort_performsort(bstate.sortstate);
 
     /* Step 5: process sorted entries and build posting trees. */
     oldcxt = MemoryContextSwitchTo(bstate.tmpctx);
@@ -472,24 +511,42 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         int positions_alloced = 0;
         int n_positions = 0;
         uint64 current_tid_packed = UINT64_MAX;   /* sentinel: no TID yet */
+        TrigramTidEntry cur;
+        Datum   sort_datum;
+        bool    sort_isnull;
 
-        for (i = 0; i < bstate.n_entries; i++)
+        while (tuplesort_getdatum(bstate.sortstate, true, false,
+                                  &sort_datum, &sort_isnull, NULL))
         {
+            bytea  *kb = DatumGetByteaPP(sort_datum);
+            uint64  dec_hash;
+            uint64  dec_tid;
+            uint32  dec_pos;
+            TrigramTidEntry *entry = &cur;
+            uint64  tid_packed;
+            bool    new_trigram;
+            bool    new_tid;
+
             /*
-             * Allow CREATE INDEX [CONCURRENTLY] to be cancelled.
-             * On large heaps n_entries can be in the tens of millions
-             * and this loop runs for minutes; without an interrupt
-             * check, pg_cancel_backend / pg_terminate_backend are
-             * silently ignored.  Same root cause as the autovacuum
-             * runaway fix in pending.c.
+             * Allow CREATE INDEX [CONCURRENTLY] to be cancelled.  On
+             * large heaps this readout runs for minutes; without an
+             * interrupt check pg_cancel_backend / pg_terminate_backend
+             * are silently ignored.
              */
             CHECK_FOR_INTERRUPTS();
 
-            TrigramTidEntry *entry = &bstate.entries[i];
-            uint64 tid_packed = pg_tre_pack_tid(&entry->tid);
-            bool new_trigram = (current_builder == NULL ||
-                               entry->trigram_hash != current_hash);
-            bool new_tid = (new_trigram || tid_packed != current_tid_packed);
+            Assert(!sort_isnull);
+            Assert(VARSIZE_ANY_EXHDR(kb) == PG_TRE_SORTKEY_LEN);
+            decode_entry((const uint8 *) VARDATA_ANY(kb),
+                         &dec_hash, &dec_tid, &dec_pos);
+            cur.trigram_hash = dec_hash;
+            pg_tre_unpack_tid(dec_tid, &cur.tid);
+            cur.position = dec_pos;
+
+            tid_packed = dec_tid;
+            new_trigram = (current_builder == NULL ||
+                           entry->trigram_hash != current_hash);
+            new_tid = (new_trigram || tid_packed != current_tid_packed);
 
             if (new_trigram)
             {
@@ -751,7 +808,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         bstate.tid_blooms = NULL;
     }
 
-    pfree(bstate.entries);
+    tuplesort_end(bstate.sortstate);
 
     /* Return build result. */
     result = (IndexBuildResult *) palloc0(sizeof(IndexBuildResult));

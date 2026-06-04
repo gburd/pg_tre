@@ -40,7 +40,7 @@ int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
 int  pg_tre_tier3_max_candidates   = 50000;
-int  pg_tre_build_max_entries_mb   = 4096;   /* 0 = unlimited */
+int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 
 void
 pg_tre_init_guc(void)
@@ -116,20 +116,20 @@ pg_tre_init_guc(void)
         50000, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.build_max_entries_mb",
-        "Abort an index build whose in-memory trigram-entry array would"
-        " exceed this many megabytes (0 = unlimited).",
-        "ambuild collects every trigram emission into an in-memory array"
-        " before sorting; peak size is ~24 bytes * total_emissions, which"
-        " scales with corpus size, not distinct trigrams.  On large"
-        " natural-text columns this can exhaust memory and OOM-kill the"
-        " postgres process.  When the array would grow past this ceiling"
-        " the build fails cleanly with ERRCODE_PROGRAM_LIMIT_EXCEEDED"
-        " instead of being SIGKILLed.  Raise it for a one-off large build"
-        " on a box with enough RAM, or set 0 to disable the guard.  A"
-        " tuplesort-based build that bounds memory by maintenance_work_mem"
-        " is planned for v1.8.0.",
+        "Optional temp-disk safety valve for index builds (0 = unlimited,"
+        " the default).",
+        "Since 1.8.0 the build sorts trigram tuples with tuplesort, so"
+        " peak *memory* is bounded by maintenance_work_mem (spilled to"
+        " temp files) regardless of corpus size -- the build no longer"
+        " OOMs.  This guard now only bounds the *number* of trigram"
+        " tuples (and thus temp-disk use): when the emitted-tuple count"
+        " times 24 bytes would exceed this many megabytes the build"
+        " fails with ERRCODE_PROGRAM_LIMIT_EXCEEDED instead of filling"
+        " the temp tablespace.  Default 0 (disabled) so large but"
+        " legitimate builds are not blocked; set it if you want a hard"
+        " ceiling on build temp-disk consumption.",
         &pg_tre_build_max_entries_mb,
-        4096, 0, INT_MAX, PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
+        0, 0, INT_MAX, PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 
     /*
      * Cardinality-aware build (1.2.1+).  Posting trees with fewer
