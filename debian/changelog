@@ -1,3 +1,13 @@
+pg_tre (1.5.8-1) unstable; urgency=medium
+
+  * Vendor sparsemap 3.0.1 (wire-compatible; no reindex required).
+  * Fix tre_version() reporting a stale "1.5.6" string.
+  * CI: pgspot PS017 ignore, autopoint for the TRE autoconf build,
+    drop the bogus postgresql-NN-pgwalinspect package, ASan ASLR
+    workaround; mark never-passing ASan jobs informational.
+
+ -- Greg Burd <greg@burd.me>  Wed, 03 Jun 2026 12:00:00 +0000
+
 pg_tre (1.5.0-1) unstable; urgency=medium
 
   * Multi-leaf range tier (format v5 for range pages): full heap

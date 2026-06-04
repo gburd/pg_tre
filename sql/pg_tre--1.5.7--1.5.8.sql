@@ -1,0 +1,16 @@
+-- pg_tre 1.5.7 -> 1.5.8 upgrade.
+--
+-- 1.5.8 has no SQL-catalog changes.  It refreshes the vendored
+-- sparsemap C library to 3.0.1 (a wire-compatible update: the
+-- serialized bitmap format is byte-identical to prior releases)
+-- and corrects the compiled-in PG_TRE_VERSION_STRING that had
+-- drifted to "1.5.6".
+--
+-- The on-disk index format version is unchanged
+-- (PG_TRE_FORMAT_VERSION_LATEST = 5), so existing indexes built
+-- by 1.3.0 .. 1.5.7 remain readable as-is.  This upgrade is
+-- online and requires NO REINDEX:
+--
+--     ALTER EXTENSION pg_tre UPDATE TO '1.5.8';
+--
+-- after installing the new shared library.  Intentionally empty.

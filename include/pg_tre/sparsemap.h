@@ -90,7 +90,7 @@
  *
  * ## Allocation lineage and disposal
  *
- * Every sparsemap_t has an internal allocation lineage tag that determines
+ * Every sm_t has an internal allocation lineage tag that determines
  * which functions may safely realloc its data buffer and how it must be
  * disposed.  The lineage is set by the constructor:
  *
@@ -135,17 +135,140 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/*
+ * Symbol prefixing for embedding (Berkeley DB --with-uniquename
+ * style).  A program that vendors sparsemap into a larger library
+ * can rename every public symbol by defining SPARSEMAP_PREFIX before
+ * including <sm.h>:
+ *
+ *	#define SPARSEMAP_PREFIX	myapp_
+ *	#include <sm.h>
+ *
+ * turns sm_create() into myapp_sm_create(), sm_t into
+ * myapp_sparsemap_t, and so on, at both declaration and call sites,
+ * so two independently-vendored copies of sparsemap can coexist in
+ * one address space without colliding at link time.  Only C
+ * identifiers that become linker symbols (the public functions) and
+ * the public type names are renamed; compile-time macros
+ * (SM_IDX_MAX, the SM_VERSION_* values, enum constants) are
+ * unaffected because they never reach the linker.  The serialized
+ * wire format does not change.
+ */
+#ifdef SPARSEMAP_PREFIX
+#define SM__CAT2(a, b) a##b
+#define SM__CAT(a, b)  SM__CAT2(a, b)
+#define SM__P(name)    SM__CAT(SPARSEMAP_PREFIX, name)
+
+/* Public types (and the struct tag / deprecated noun constructor). */
+#define sparsemap            SM__P(sparsemap)
+#define sm_t                 SM__P(sm_t)
+#define sm_allocator_t       SM__P(sm_allocator_t)
+#define sm_membership_t      SM__P(sm_membership_t)
+#define sm_stats_t           SM__P(sm_stats_t)
+#define sm_subset_relation_t SM__P(sm_subset_relation_t)
+
+/* Public functions. */
+#define sm_add                      SM__P(sm_add)
+#define sm_add_grow                 SM__P(sm_add_grow)
+#define sm_add_many                 SM__P(sm_add_many)
+#define sm_add_range                SM__P(sm_add_range)
+#define sm_and                      SM__P(sm_and)
+#define sm_andnot                   SM__P(sm_andnot)
+#define sm_assign                   SM__P(sm_assign)
+#define sm_capacity_remaining       SM__P(sm_capacity_remaining)
+#define sm_cardinality              SM__P(sm_cardinality)
+#define sm_clear                    SM__P(sm_clear)
+#define sm_compare                  SM__P(sm_compare)
+#define sm_contains                 SM__P(sm_contains)
+#define sm_copy                     SM__P(sm_copy)
+#define sm_create                   SM__P(sm_create)
+#define sm_create_from_array        SM__P(sm_create_from_array)
+#define sm_create_from_range        SM__P(sm_create_from_range)
+#define sm_create_singleton         SM__P(sm_create_singleton)
+#define sm_create_with_allocator    SM__P(sm_create_with_allocator)
+#define sm_deserialize              SM__P(sm_deserialize)
+#define sm_difference               SM__P(sm_difference)
+#define sm_difference_cardinality   SM__P(sm_difference_cardinality)
+#define sm_difference_inplace       SM__P(sm_difference_inplace)
+#define sm_equals                   SM__P(sm_equals)
+#define sm_extract_range            SM__P(sm_extract_range)
+#define sm_fill_factor              SM__P(sm_fill_factor)
+#define sm_flip_range               SM__P(sm_flip_range)
+#define sm_free                     SM__P(sm_free)
+#define sm_get_capacity             SM__P(sm_get_capacity)
+#define sm_get_data                 SM__P(sm_get_data)
+#define sm_get_size                 SM__P(sm_get_size)
+#define sm_hash                     SM__P(sm_hash)
+#define sm_init                     SM__P(sm_init)
+#define sm_intersection             SM__P(sm_intersection)
+#define sm_intersection_cardinality SM__P(sm_intersection_cardinality)
+#define sm_intersection_inplace     SM__P(sm_intersection_inplace)
+#define sm_is_empty                 SM__P(sm_is_empty)
+#define sm_is_subset                SM__P(sm_is_subset)
+#define sm_is_superset              SM__P(sm_is_superset)
+#define sm_jaccard_index            SM__P(sm_jaccard_index)
+#define sm_maximum                  SM__P(sm_maximum)
+#define sm_membership               SM__P(sm_membership)
+#define sm_minimum                  SM__P(sm_minimum)
+#define sm_next_member              SM__P(sm_next_member)
+#define sm_nonempty_difference      SM__P(sm_nonempty_difference)
+#define sm_offset                   SM__P(sm_offset)
+#define sm_open                     SM__P(sm_open)
+#define sm_open_copy                SM__P(sm_open_copy)
+#define sm_or                       SM__P(sm_or)
+#define sm_overlap                  SM__P(sm_overlap)
+#define sm_owned_copy               SM__P(sm_owned_copy)
+#define sm_pop_first                SM__P(sm_pop_first)
+#define sm_pop_last                 SM__P(sm_pop_last)
+#define sm_prev_member              SM__P(sm_prev_member)
+#define sm_rank                     SM__P(sm_rank)
+#define sm_remove                   SM__P(sm_remove)
+#define sm_remove_range             SM__P(sm_remove_range)
+#define sm_scan                     SM__P(sm_scan)
+#define sm_select                   SM__P(sm_select)
+#define sm_serialize                SM__P(sm_serialize)
+#define sm_serialized_size          SM__P(sm_serialized_size)
+#define sm_set_allocator            SM__P(sm_set_allocator)
+#define sm_set_data_size            SM__P(sm_set_data_size)
+#define sm_shrink_to_fit            SM__P(sm_shrink_to_fit)
+#define sm_singleton_member         SM__P(sm_singleton_member)
+#define sm_span                     SM__P(sm_span)
+#define sm_split                    SM__P(sm_split)
+#define sm_statistics               SM__P(sm_statistics)
+#define sm_subset_compare           SM__P(sm_subset_compare)
+#define sm_to_array                 SM__P(sm_to_array)
+#define sm_union                    SM__P(sm_union)
+#define sm_union_cardinality        SM__P(sm_union_cardinality)
+#define sm_union_inplace            SM__P(sm_union_inplace)
+#define sm_validate                 SM__P(sm_validate)
+#define sm_wrap                     SM__P(sm_wrap)
+#define sm_xor                      SM__P(sm_xor)
+#define sm_xor_cardinality          SM__P(sm_xor_cardinality)
+#endif /* SPARSEMAP_PREFIX */
+
 #if defined(__cplusplus)
 extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "2.3.0"
-#define SM_VERSION_MAJOR  2
-#define SM_VERSION_MINOR  3
+#define SM_VERSION_STRING "3.0.0"
+#define SM_VERSION_MAJOR  3
+#define SM_VERSION_MINOR  0
 #define SM_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */
+typedef struct sparsemap sm_t;
+/*
+ * pg_tre compatibility shim: sparsemap 3.0.x (the ports/rust branch)
+ * renamed the public type sparsemap_t -> sm_t.  pg_tre's call sites
+ * (amscan.c, posting.c, pending.c, range.c, posting.h) still use the
+ * historical name.  Keep both spellings working with a typedef alias
+ * rather than churning ~70 call sites.  NOTE: contrib/pg_tre_sync.sh
+ * overwrites this file on sync, so this line must be re-applied after
+ * each sync until upstream restores the sparsemap_t alias in sm.h.
+ * Reported upstream (the sync script claims a clean drop-in but the
+ * rename breaks it).
+ */
 typedef struct sparsemap sparsemap_t;
 
 /** @brief Custom allocator hooks.
@@ -193,21 +316,21 @@ typedef struct sparsemap sparsemap_t;
  * therefore means "use libc throughout".
  */
 typedef struct sm_allocator {
-    void *(*alloc)        (size_t n, void *aux);
-    void *(*alloc_zero)   (size_t n, void *aux);
-    void *(*realloc)      (void *p, size_t n, void *aux);
-    void  (*free)         (void *p, void *aux);
-    /* Aligned-allocation slots, reserved for future SIMD work.  Not
-     * exercised by any 2.2.x code path — the regular alloc/realloc
-     * already hand back 8-byte-aligned blocks, which is what every
-     * current sparsemap operation needs.  Provide them now so the
-     * struct shape is stable when SIMD lands; the scalar paths
-     * ignore them.  When implemented, semantics will match C11
-     * aligned_alloc(): `alignment` is a power of two, `n` must be a
-     * multiple of `alignment`. */
-    void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
-    void  (*aligned_free) (void *p, void *aux);
-    void  *aux;
+	void *(*alloc)(size_t n, void *aux);
+	void *(*alloc_zero)(size_t n, void *aux);
+	void *(*realloc)(void *p, size_t n, void *aux);
+	void (*free)(void *p, void *aux);
+	/* Aligned-allocation slots, reserved for future SIMD work.  Not
+	 * exercised by any 2.2.x code path -- the regular alloc/realloc
+	 * already hand back 8-byte-aligned blocks, which is what every
+	 * current sparsemap operation needs.  Provide them now so the
+	 * struct shape is stable when SIMD lands; the scalar paths
+	 * ignore them.  When implemented, semantics will match C11
+	 * aligned_alloc(): `alignment` is a power of two, `n` must be a
+	 * multiple of `alignment`. */
+	void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
+	void (*aligned_free)(void *p, void *aux);
+	void *aux;
 } sm_allocator_t;
 
 /** @brief Set the process-wide default allocator hooks.
@@ -237,7 +360,7 @@ void sm_set_allocator(sm_allocator_t a);
 
 /** @brief Allocate a heap-managed sparsemap with an internal buffer.
  *
- * Both the sparsemap_t struct and its data buffer are allocated in a single
+ * Both the sm_t struct and its data buffer are allocated in a single
  * heap block.  Dispose with sm_free() (or libc free() for backward
  * compatibility, which is equivalent for this lineage).  The buffer can
  * later be grown via sm_set_data_size(map, NULL, new_size).
@@ -247,20 +370,20 @@ void sm_set_allocator(sm_allocator_t a);
  *
  * Example:
  * @code
- *   sparsemap_t *map = sm_create(4096);
+ *   sm_t *map = sm_create(4096);
  *   sm_add(map, 42);
  *   assert(sm_contains(map, 42));
  *   sm_free(map);
  * @endcode
  */
-sparsemap_t *sm_create(size_t size);
+sm_t *sm_create(size_t size);
 
 /** @brief Allocate a sparsemap with a per-map allocator override.
  *
  * Use this when you want a specific allocator for one or a few maps
  * and the rest of the process can keep using the default.  Pass an
  * all-zero struct (e.g. `(sm_allocator_t){0}`) to fall back to the
- * global default (set via sm_set_allocator) — in that case the map
+ * global default (set via sm_set_allocator) -- in that case the map
  * snapshots the global allocator at creation time and uses it for
  * the lifetime of the map regardless of subsequent sm_set_allocator
  * calls.
@@ -269,15 +392,16 @@ sparsemap_t *sm_create(size_t size);
  * caller's copy can go out of scope safely.  Maps derived from this
  * one (sm_copy, sm_union, sm_xor, etc.) inherit the same allocator.
  */
-sparsemap_t *sm_create_with_allocator(size_t size, sm_allocator_t a);
+sm_t *sm_create_with_allocator(size_t size, sm_allocator_t a);
 
 /** @brief Deprecated alias for sm_create().
  *
  * Older callers used the noun-named sparsemap() constructor.  New code
- * should prefer the verb-named sm_create().  This alias will be
- * removed in v2.
+ * should prefer the verb-named sm_create().  Retained for source
+ * compatibility with existing consumers; slated for removal in a
+ * future major release.
  */
-sparsemap_t *sparsemap(size_t size);
+sm_t *sparsemap(size_t size);
 
 /** @brief Dispose of a sparsemap, regardless of allocation lineage.
  *
@@ -296,14 +420,14 @@ sparsemap_t *sparsemap(size_t size);
  *
  * @param[in,out] map  The sparsemap to dispose, or NULL.
  */
-void sm_free(sparsemap_t *map);
+void sm_free(sm_t *map);
 
 /** @brief Create a deep copy of \a other.
  *
  * @param[in] other  The sparsemap to copy.  Must not be NULL.
  * @returns A new sparsemap with the same contents, or NULL on failure.
  */
-sparsemap_t *sm_copy(const sparsemap_t *other);
+sm_t *sm_copy(const sm_t *other);
 
 /** @brief Return a guaranteed-owned, guaranteed-growable copy of any sparsemap.
  *
@@ -319,11 +443,11 @@ sparsemap_t *sm_copy(const sparsemap_t *other);
  * @param[in] map  The sparsemap to copy.  Must not be NULL.
  * @returns A new owned-contiguous sparsemap, or NULL on allocation failure.
  */
-sparsemap_t *sm_owned_copy(const sparsemap_t *map);
+sm_t *sm_owned_copy(const sm_t *map);
 
-/** @brief Allocate a sparsemap_t that wraps a caller-provided buffer.
+/** @brief Allocate a sm_t that wraps a caller-provided buffer.
  *
- * The sparsemap_t struct is heap-allocated, but the data buffer is owned by
+ * The sm_t struct is heap-allocated, but the data buffer is owned by
  * the caller.  Dispose with sm_free() (which frees the struct only)
  * or with libc free() (equivalent).
  *
@@ -345,26 +469,26 @@ sparsemap_t *sm_owned_copy(const sparsemap_t *map);
  * @param[in] size  Size of \a data in bytes.
  * @returns A new sparsemap, or NULL on allocation failure.
  */
-sparsemap_t *sm_wrap(uint8_t *data, size_t size);
+sm_t *sm_wrap(uint8_t *data, size_t size);
 
-/** @brief Initialize a caller-allocated sparsemap_t with a buffer.
+/** @brief Initialize a caller-allocated sm_t with a buffer.
  *
- * Use this when both the sparsemap_t and its buffer are allocated by the
+ * Use this when both the sm_t and its buffer are allocated by the
  * caller (e.g. on the stack).  The map is cleared to an empty state.
  *
- * @param[in,out] map   Pointer to an uninitialized sparsemap_t.
+ * @param[in,out] map   Pointer to an uninitialized sm_t.
  * @param[in]     data  Buffer for bitmap storage.
  * @param[in]     size  Size of \a data in bytes.
  *
  * Example:
  * @code
- *   sparsemap_t map;
+ *   sm_t map;
  *   uint8_t buf[1024];
  *   sm_init(&map, buf, sizeof(buf));
  *   sm_add(&map, 0);
  * @endcode
  */
-void sm_init(sparsemap_t *map, uint8_t *data, size_t size);
+void sm_init(sm_t *map, uint8_t *data, size_t size);
 
 /** @brief Attach to an existing (serialized) sparsemap buffer.
  *
@@ -372,17 +496,17 @@ void sm_init(sparsemap_t *map, uint8_t *data, size_t size);
  * used size from the buffer contents, making it suitable for deserializing a
  * previously-populated bitmap.
  *
- * @param[in,out] map   Pointer to an uninitialized sparsemap_t.
+ * @param[in,out] map   Pointer to an uninitialized sm_t.
  * @param[in]     data  Buffer containing serialized bitmap data.
  * @param[in]     size  Total capacity of \a data in bytes.
  */
-void sm_open(sparsemap_t *map, uint8_t *data, size_t size);
+void sm_open(sm_t *map, uint8_t *data, size_t size);
 
 /** @brief Allocate a fresh map and deserialize raw on-disk bytes into it.
  *
  * Convenience for the common pattern:
  *
- *     sparsemap_t *m = sm_create(n + slack);
+ *     sm_t *m = sm_create(n + slack);
  *     memcpy(sm_get_data(m), data, n);
  *     sm_open(m, sm_get_data(m), n + slack);
  *     // m_alloc_kind ends up SM_WRAPPED; restore SM_OWNED_CONTIGUOUS
@@ -398,7 +522,7 @@ void sm_open(sparsemap_t *map, uint8_t *data, size_t size);
  * @param[in] slack  Extra capacity bytes to allocate beyond `n`.
  * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
  */
-sparsemap_t *sm_open_copy(const uint8_t *data, size_t n, size_t slack);
+sm_t *sm_open_copy(const uint8_t *data, size_t n, size_t slack);
 
 /** @brief Reset the map to empty without freeing memory.
  *
@@ -406,13 +530,13 @@ sparsemap_t *sm_open_copy(const uint8_t *data, size_t n, size_t slack);
  *
  * @param[in,out] map  The sparsemap to clear.
  */
-void sm_clear(sparsemap_t *map);
+void sm_clear(sm_t *map);
 
 /** @brief Resize the data buffer.
  *
  * Behaviour depends on \a data and the map's allocation lineage:
  *
- *   sm_set_data_size(map, NULL, new_size) — library-managed
+ *   sm_set_data_size(map, NULL, new_size) -- library-managed
  *     resize.  Always succeeds (returning a possibly-relocated map
  *     pointer) or returns NULL on allocation failure.  Never silently
  *     no-ops.
@@ -433,7 +557,7 @@ void sm_clear(sparsemap_t *map);
  *         with sm_free().  The caller's original buffer is
  *         untouched.
  *
- *   sm_set_data_size(map, data, new_size) — caller-supplied
+ *   sm_set_data_size(map, data, new_size) -- caller-supplied
  *     buffer.  The map is re-pointed to \a data.  The caller is
  *     responsible for copying any existing bits before the call.
  *     Lineage transitions to wrapped: the library will not realloc or
@@ -445,7 +569,7 @@ void sm_clear(sparsemap_t *map);
  * @returns The (possibly relocated) sparsemap pointer on success,
  *          or NULL on allocation failure.
  */
-sparsemap_t *sm_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
+sm_t *sm_set_data_size(sm_t *map, uint8_t *data, size_t size);
 
 /* -------------------------------------------------------------------
  * Capacity and size
@@ -460,7 +584,7 @@ sparsemap_t *sm_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
  * @param[in] map  The sparsemap to query.
  * @returns Estimated percentage of unused buffer space.
  */
-double sm_capacity_remaining(const sparsemap_t *map);
+double sm_capacity_remaining(const sm_t *map);
 
 /** @brief Return the total buffer capacity in bytes.
  *
@@ -470,7 +594,7 @@ double sm_capacity_remaining(const sparsemap_t *map);
  * @param[in] map  The sparsemap to query.
  * @returns Buffer capacity in bytes.
  */
-size_t sm_get_capacity(const sparsemap_t *map);
+size_t sm_get_capacity(const sm_t *map);
 
 /** @brief Return the number of buffer bytes currently in use.
  *
@@ -480,7 +604,7 @@ size_t sm_get_capacity(const sparsemap_t *map);
  * @param[in] map  The sparsemap to query.
  * @returns Used byte count.
  */
-size_t sm_get_size(sparsemap_t *map);
+size_t sm_get_size(sm_t *map);
 
 /** @brief Return a pointer to the raw data buffer.
  *
@@ -490,7 +614,7 @@ size_t sm_get_size(sparsemap_t *map);
  * @param[in] map  The sparsemap to query.
  * @returns Pointer to the data buffer.
  */
-void *sm_get_data(const sparsemap_t *map);
+void *sm_get_data(const sm_t *map);
 
 /* -------------------------------------------------------------------
  * Single-bit operations
@@ -502,7 +626,7 @@ void *sm_get_data(const sparsemap_t *map);
  * @param[in] idx  0-based bit position.
  * @returns true if bit \a idx is 1, false if 0 or out of range.
  */
-bool sm_contains(sparsemap_t *map, uint64_t idx);
+bool sm_contains(sm_t *map, uint64_t idx);
 
 /** @brief Set or clear the bit at \a idx.
  *
@@ -519,7 +643,7 @@ bool sm_contains(sparsemap_t *map, uint64_t idx);
  *   sm_assign(map, 100, false);  // clear bit 100
  * @endcode
  */
-uint64_t sm_assign(sparsemap_t *map, uint64_t idx, bool value);
+uint64_t sm_assign(sm_t *map, uint64_t idx, bool value);
 
 /** @brief Set the bit at \a idx to 1.
  *
@@ -543,7 +667,7 @@ uint64_t sm_assign(sparsemap_t *map, uint64_t idx, bool value);
  *   }
  * @endcode
  */
-uint64_t sm_add(sparsemap_t *map, uint64_t idx);
+uint64_t sm_add(sm_t *map, uint64_t idx);
 
 /** @brief Add a bit, growing the map's buffer geometrically if needed.
  *
@@ -551,7 +675,7 @@ uint64_t sm_add(sparsemap_t *map, uint64_t idx);
  *
  *     uint64_t rc = sm_add(m, idx);
  *     if (rc == SM_IDX_MAX) {
- *         sparsemap_t *grown = sm_set_data_size(m, NULL,
+ *         sm_t *grown = sm_set_data_size(m, NULL,
  *                                                sm_get_capacity(m) * 2);
  *         if (!grown) { sm_free(m); return NULL; }
  *         m = grown;
@@ -567,7 +691,7 @@ uint64_t sm_add(sparsemap_t *map, uint64_t idx);
  * @param[in]     idx  Bit to set.
  * @returns idx on success, or SM_IDX_MAX on allocation failure.
  */
-uint64_t sm_add_grow(sparsemap_t **map, uint64_t idx);
+uint64_t sm_add_grow(sm_t **map, uint64_t idx);
 
 /** @brief Clear the bit at \a idx (set to 0).
  *
@@ -582,7 +706,7 @@ uint64_t sm_add_grow(sparsemap_t **map, uint64_t idx);
  * @param[in]     idx  0-based bit position to clear.
  * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
  */
-uint64_t sm_remove(sparsemap_t *map, uint64_t idx);
+uint64_t sm_remove(sm_t *map, uint64_t idx);
 
 /* -------------------------------------------------------------------
  * Aggregate queries
@@ -595,21 +719,21 @@ uint64_t sm_remove(sparsemap_t *map, uint64_t idx);
  * @param[in] map  The sparsemap to query.
  * @returns Number of bits that are set to 1.
  */
-size_t sm_cardinality(sparsemap_t *map);
+size_t sm_cardinality(sm_t *map);
 
 /** @brief Return the position of the first set bit (minimum).
  *
  * @param[in] map  The sparsemap to query.
  * @returns 0-based index of the lowest set bit, or 0 if the map is empty.
  */
-uint64_t sm_minimum(const sparsemap_t *map);
+uint64_t sm_minimum(const sm_t *map);
 
 /** @brief Return the position of the last set bit (maximum).
  *
  * @param[in] map  The sparsemap to query.
  * @returns 0-based index of the highest set bit, or 0 if the map is empty.
  */
-uint64_t sm_maximum(const sparsemap_t *map);
+uint64_t sm_maximum(const sm_t *map);
 
 /** @brief Return the fraction of bits that are set.
  *
@@ -618,7 +742,7 @@ uint64_t sm_maximum(const sparsemap_t *map);
  * @param[in] map  The sparsemap to query.
  * @returns Fill factor in the range [0.0, 1.0].
  */
-double sm_fill_factor(sparsemap_t *map);
+double sm_fill_factor(sm_t *map);
 
 /* -------------------------------------------------------------------
  * Rank, select, and span
@@ -638,7 +762,7 @@ double sm_fill_factor(sparsemap_t *map);
  *   size_t n = sm_rank(map, 100, 199, true);
  * @endcode
  */
-size_t sm_rank(sparsemap_t *map, uint64_t x, uint64_t y, bool value);
+size_t sm_rank(sm_t *map, uint64_t x, uint64_t y, bool value);
 
 /** @brief Find the position of the \a n'th matching bit (0-based).
  *
@@ -659,7 +783,7 @@ size_t sm_rank(sparsemap_t *map, uint64_t x, uint64_t y, bool value);
  *   uint64_t third_zero = sm_select(map, 2, false);
  * @endcode
  */
-uint64_t sm_select(sparsemap_t *map, uint64_t n, bool value);
+uint64_t sm_select(sm_t *map, uint64_t n, bool value);
 
 /** @brief Find the first contiguous run of \a len bits matching \a value.
  *
@@ -673,7 +797,7 @@ uint64_t sm_select(sparsemap_t *map, uint64_t n, bool value);
  * @returns 0-based index of the first bit in the run, or SM_IDX_MAX
  *          if no such run exists.
  */
-uint64_t sm_span(sparsemap_t *map, uint64_t start, size_t len, bool value);
+uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
 
 /* -------------------------------------------------------------------
  * Iteration
@@ -698,7 +822,9 @@ uint64_t sm_span(sparsemap_t *map, uint64_t start, size_t len, bool value);
  *   sm_scan(map, print_bits, 0, NULL);
  * @endcode
  */
-void sm_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip, void *aux);
+void sm_scan(const sm_t *map,
+    void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip,
+    void *aux);
 
 /* -------------------------------------------------------------------
  * Bulk operations
@@ -714,7 +840,7 @@ void sm_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, v
  * @returns A newly allocated sparsemap (caller must free()), or NULL on
  *          allocation failure or if both inputs are empty/NULL.
  */
-sparsemap_t *sm_union(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_union(const sm_t *a, const sm_t *b);
 
 /** @brief Create a new sparsemap containing bits set in both \a a and \a b.
  *
@@ -726,7 +852,7 @@ sparsemap_t *sm_union(const sparsemap_t *a, const sparsemap_t *b);
  * @returns A newly allocated sparsemap (caller must free()), or NULL on
  *          allocation failure or if the result would be empty.
  */
-sparsemap_t *sm_intersection(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_intersection(const sm_t *a, const sm_t *b);
 
 /** @brief Create a new sparsemap containing bits set in \a a but not in \a b.
  *
@@ -739,7 +865,7 @@ sparsemap_t *sm_intersection(const sparsemap_t *a, const sparsemap_t *b);
  * @returns A newly allocated sparsemap (caller must free()), or NULL on
  *          allocation failure or if the result would be empty.
  */
-sparsemap_t *sm_difference(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_difference(const sm_t *a, const sm_t *b);
 
 /** @brief Split the map at \a idx, moving higher bits to \a other.
  *
@@ -761,14 +887,14 @@ sparsemap_t *sm_difference(const sparsemap_t *a, const sparsemap_t *b);
  *
  * Example:
  * @code
- *   sparsemap_t *left = sparsemap(4096);
- *   sparsemap_t *right = sparsemap(4096);
+ *   sm_t *left = sparsemap(4096);
+ *   sm_t *right = sparsemap(4096);
  *   // populate left ...
  *   sm_split(left, SM_IDX_MAX, right);
  *   // left has the lower half, right has the upper half
  * @endcode
  */
-uint64_t sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other);
+uint64_t sm_split(sm_t *map, uint64_t idx, sm_t *other);
 
 /** @brief Create a new sparsemap with all bits shifted by \a offset.
  *
@@ -781,7 +907,7 @@ uint64_t sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other);
  * @returns A newly allocated sparsemap (caller must free()), or NULL if all
  *          bits are shifted away or on allocation failure.
  */
-sparsemap_t *sm_offset(const sparsemap_t *map, ssize_t offset);
+sm_t *sm_offset(const sm_t *map, ssize_t offset);
 
 /* -------------------------------------------------------------------
  * Predicates and comparisons
@@ -795,7 +921,7 @@ sparsemap_t *sm_offset(const sparsemap_t *map, ssize_t offset);
  * @param[in] map  The sparsemap to query.
  * @returns true if the map has no set bits, false otherwise.
  */
-bool sm_is_empty(const sparsemap_t *map);
+bool sm_is_empty(const sm_t *map);
 
 /** @brief Test bit-set equality of two sparsemaps.
  *
@@ -808,7 +934,7 @@ bool sm_is_empty(const sparsemap_t *map);
  * @param[in] b  Second sparsemap (may be NULL, treated as empty).
  * @returns true if a and b represent the same bit set.
  */
-bool sm_equals(const sparsemap_t *a, const sparsemap_t *b);
+bool sm_equals(const sm_t *a, const sm_t *b);
 
 /** @brief Test whether \a a's bits are a subset of \a b's bits.
  *
@@ -816,18 +942,18 @@ bool sm_equals(const sparsemap_t *a, const sparsemap_t *b);
  * @param[in] b  Candidate superset (NULL is the empty set).
  * @returns true if every bit set in \a a is also set in \a b.
  */
-bool sm_is_subset(const sparsemap_t *a, const sparsemap_t *b);
+bool sm_is_subset(const sm_t *a, const sm_t *b);
 
 /** @brief Test whether \a a's bits are a superset of \a b's bits.
  *
- * Equivalent to `sm_is_subset(b, a)` — included as a named function
+ * Equivalent to `sm_is_subset(b, a)` -- included as a named function
  * for readability of `sm_is_superset(haystack, needle)` style calls.
  *
  * @param[in] a  Candidate superset (NULL is the empty set).
  * @param[in] b  Candidate subset (NULL is the empty set, always a subset).
  * @returns true if every bit set in \a b is also set in \a a.
  */
-bool sm_is_superset(const sparsemap_t *a, const sparsemap_t *b);
+bool sm_is_superset(const sm_t *a, const sm_t *b);
 
 /** @brief Test whether two sparsemaps share at least one set bit.
  *
@@ -837,7 +963,7 @@ bool sm_is_superset(const sparsemap_t *a, const sparsemap_t *b);
  * @param[in] b  Second sparsemap (NULL or empty produces false).
  * @returns true if a and b have any bit in common.
  */
-bool sm_overlap(const sparsemap_t *a, const sparsemap_t *b);
+bool sm_overlap(const sm_t *a, const sm_t *b);
 
 /** @brief Membership classification of a sparsemap.
  *
@@ -846,9 +972,9 @@ bool sm_overlap(const sparsemap_t *a, const sparsemap_t *b);
  * second set bit; never enumerates the rest.
  */
 typedef enum {
-    SM_EMPTY      = 0, /**< no bits set */
-    SM_SINGLETON  = 1, /**< exactly one bit set */
-    SM_MULTIPLE   = 2, /**< two or more bits set */
+	SM_EMPTY = 0,     /**< no bits set */
+	SM_SINGLETON = 1, /**< exactly one bit set */
+	SM_MULTIPLE = 2,  /**< two or more bits set */
 } sm_membership_t;
 
 /** @brief Classify a sparsemap as empty, singleton, or multi-element.
@@ -856,7 +982,7 @@ typedef enum {
  * @param[in] map  The sparsemap to classify (NULL is empty).
  * @returns SM_EMPTY, SM_SINGLETON, or SM_MULTIPLE.
  */
-sm_membership_t sm_membership(const sparsemap_t *map);
+sm_membership_t sm_membership(const sm_t *map);
 
 /** @brief Return the sole member of a singleton sparsemap.
  *
@@ -864,7 +990,7 @@ sm_membership_t sm_membership(const sparsemap_t *map);
  * @returns The 0-based index of the single set bit if `sm_membership(map)
  *          == SM_SINGLETON`, or SM_IDX_MAX otherwise (empty or multi).
  */
-uint64_t sm_singleton_member(const sparsemap_t *map);
+uint64_t sm_singleton_member(const sm_t *map);
 
 /* -------------------------------------------------------------------
  * Member-by-member iteration
@@ -886,7 +1012,7 @@ uint64_t sm_singleton_member(const sparsemap_t *map);
  * @param[in] prev_idx  Lower exclusive bound (use SM_IDX_MAX for "start at 0").
  * @returns The next set bit index, or SM_IDX_MAX if none.
  */
-uint64_t sm_next_member(const sparsemap_t *map, uint64_t prev_idx);
+uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx);
 
 /** @brief Find the highest set bit at index < \a prev_idx.
  *
@@ -902,7 +1028,7 @@ uint64_t sm_next_member(const sparsemap_t *map, uint64_t prev_idx);
  * @param[in] prev_idx  Upper exclusive bound (use SM_IDX_MAX for "start at end").
  * @returns The previous set bit index, or SM_IDX_MAX if none.
  */
-uint64_t sm_prev_member(const sparsemap_t *map, uint64_t prev_idx);
+uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx);
 
 /* -------------------------------------------------------------------
  * Cardinality without allocation
@@ -911,14 +1037,14 @@ uint64_t sm_prev_member(const sparsemap_t *map, uint64_t prev_idx);
  * hot paths where the caller only wants the size, not the bits.
  * ------------------------------------------------------------------- */
 
-/** @brief Compute |a ∪ b| without allocating the union. */
-size_t sm_union_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+/** @brief Compute the cardinality of (a union b) without allocating it. */
+size_t sm_union_cardinality(const sm_t *a, const sm_t *b);
 
-/** @brief Compute |a ∩ b| without allocating the intersection. */
-size_t sm_intersection_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+/** @brief Compute the cardinality of (a intersect b) without allocating it. */
+size_t sm_intersection_cardinality(const sm_t *a, const sm_t *b);
 
 /** @brief Compute |a \ b| without allocating the difference. */
-size_t sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+size_t sm_difference_cardinality(const sm_t *a, const sm_t *b);
 
 /** @brief Test whether `a \ b` has any set bits, without allocating.
  *
@@ -926,14 +1052,14 @@ size_t sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b);
  * short-circuit on first non-overlap.  Mirrors PostgreSQL's
  * `bms_nonempty_difference`.
  */
-bool sm_nonempty_difference(const sparsemap_t *a, const sparsemap_t *b);
+bool sm_nonempty_difference(const sm_t *a, const sm_t *b);
 
-/** @brief Jaccard similarity index: |a ∩ b| / |a ∪ b|.
+/** @brief Jaccard similarity index: |a intersect b| / |a union b|.
  *
  * @returns A value in [0.0, 1.0].  Returns 0.0 if both maps are empty
  *          (the standard convention for the indeterminate 0/0 case).
  */
-double sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b);
+double sm_jaccard_index(const sm_t *a, const sm_t *b);
 
 /* -------------------------------------------------------------------
  * Bulk add and array conversion
@@ -943,7 +1069,7 @@ double sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b);
  *
  * Equivalent to a loop over `sm_add(map, arr[i])` but slightly more
  * efficient when `arr` is already sorted (no formal contract that it
- * must be — unsorted input still works, just slower).
+ * must be -- unsorted input still works, just slower).
  *
  * @param[in,out] map  Destination.
  * @param[in]     arr  Array of indices.
@@ -951,7 +1077,7 @@ double sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b);
  * @returns true if every add succeeded; false if any add returned
  *          SPARSEMAP_IDX_MAX (capacity exhausted).
  */
-bool sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n);
+bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
 
 /** @brief Materialize all set bits as a uint64_t array.
  *
@@ -963,7 +1089,7 @@ bool sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n);
  * @param[out]    out    Caller-allocated buffer (or NULL to query size).
  * @param[in,out] n_out  In: capacity of `out`.  Out: number written.
  */
-void sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out);
+void sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out);
 
 /* -------------------------------------------------------------------
  * Range manipulation and symmetric difference
@@ -981,7 +1107,7 @@ void sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out);
  * @returns true if every bit was added; false if any add returned
  *          SPARSEMAP_IDX_MAX (capacity exhausted).
  */
-bool sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
+bool sm_add_range(sm_t *map, uint64_t lo, uint64_t hi);
 
 /** @brief Clear every bit in `[lo, hi)`.
  *
@@ -990,7 +1116,7 @@ bool sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
  * @param[in]     hi   Exclusive upper bound.
  * @returns true if every bit was cleared; false if any remove failed.
  */
-bool sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
+bool sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi);
 
 /** @brief Extract a range of bits as a new sparsemap.
  *
@@ -1009,29 +1135,29 @@ bool sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
  * @returns A new sparsemap, or NULL if the result would be empty or
  *          on allocation failure.
  */
-sparsemap_t *sm_extract_range(const sparsemap_t *map, uint64_t lo, uint64_t hi);
+sm_t *sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi);
 
 /** @brief Symmetric difference: bits set in exactly one of \a a, \a b.
  *
  * Returns a newly allocated owned-contiguous sparsemap.
  */
-sparsemap_t *sm_xor(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_xor(const sm_t *a, const sm_t *b);
 
 /** @brief Synonym for sm_union (logical OR). */
-sparsemap_t *sm_or(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_or(const sm_t *a, const sm_t *b);
 
 /** @brief Synonym for sm_intersection (logical AND). */
-sparsemap_t *sm_and(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_and(const sm_t *a, const sm_t *b);
 
 /** @brief Synonym for sm_difference (logical AND-NOT: bits in a but not b). */
-sparsemap_t *sm_andnot(const sparsemap_t *a, const sparsemap_t *b);
+sm_t *sm_andnot(const sm_t *a, const sm_t *b);
 
 /** @brief XOR cardinality without allocation.
  *
  * Equivalent to `sm_cardinality(sm_xor(a,b))` but doesn't materialize
  * the result.
  */
-size_t sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+size_t sm_xor_cardinality(const sm_t *a, const sm_t *b);
 
 /* -------------------------------------------------------------------
  * Constructors
@@ -1045,7 +1171,7 @@ size_t sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b);
  * @param[in] idx  The single bit to set.
  * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
  */
-sparsemap_t *sm_create_singleton(uint64_t idx);
+sm_t *sm_create_singleton(uint64_t idx);
 
 /** @brief Create a sparsemap containing every bit in `[lo, hi)`.
  *
@@ -1054,7 +1180,7 @@ sparsemap_t *sm_create_singleton(uint64_t idx);
  * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
  *          Empty range produces an empty map (not NULL).
  */
-sparsemap_t *sm_create_from_range(uint64_t lo, uint64_t hi);
+sm_t *sm_create_from_range(uint64_t lo, uint64_t hi);
 
 /** @brief Create a sparsemap from an array of indices.
  *
@@ -1062,7 +1188,7 @@ sparsemap_t *sm_create_from_range(uint64_t lo, uint64_t hi);
  * @param[in] n    Length of `arr`.
  * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
  */
-sparsemap_t *sm_create_from_array(const uint64_t *arr, size_t n);
+sm_t *sm_create_from_array(const uint64_t *arr, size_t n);
 
 /* -------------------------------------------------------------------
  * Hashing and comparison
@@ -1073,7 +1199,7 @@ sparsemap_t *sm_create_from_array(const uint64_t *arr, size_t n);
  * Two maps that compare equal under sm_equals() always hash to the
  * same value, regardless of internal RLE-vs-sparse encoding choices.
  */
-uint64_t sm_hash(const sparsemap_t *map);
+uint64_t sm_hash(const sm_t *map);
 
 /** @brief Three-way compare for ordering bitmaps.
  *
@@ -1083,14 +1209,14 @@ uint64_t sm_hash(const sparsemap_t *map);
  *
  * @returns Negative, zero, or positive following the standard convention.
  */
-int sm_compare(const sparsemap_t *a, const sparsemap_t *b);
+int sm_compare(const sm_t *a, const sm_t *b);
 
 /** @brief Subset-relation between two sparsemaps. */
 typedef enum {
-    SM_REL_EQUAL    = 0, /**< a == b */
-    SM_REL_SUBSET_A = 1, /**< a is a strict subset of b */
-    SM_REL_SUBSET_B = 2, /**< b is a strict subset of a */
-    SM_REL_DIFFERENT = 3, /**< neither is a subset of the other */
+	SM_REL_EQUAL = 0,     /**< a == b */
+	SM_REL_SUBSET_A = 1,  /**< a is a strict subset of b */
+	SM_REL_SUBSET_B = 2,  /**< b is a strict subset of a */
+	SM_REL_DIFFERENT = 3, /**< neither is a subset of the other */
 } sm_subset_relation_t;
 
 /** @brief Classify the subset relationship between \a a and \a b.
@@ -1098,7 +1224,7 @@ typedef enum {
  * Mirrors PostgreSQL's `bms_subset_compare`.  More efficient than
  * calling `sm_is_subset` twice when the caller needs the full picture.
  */
-sm_subset_relation_t sm_subset_compare(const sparsemap_t *a, const sparsemap_t *b);
+sm_subset_relation_t sm_subset_compare(const sm_t *a, const sm_t *b);
 
 /* -------------------------------------------------------------------
  * Destructive iteration
@@ -1111,14 +1237,14 @@ sm_subset_relation_t sm_subset_compare(const sparsemap_t *a, const sparsemap_t *
  *
  * @returns The lowest set bit's index, or SM_IDX_MAX if the map was empty.
  */
-uint64_t sm_pop_first(sparsemap_t *map);
+uint64_t sm_pop_first(sm_t *map);
 
 /** @brief Find the highest set bit, clear it, and return it.
  *
  * The reverse of sm_pop_first.  Useful for stack-style worklist
  * algorithms.  Returns SM_IDX_MAX if the map is empty.
  */
-uint64_t sm_pop_last(sparsemap_t *map);
+uint64_t sm_pop_last(sm_t *map);
 
 /* -------------------------------------------------------------------
  * In-place set operations
@@ -1138,19 +1264,19 @@ uint64_t sm_pop_last(sparsemap_t *map);
  *
  * @returns The (possibly relocated) dst.  NULL on alloc failure.
  */
-sparsemap_t *sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src);
+sm_t *sm_union_inplace(sm_t *dst, const sm_t *src);
 
 /** @brief In-place intersection: `dst := dst INT src`.
  *
  * Result always shrinks or stays same; never reallocates.
  */
-sparsemap_t *sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src);
+sm_t *sm_intersection_inplace(sm_t *dst, const sm_t *src);
 
 /** @brief In-place difference: `dst := dst \ src`.
  *
  * Result always shrinks or stays same; never reallocates.
  */
-sparsemap_t *sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src);
+sm_t *sm_difference_inplace(sm_t *dst, const sm_t *src);
 
 /* -------------------------------------------------------------------
  * Range complement
@@ -1162,7 +1288,7 @@ sparsemap_t *sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src);
  *
  * @returns true on success, false if the buffer was too small to grow.
  */
-bool sm_flip_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
+bool sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi);
 
 /* -------------------------------------------------------------------
  * Maintenance and introspection
@@ -1181,7 +1307,7 @@ bool sm_flip_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
  *
  * @returns true if the map is internally consistent.
  */
-bool sm_validate(const sparsemap_t *map);
+bool sm_validate(const sm_t *map);
 
 /** @brief Statistics about a sparsemap's internal layout.
  *
@@ -1189,19 +1315,19 @@ bool sm_validate(const sparsemap_t *map);
  * unexpectedly-large maps.
  */
 typedef struct sm_stats {
-    size_t   chunks_total;     /**< total chunks */
-    size_t   chunks_rle;       /**< chunks using RLE encoding */
-    size_t   chunks_sparse;    /**< chunks using sparse encoding */
-    size_t   bytes_used;       /**< sm_get_size(map) */
-    size_t   bytes_capacity;   /**< sm_get_capacity(map) */
-    uint64_t bits_set;         /**< sm_cardinality(map) */
-    uint64_t bits_in_rle;      /**< bits set within RLE chunks */
-    uint64_t bits_in_sparse;   /**< bits set within sparse chunks */
-    double   bytes_per_set_bit;/**< bytes_used / bits_set */
+	size_t chunks_total;      /**< total chunks */
+	size_t chunks_rle;        /**< chunks using RLE encoding */
+	size_t chunks_sparse;     /**< chunks using sparse encoding */
+	size_t bytes_used;        /**< sm_get_size(map) */
+	size_t bytes_capacity;    /**< sm_get_capacity(map) */
+	uint64_t bits_set;        /**< sm_cardinality(map) */
+	uint64_t bits_in_rle;     /**< bits set within RLE chunks */
+	uint64_t bits_in_sparse;  /**< bits set within sparse chunks */
+	double bytes_per_set_bit; /**< bytes_used / bits_set */
 } sm_stats_t;
 
 /** @brief Fill an sm_stats_t with introspection data. */
-void sm_statistics(const sparsemap_t *map, sm_stats_t *stats);
+void sm_statistics(const sm_t *map, sm_stats_t *stats);
 
 /** @brief Realloc the data buffer down to exactly `m_data_used` bytes.
  *
@@ -1211,7 +1337,7 @@ void sm_statistics(const sparsemap_t *map, sm_stats_t *stats);
  *
  * @returns The (possibly relocated) map pointer, or NULL on alloc failure.
  */
-sparsemap_t *sm_shrink_to_fit(sparsemap_t *map);
+sm_t *sm_shrink_to_fit(sm_t *map);
 
 /* -------------------------------------------------------------------
  * Portable serialization
@@ -1233,7 +1359,7 @@ sparsemap_t *sm_shrink_to_fit(sparsemap_t *map);
  *
  * @returns Number of bytes that sm_serialize will write.
  */
-size_t sm_serialized_size(const sparsemap_t *map);
+size_t sm_serialized_size(const sm_t *map);
 
 /** @brief Serialize \a map into \a out (`sm_serialized_size` bytes).
  *
@@ -1242,7 +1368,7 @@ size_t sm_serialized_size(const sparsemap_t *map);
  * @param[in]  out_size  Capacity of \a out.
  * @returns Number of bytes written, or 0 on error.
  */
-size_t sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size);
+size_t sm_serialize(const sm_t *map, uint8_t *out, size_t out_size);
 
 /** @brief Deserialize a previously-serialized buffer into a fresh map.
  *
@@ -1254,11 +1380,10 @@ size_t sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size);
  * @param[in] n    Source buffer size.
  * @returns A new owned-contiguous sparsemap, or NULL on error.
  */
-sparsemap_t *sm_deserialize(const uint8_t *in, size_t n);
+sm_t *sm_deserialize(const uint8_t *in, size_t n);
 
 #if defined(__cplusplus)
 }
 #endif
-
 
 #endif /* !defined(SPARSEMAP_H) */

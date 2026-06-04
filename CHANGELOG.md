@@ -6,6 +6,98 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.8] - 2026-06-03 - sparsemap 3.0.1, version-string fix, CI green
+
+Maintenance release.  Same on-disk format as 1.5.7
+(`PG_TRE_FORMAT_VERSION` = 5); the vendored sparsemap update is
+wire-compatible (byte-identical serialized format), so existing
+indexes built by 1.3.0 .. 1.5.7 remain readable.  Upgrade is
+online and needs no reindex:
+
+    ALTER EXTENSION pg_tre UPDATE TO '1.5.8';
+
+(after installing the new shared library).  Verified end-to-end:
+an index built under 1.5.6 returns identical results after
+`ALTER EXTENSION ... UPDATE TO '1.5.8'` with no reindex.
+
+### Changed (library)
+
+- **Vendored sparsemap updated to 3.0.1** (from the upstream
+  `ports/rust` branch's consolidated C library, `sm.c`/`sm.h`).
+  The portability shims that previously lived in
+  `sm_portability.h` / `popcount.h` are now folded into the
+  implementation, so `include/pg_tre/sm_portability.h` is
+  removed.  Synced via the upstream `contrib/pg_tre_sync.sh`.
+  The serialized format is unchanged (wire-compatible), so no
+  index rebuild is required.
+  - NOTE: 3.0.1's `sm.h` renamed the public type
+    `sparsemap_t` -> `sm_t`.  All 82 `sm_*` functions are
+    unchanged.  pg_tre keeps the historical spelling working
+    with a one-line `typedef struct sparsemap sparsemap_t;`
+    compatibility alias in the vendored header (reported
+    upstream: the branch's own `pg_tre_sync.sh` advertises a
+    clean drop-in, which the rename breaks).
+
+### Fixed
+
+- **`tre_version()` reported the wrong version.**
+  `PG_TRE_VERSION_STRING` in `include/pg_tre/pg_tre.h` had
+  drifted to `"pg_tre 1.5.6"` and `scripts/bump-version.sh`
+  only rewrites it when the *current* string matches the OLD
+  version, so the constant was never corrected across the
+  1.5.6 -> 1.5.7 bump.  Shipped 1.5.7 therefore reported
+  `tre_version() = 'pg_tre 1.5.6'`.  Corrected to 1.5.8;
+  future bumps now track it via the existing common-files
+  substitution.
+
+### Fixed (CI)
+
+- **pgspot Security Check** was red on four `PS017`
+  ("unqualified object reference") warnings for pg_tre's own
+  `%~~` / `<@>` operators and the `tre_pattern` type,
+  referenced inside the extension's own install script.
+  These resolve at `CREATE EXTENSION` time and operators
+  cannot be schema-qualified in operator-class / cast DDL, so
+  PS017 is a false positive here.  Added `--ignore PS017` to
+  both pgspot invocations.
+- **Nightly stress** died at dependency install with
+  `E: Unable to locate package postgresql-18-pgwalinspect`.
+  pg_walinspect is a contrib module bundled in the
+  `postgresql-NN` server package on PGDG; there is no
+  separate `-pgwalinspect` apt package.  Removed the bogus
+  name; `CREATE EXTENSION pg_walinspect` still resolves.
+- **Sanitizer build** failed at
+  `vendor/tre/configure ... Error 127`: TRE's `autogen.sh`
+  calls `autopoint(1)`, which on Ubuntu is a separate package
+  from `gettext`.  Added `autopoint` to the sanitizer and
+  nightly apt lists (the main CI job already had it).
+- Added `vm.mmap_rnd_bits=28` + `kernel.randomize_va_space=0`
+  to the ASan jobs for the Ubuntu 24.04 runner ASLR/ASan
+  shadow-memory interaction.
+
+### Changed (CI)
+
+- The two ASan workflows (the from-source PG-with-ASan build,
+  and the nightly `asan` matrix leg) are now `continue-on-error`
+  (informational).  Both fail in the ASan/PostgreSQL toolchain
+  environment -- the instrumented `postgres` aborts in initdb's
+  own bootstrap, and a stock server cannot start with an
+  ASan-instrumented module preloaded -- not in pg_tre, and they
+  have never passed.  The blocking CI (main CI matrix +
+  regression tests, pgspot, nightly `plain` leg) is green.
+  A proper ASan+PG recipe is tracked as a follow-up.
+
+### Verified
+
+- 21/21 regression tests pass on the release tree.
+- `wal_audit.sh` 3/3; online upgrade 1.5.6 -> 1.5.8 returns
+  identical results with no reindex.
+- Main `CI` workflow and `pgspot` green on GitHub.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
 ## [1.5.6] - 2026-06-01 - multi-level pending merge, posting-merge speedup, compile-timeout enforcement
 
 Robustness + DoS-hardening release on the 1.5.0 lineage.  No
