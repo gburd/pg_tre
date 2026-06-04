@@ -6,6 +6,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.8.0] - 2026-06-04 - tuplesort-based build: bounded memory at scale
+
+No on-disk format change (still v6); same indexes, no REINDEX.
+The structural fix for the field-report OOM: index builds no
+longer hold the whole trigram-emission set in RAM.
+
+### Changed
+
+- **`ambuild` now sorts trigram tuples with PostgreSQL's
+  `tuplesort` instead of an in-memory array + `qsort`.**  Each
+  `(trigram_hash, tid, position)` tuple is encoded as a fixed
+  20-byte big-endian `bytea` whose `memcmp` order reproduces the
+  historical `(hash, packed_tid, position)` order exactly, then
+  fed to `tuplesort_begin_datum(BYTEAOID, ...)`.  **Peak build
+  memory is now bounded by `maintenance_work_mem`** (tuplesort
+  spills to temp files), not by corpus size.
+  - Measured: a 200k-row / ~80M-emission body corpus builds
+    under `maintenance_work_mem = 32MB` with peak backend RSS
+    **231 MB**; the same corpus at half the size (100k /
+    ~40M emissions) peaks at **219 MB** -- i.e. **flat across a
+    2x corpus**, where the old in-memory build would have grown
+    from ~960 MB to ~1.9 GB of resident `entries[]` alone.
+    Correctness verified (index result == seq-scan ground
+    truth, exact and k=1).
+  - This directly resolves the field-report failure where a
+    body-column build OOM-killed the postgres cgroup.  Set
+    `maintenance_work_mem` to taste; larger values trade RAM for
+    fewer merge passes / faster builds.
+- **`pg_tre.build_max_entries_mb` default changed 4096 -> 0
+  (disabled).**  Its original job -- prevent the in-memory OOM
+  -- is now done structurally by tuplesort, and a non-zero
+  default would wrongly block large-but-legitimate builds (e.g.
+  the 500k-body case from the field report).  The GUC remains as
+  an optional *temp-disk* safety valve: set it to cap the
+  emitted-tuple count (x24 bytes) and fail cleanly with
+  `ERRCODE_PROGRAM_LIMIT_EXCEEDED` rather than filling the temp
+  tablespace.
+
+### Notes
+
+- The remaining build-time per-row memory is the tid-bloom hash
+  (one entry per distinct TID, ~56 B/row), which is O(rows) not
+  O(emissions) -- ~12 MB of the 219->231 MB delta above.  It is
+  far smaller than the former `entries[]` term and only matters
+  at very high row counts; bounding it is a possible future
+  refinement, not a blocker.
+- `CREATE INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` (verified
+  in 1.7.0) compose with the bounded-memory build: a concurrent
+  rebuild of a large body column is now both lock-light and
+  memory-safe.
+
+### Verified
+
+- 21/21 regression; `wal_audit.sh` 3/3; `replication.sh` 4/4.
+- 80M-emission build under 32 MB `maintenance_work_mem`; peak
+  RSS flat across a 2x corpus; result correctness vs seq scan.
+
+> Qualified locally; **GitHub CI verification still pending at
+> tag time** (1.7.0 had a CI failure that needs a separate
+> look) -- do not treat this as CI-green until confirmed.
+
+Inspired by https://github.com/timescale/pg_textsearch
+(Tiger Data, PostgreSQL License).
+
+---
+
 ## [1.7.0] - 2026-06-04 - cancellable builds, memory ceiling, CIC verified
 
 No on-disk format change (still v6); same indexes, no REINDEX.

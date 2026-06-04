@@ -61,20 +61,20 @@ flowchart TD
 - **Backward compatible** — legacy `tre_amatch*` UDFs from 0.1.0
   preserved.
 
-> **⚠️ Scale limits — read before deploying.** The index build is
-> currently fully in-memory and grows with *total trigram
-> emissions*, not distinct trigrams.  On large natural-text
-> columns it can exhaust memory; as of 1.7.0 the build fails
-> cleanly (`pg_tre.build_max_entries_mb`, default 4 GB) instead
-> of OOM-killing the server.  Use **`CREATE INDEX CONCURRENTLY`
-> / `REINDEX CONCURRENTLY`** (both supported and verified) to
-> avoid holding a heavy lock during the build.  pg_tre is
-> presently a good fit for small-to-medium corpora (≈ ≤100k rows
-> of long text, or ≤500k rows of short text); for larger
-> text-search workloads pair `pg_trgm` GIN + `tsvector` BM25 and
-> use pg_tre selectively.  See [`LIMITATIONS.md`](LIMITATIONS.md)
-> for the memory-sizing table, upgrade/REINDEX caveats, and a
-> real field report.
+> **ℹ️ Scale notes.** Index builds use PostgreSQL's `tuplesort`
+> (since 1.8.0), so peak build memory is bounded by
+> `maintenance_work_mem` and does **not** grow with corpus size —
+> large body columns no longer OOM the server (verified: an
+> 80M-emission build peaks ~230 MB under a 32 MB
+> `maintenance_work_mem`).  Use **`CREATE INDEX CONCURRENTLY` /
+> `REINDEX CONCURRENTLY`** (supported and verified) to build
+> without holding a heavy table lock.  At very large scale the
+> remaining considerations are query latency and index size, not
+> build memory: for the largest text-search workloads, pair
+> `pg_trgm` GIN + `tsvector` BM25 and use pg_tre where
+> edit-distance/regex fuzzy matching is the actual requirement.
+> See [`LIMITATIONS.md`](LIMITATIONS.md) for the measured sizing
+> model, upgrade/REINDEX caveats, and a field report.
 
 ---
 

@@ -9,76 +9,75 @@ report" below).
 ---
 
 ## TL;DR
+> **As of v1.8.0 the build is no longer in-memory** — it sorts
+> trigram tuples with PostgreSQL's `tuplesort`, so peak build
+> memory is bounded by `maintenance_work_mem` (disk-spilled)
+> instead of by corpus size.  The OOM behavior described in older
+> revisions of this file is fixed.  The table below now reflects
+> 1.8.0; for 1.6.x/1.7.x behavior see the git history.
 
-| dataset shape | safe? | notes |
+| dataset shape | safe? | notes (1.8.0) |
 |---|---|---|
-| ≤ 100k rows of long text (e.g., email bodies, ~1 KB) | ✅ | typical peak build RSS ~1–2 GB |
-| ≤ 500k rows of short text (e.g., subjects, identifiers, ~50 chars) | ✅ | typical peak build RSS ~600 MB – 1 GB |
-| 100k–500k rows of long text | ⚠️ | peak build RSS often 2–6 GB; budget `maintenance_work_mem` and pg_tre's working set explicitly |
-| ≥ 500k rows of long text | ❌ | builds frequently OOM-kill the postgres cgroup with default settings; see "Sizing the build" below before attempting |
-| ≥ 1M rows of any natural text | ❌ | not currently viable in 1.6.x — the build is in-memory and grows with total trigram emissions, not with distinct trigrams |
+| ≤ 100k rows of long text (e.g., email bodies, ~1 KB) | ✅ | builds under any reasonable `maintenance_work_mem` |
+| ≤ 500k rows of short text (~50 chars) | ✅ | same |
+| 100k–500k rows of long text | ✅ | set `maintenance_work_mem` to taste (more = fewer merge passes); peak RSS stays bounded, not GBs |
+| ≥ 500k rows of long text | ✅ | builds memory-safely; use `CREATE INDEX CONCURRENTLY` to avoid the build lock; expect temp-disk use proportional to total trigram emissions |
+| ≥ 1M rows of any natural text | ⚠️ | builds memory-safely, but query-time selectivity and index size are the real questions — see Performance and the pairing advice below |
 
-For workloads above the green band, **pair pg_tre with pg_trgm
-(GIN) and `tsvector` BM25 instead of using pg_tre as the only
-text index.** That is the documented design pattern several
-production deployments are running today (see
+Memory is no longer the gating factor.  The remaining reasons to
+prefer the pairing below at very large scale are **query latency**
+and **index size**, not build OOM.  Pairing pg_tre with `pg_trgm`
+(GIN) for substring/`LIKE` and `tsvector` BM25 for ranked
+full-text, reserving pg_tre for true edit-distance/regex fuzzy
+matching, remains the recommended pattern for the largest
+text-search workloads (see
 `README.md#deployment-recommendations`).
 
 ---
 
 ## Sizing the build (memory model)
 
-pg_tre's `ambuild` is currently fully in-memory.  Peak resident
-working set is dominated by three components:
+As of v1.8.0 `ambuild` sorts trigram tuples via `tuplesort`, so
+**peak build memory is bounded by `maintenance_work_mem`** plus a
+fixed per-backend overhead — it does not grow with the number of
+trigram emissions.  Measured on a body corpus under
+`maintenance_work_mem = 32MB`:
+
+| corpus | emissions | peak build-backend RSS |
+|---|---|---|
+| 100k rows, ~395-char bodies | ~40 M | 219 MB |
+| 200k rows, ~395-char bodies | ~80 M | 231 MB |
+
+Peak RSS is essentially flat across a 2x corpus (the ~12 MB delta
+is the tid-bloom hash, which is O(distinct TIDs)); the former
+in-memory build would have grown from ~960 MB to ~1.9 GB of
+resident `entries[]` alone.  Raise `maintenance_work_mem` to trade
+RAM for fewer merge passes and faster builds.
+
+What *does* still scale with corpus size:
 
 ```
-peak_RSS ≈
-    ( emitted_trigrams_per_row × N_rows × 24 B )      -- entries[]
-  + ( N_rows × ~56 B )                                -- tid_blooms hashtable + per-row bloom
-  + ( ~hundreds of MB fragmentation in pass B )
-  + ( shared_buffers + work_mem + libpq + ... )       -- the rest of the backend
+temp_disk    ≈ emitted_trigrams_per_row × N_rows × 24 B   (tuplesort spill)
+tid_bloom    ≈ N_rows × ~56 B                            (resident; O(distinct TIDs))
+index_size   ≈ grows with distinct trigrams + per-tuple bloom payload
 ```
 
-Concretely, with default settings:
-
-| corpus | trigrams/row | rows | entries[] | total build RSS (typical) |
-|---|---|---|---|---|
-| URLs / IDs (~50 chars) | ~50 | 500k | 600 MB | ~1 GB |
-| short subjects | ~80 | 500k | 1 GB | ~1.5 GB |
-| email bodies (~1 KB) | ~500 | 500k | **6 GB** | **~8 GB** |
-| email bodies (~1 KB) | ~500 | 100k | 1.2 GB | ~2 GB |
-| long documents (~10 KB) | ~5000 | 100k | 12 GB | **OOM under any reasonable cgroup** |
-
-The build can also retain GBs of pass-B `palloc` fragmentation
-even after individual entries are freed; cgroup memory accounting
-sees the high-water mark regardless.
-
-`pg_tre.min_trigram_freq` (default 1, no skip) can be raised to
-drop posting trees for trigrams below the threshold, which
-reduces output index size but **does not reduce build memory** —
-all emissions are still collected before the skip decision is
-made.
-
-A fix is planned: a `tuplesort`-based build (the same disk-spill
-pattern btree/gin/gist use) that bounds working set by
-`maintenance_work_mem` instead of by dataset size.  Tracked for
-**v1.8.0**.  In the meantime, the sizing table above is what to
-plan for — and as of **v1.7.0** a build that would blow past
-`pg_tre.build_max_entries_mb` (default 4096 MB) **fails cleanly
-with `ERRCODE_PROGRAM_LIMIT_EXCEEDED`** and an actionable hint,
-instead of being SIGKILLed by the OOM killer.  Raise the GUC on a
-host with enough RAM for a one-off large build, or set it to 0 to
-disable the guard.
+The `pg_tre.build_max_entries_mb` GUC (default 0 = unlimited
+since 1.8.0) is an optional cap on the emitted-tuple count, i.e.
+a *temp-disk* safety valve — set it if you want the build to fail
+cleanly with `ERRCODE_PROGRAM_LIMIT_EXCEEDED` rather than fill
+the temp tablespace.
 
 ## Cancellability
 
-As of v1.7.0 the build is cancellable throughout: the sort uses
-`qsort_interruptible`, and the per-TID `sm_add_grow` loops and
-multi-leaf write paths carry `CHECK_FOR_INTERRUPTS`.  A
-`pg_cancel_backend()` / SIGINT during a build is now honored
-within a second or so on any phase.  (Before 1.7.0 the
-`pg_qsort` over the entries array — 5–60s on a large corpus —
-and the posting-build loops were uncancellable.)
+As of v1.7.0 the build is cancellable throughout, and v1.8.0's
+`tuplesort_performsort` is itself interruptible; the per-TID
+`sm_add_grow` loops and multi-leaf write paths carry
+`CHECK_FOR_INTERRUPTS`.  A `pg_cancel_backend()` / SIGINT during
+a build is honored within a second or so on any phase.  (Before
+1.7.0 the `pg_qsort` over the in-memory entries array — 5–60s on
+a large corpus — and the posting-build loops were
+uncancellable.)
 
 **Avoid the heavy-lock build entirely**: plain `REINDEX` takes
 `AccessExclusiveLock` on the index and blocks the table's writes
@@ -94,9 +93,9 @@ CREATE INDEX CONCURRENTLY my_tre ON t USING tre (body);
 REINDEX INDEX CONCURRENTLY my_tre;
 ```
 
-CONCURRENTLY builds are slower in wall-clock and still subject to
-the build-memory model below, but they do not block concurrent
-reads/writes on the table.
+CONCURRENTLY builds are slower in wall-clock but do not block
+concurrent reads/writes on the table, and (since 1.8.0) are
+memory-bounded by `maintenance_work_mem` like any other build.
 
 ## Format-version upgrades
 

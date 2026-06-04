@@ -1,0 +1,13 @@
+-- pg_tre 1.7.0 -> 1.8.0 upgrade.
+--
+-- No SQL-catalog changes; same on-disk format (v6); no REINDEX
+-- required.  1.8.0 rewrites the index BUILD to sort trigram tuples
+-- with PostgreSQL's tuplesort, so peak build memory is bounded by
+-- maintenance_work_mem (disk-spilled) instead of growing with the
+-- corpus -- the field-report OOM is structurally fixed.  The
+-- pg_tre.build_max_entries_mb GUC now defaults to 0 (disabled); it
+-- remains an optional temp-disk safety valve.
+--
+--     ALTER EXTENSION pg_tre UPDATE TO '1.8.0';
+--
+-- after installing the new shared library.  Intentionally empty.
