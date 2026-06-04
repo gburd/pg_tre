@@ -248,7 +248,7 @@ typedef struct PendingOverlayEntry
     uint64      *tids_arr;     /* palloc'd, sorted by insertion order */
     int          tids_n;
     int          tids_cap;
-    sparsemap_t *tids;         /* lazily built on first overlay_lookup */
+    sm_t *tids;         /* lazily built on first overlay_lookup */
 } PendingOverlayEntry;
 
 typedef struct PendingOverlay
@@ -365,12 +365,12 @@ overlay_uint64_cmp(const void *a, const void *b)
     return (x < y) ? -1 : (x > y) ? 1 : 0;
 }
 
-static sparsemap_t *
+static sm_t *
 overlay_lookup(const PendingOverlay *ov, uint64 h)
 {
     int i, k;
     PendingOverlayEntry *e;
-    sparsemap_t *sm;
+    sm_t *sm;
 
     for (i = 0; i < ov->n; i++)
     {
@@ -437,18 +437,18 @@ overlay_free(PendingOverlay *ov)
  * Build the candidate TID sparsemap for one conjunct: OR of its
  * disjuncts, including the pending-list overlay for each trigram.
  */
-static sparsemap_t *
+static sm_t *
 resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
                               MemoryContext cxt, const PendingOverlay *ov)
 {
-    sparsemap_t *accum = NULL;
+    sm_t *accum = NULL;
     int i;
 
     for (i = 0; i < conj->n; i++)
     {
         PgTreUpperRef ref;
-        sparsemap_t  *sm = NULL;
-        sparsemap_t  *pend;
+        sm_t  *sm = NULL;
+        sm_t  *pend;
 
         if (pg_tre_upper_lookup(index, conj->alts[i].trigram_hash, &ref))
         {
@@ -467,7 +467,7 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
             }
             else
             {
-                sparsemap_t *u = sm_union(sm, pend);
+                sm_t *u = sm_union(sm, pend);
                 free(sm);
                 sm = u;
             }
@@ -482,7 +482,7 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
         }
         else
         {
-            sparsemap_t *merged = sm_union(accum, sm);
+            sm_t *merged = sm_union(accum, sm);
             free(accum);
             free(sm);
             accum = merged;
@@ -751,12 +751,12 @@ tri_upper_cache_release(TriUpperCache *cache)
  * q and pass it via 'cache'; the inner loop is then a hash-cache
  * lookup instead of a per-(candidate, trigram) upper-tree probe.
  */
-static sparsemap_t *
+static sm_t *
 apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
-                        sparsemap_t *candidates, MemoryContext cxt,
+                        sm_t *candidates, MemoryContext cxt,
                         const TriUpperCache *cache)
 {
-    sparsemap_t *refined;
+    sm_t *refined;
     uint64 idx;
     /*
      * Bloom scratch buffer.  Layout: [PgTreBloom header][bloom_bytes
@@ -974,11 +974,11 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
  * free().  Returns NULL when the result is empty OR when the query is
  * always_true (in the latter case *out_always_true is set).
  */
-static sparsemap_t *
+static sm_t *
 tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                          bool *out_always_true)
 {
-    volatile sparsemap_t *result = NULL;
+    volatile sm_t *result = NULL;
     /*
      * Maps owned transiently during the build.  Tracked in volatile
      * locals so the PG_CATCH below can free them if any ereport-capable
@@ -986,8 +986,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
      * pg_tre_posting_lookup_positions, sm_add) longjmps out mid-build --
      * otherwise these malloc-backed maps leak (H3).
      */
-    volatile sparsemap_t *inflight = NULL;   /* transient sm being merged */
-    volatile sparsemap_t *filtered = NULL;   /* positional-filter result */
+    volatile sm_t *inflight = NULL;   /* transient sm being merged */
+    volatile sm_t *filtered = NULL;   /* positional-filter result */
     PendingOverlay ov;
     volatile bool  overlay_built = false;
     TriUpperCache  upper_cache;
@@ -1019,13 +1019,13 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
             /* CNF: AND across conjuncts. */
             for (i = 0; i < st->q.n; i++)
             {
-                sparsemap_t *sm = resolve_conjunct_with_overlay(
+                sm_t *sm = resolve_conjunct_with_overlay(
                                       scan->indexRelation,
                                       &st->q.conjuncts[i],
                                       st->scan_cxt, &ov);
                 if (sm == NULL)
                 {
-                    if (result != NULL) { free((sparsemap_t *) result); result = NULL; }
+                    if (result != NULL) { free((sm_t *) result); result = NULL; }
                     overlay_free(&ov);
                     overlay_built = false;
                     short_circuit = true;
@@ -1038,18 +1038,18 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 }
                 else
                 {
-                    sparsemap_t *merged;
+                    sm_t *merged;
                     inflight = sm;
-                    merged = sm_intersection((sparsemap_t *) result, sm);
-                    free((sparsemap_t *) result);
+                    merged = sm_intersection((sm_t *) result, sm);
+                    free((sm_t *) result);
                     free(sm);
                     inflight = NULL;
                     result = merged;
                     if (result == NULL ||
-                        (sm_get_size((sparsemap_t *) result) != 0 &&
-                         sm_cardinality((sparsemap_t *) result) == 0))
+                        (sm_get_size((sm_t *) result) != 0 &&
+                         sm_cardinality((sm_t *) result) == 0))
                     {
-                        if (result) { free((sparsemap_t *) result); result = NULL; }
+                        if (result) { free((sm_t *) result); result = NULL; }
                         overlay_free(&ov);
                         overlay_built = false;
                         short_circuit = true;
@@ -1068,8 +1068,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 for (j = 0; j < tile->n; j++)
                 {
                     PgTreUpperRef ref;
-                    sparsemap_t *sm = NULL;
-                    sparsemap_t *pend;
+                    sm_t *sm = NULL;
+                    sm_t *pend;
 
                     if (pg_tre_upper_lookup(scan->indexRelation,
                                            tile->alts[j].trigram_hash, &ref))
@@ -1089,7 +1089,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                             sm = sm_copy(pend);
                         else
                         {
-                            sparsemap_t *u = sm_union(sm, pend);
+                            sm_t *u = sm_union(sm, pend);
                             free(sm);
                             sm = u;
                         }
@@ -1109,8 +1109,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                     }
                     else
                     {
-                        sparsemap_t *merged = sm_union((sparsemap_t *) result, sm);
-                        free((sparsemap_t *) result);
+                        sm_t *merged = sm_union((sm_t *) result, sm);
+                        free((sm_t *) result);
                         free(sm);
                         inflight = NULL;
                         result = merged;
@@ -1150,21 +1150,21 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     if (result != NULL && st->q.global_max_cost >= 0 &&
         pg_tre_tuple_bloom_enable &&
         !tre_query_is_single_trigram(&st->q) &&
-        sm_cardinality((sparsemap_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
+        sm_cardinality((sm_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
     {
         result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
-                                          (sparsemap_t *) result, st->scan_cxt,
+                                          (sm_t *) result, st->scan_cxt,
                                           &upper_cache);
     }
 
     /* Phase 5.1: positional filter (CNF only). */
-    if (result != NULL && sm_cardinality((sparsemap_t *) result) > 0 &&
+    if (result != NULL && sm_cardinality((sm_t *) result) > 0 &&
         st->q.mode == TRIGRAM_QUERY_CNF &&
         pg_tre_tuple_bloom_enable &&
         !tre_query_is_single_trigram(&st->q) &&
-        sm_cardinality((sparsemap_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
+        sm_cardinality((sm_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
     {
-        filtered = sm_create(sm_get_capacity((sparsemap_t *) result));
+        filtered = sm_create(sm_get_capacity((sm_t *) result));
         if (filtered != NULL)
         {
             uint64 tid_idx = SM_IDX_MAX;
@@ -1179,7 +1179,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
              */
             uint32 *pos_copy = palloc(sizeof(uint32) * 1024);
 
-            while ((tid_idx = sm_next_member((sparsemap_t *) result, tid_idx)) != SM_IDX_MAX)
+            while ((tid_idx = sm_next_member((sm_t *) result, tid_idx)) != SM_IDX_MAX)
             {
                 bool passes = (st->q.mode == TRIGRAM_QUERY_CNF);
                 int ci, j;
@@ -1307,9 +1307,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
 
                 if (passes)
                 {
-                    if (sm_add((sparsemap_t *) filtered, tid_idx) == SM_IDX_MAX)
+                    if (sm_add((sm_t *) filtered, tid_idx) == SM_IDX_MAX)
                     {
-                        free((sparsemap_t *) filtered);
+                        free((sm_t *) filtered);
                         filtered = NULL;
                         break;
                     }
@@ -1318,7 +1318,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
 
             if (filtered != NULL)
             {
-                free((sparsemap_t *) result);
+                free((sm_t *) result);
                 result = filtered;
                 filtered = NULL;
             }
@@ -1337,11 +1337,11 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
          * plus the overlay and upper-tree cache, then re-throw.
          */
         if (inflight != NULL)
-            free((sparsemap_t *) inflight);
+            free((sm_t *) inflight);
         if (filtered != NULL)
-            free((sparsemap_t *) filtered);
+            free((sm_t *) filtered);
         if (result != NULL)
-            free((sparsemap_t *) result);
+            free((sm_t *) result);
         if (overlay_built)
             overlay_free(&ov);
         if (upper_cache_built)
@@ -1350,7 +1350,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     }
     PG_END_TRY();
 
-    return (sparsemap_t *) result;
+    return (sm_t *) result;
 }
 
 int64
@@ -1358,7 +1358,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
     TreScanState *st = (TreScanState *) scan->opaque;
     MemoryContext old;
-    sparsemap_t  *result;
+    sm_t  *result;
     bool          always_true = false;
     int64         ntids = 0;
 
@@ -1522,7 +1522,7 @@ static void
 knn_build(IndexScanDesc scan, TreScanState *st)
 {
     MemoryContext old;
-    volatile sparsemap_t *result = NULL;
+    volatile sm_t *result = NULL;
     bool          always_true = false;
     Relation      heap = scan->heapRelation;
     bool          opened_heap = false;
@@ -1662,11 +1662,11 @@ knn_build(IndexScanDesc scan, TreScanState *st)
             }
             table_endscan(heapscan);
         }
-        else if (result != NULL && sm_cardinality((sparsemap_t *) result) > 0)
+        else if (result != NULL && sm_cardinality((sm_t *) result) > 0)
         {
             uint64 idx = SM_IDX_MAX;
 
-            while ((idx = sm_next_member((sparsemap_t *) result, idx)) != SM_IDX_MAX)
+            while ((idx = sm_next_member((sm_t *) result, idx)) != SM_IDX_MAX)
             {
                 ItemPointerData tid;
                 int32           dist = 0;
@@ -1731,7 +1731,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
          */
         if (result != NULL)
         {
-            free((sparsemap_t *) result);
+            free((sm_t *) result);
             result = NULL;
         }
     }
@@ -1740,7 +1740,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         if (deadline_armed)
             pg_tre_disarm_match_deadline();
         if (result != NULL)
-            free((sparsemap_t *) result);
+            free((sm_t *) result);
         if (compiled != NULL)
             tre_cache_release(compiled);
     }

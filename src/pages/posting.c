@@ -140,7 +140,7 @@ posting_deleted_xid_offset(const PgTrePostingLeafHeader *hdr)
 static uint8 *
 posting_make_empty_sparsemap(Size *out_size)
 {
-    sparsemap_t *sm = sm_create(64);
+    sm_t *sm = sm_create(64);
     uint8  *blob;
     Size    sz;
 
@@ -611,7 +611,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
      */
     {
         size_t cap = (size_t) b->n_tids * 16 + 1024;
-        sparsemap_t *fresh = sm_create(cap);
+        sm_t *fresh = sm_create(cap);
         int k;
         if (fresh == NULL)
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
@@ -749,7 +749,7 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                  * estimate).  See pg_tre_posting_build_finish for the
                  * full rationale. */
                 size_t cap = (size_t)tids_in_leaf * 16 + 1024;
-                sparsemap_t *slice_smap = sm_create(cap);
+                sm_t *slice_smap = sm_create(cap);
                 uint8 *slice_bytes;
                 Size slice_sz;
                 int k;
@@ -887,7 +887,7 @@ struct PgTrePostingScan
     Size        inline_bytes;
     bool        served_inline;
     Buffer      pinned_buf;    /* pinned while *smap is live */
-    sparsemap_t *smap;
+    sm_t *smap;
 };
 
 PgTrePostingScan *
@@ -921,7 +921,7 @@ scan_release_current(PgTrePostingScan *s)
 }
 
 bool
-pg_tre_posting_scan_next(PgTrePostingScan *s, sparsemap_t **out,
+pg_tre_posting_scan_next(PgTrePostingScan *s, sm_t **out,
                          BlockNumber *min_tid_blk, BlockNumber *max_tid_blk)
 {
     scan_release_current(s);
@@ -995,7 +995,7 @@ pg_tre_posting_scan_end(PgTrePostingScan *s)
     pfree(s);
 }
 
-sparsemap_t *
+sm_t *
 pg_tre_posting_materialize(Relation index, BlockNumber root,
                            const uint8 *inline_data, Size inline_bytes)
 {
@@ -1012,7 +1012,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
      */
     if (inline_data != NULL)
     {
-        sparsemap_t *sm = sm_open_copy(inline_data, inline_bytes, 64);
+        sm_t *sm = sm_open_copy(inline_data, inline_bytes, 64);
         if (sm == NULL)
             return NULL;
         return sm;
@@ -1027,7 +1027,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             (PgTrePostingLeafHeader *) PageGetContents(page);
         uint8  *sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
         Size    bytes;
-        sparsemap_t *sm;
+        sm_t *sm;
 
         if (!posting_leaf_header_valid(hdr))
         {
@@ -1060,7 +1060,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
                 (PgTrePostingLeafHeader *) PageGetContents(next_page);
             uint8 *next_sm_bytes = (uint8 *) next_hdr + MAXALIGN(sizeof(*next_hdr));
             Size next_bytes;
-            sparsemap_t *next_sm;
+            sm_t *next_sm;
 
             if (!posting_leaf_header_valid(next_hdr))
             {
@@ -1092,7 +1092,7 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
              * the first and made multi-leaf posting trees return
              * zero rows on lookup.
              */
-            sparsemap_t *merged = sm_union(sm, next_sm);
+            sm_t *merged = sm_union(sm, next_sm);
             sm_free(next_sm);
             if (merged == NULL)
             {
@@ -1137,7 +1137,7 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
                                   uint32 *out_page_format_version)
 {
     Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    sparsemap_t *smap = NULL;
+    sm_t *smap = NULL;
     size_t rank;
     const uint8 *payload_base;
     const uint8 *entry_ptr;
@@ -1331,7 +1331,7 @@ pg_tre_posting_lookup_positions(Relation index,
      */
     uint32 *positions_buf = NULL;
     Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    sparsemap_t *smap = NULL;
+    sm_t *smap = NULL;
     size_t rank;
     const uint8 *payload_base;
     const uint8 *entry_ptr;
@@ -1556,7 +1556,7 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
                       uint64 *out_remaining)
 {
     Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    sparsemap_t *smap;
+    sm_t *smap;
     Size    sm_size;
     bool    has_payload;
     const uint8 *payload_base = NULL;
@@ -1667,7 +1667,7 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
 
     /* Rebuild the sparsemap from survivors. */
     {
-        sparsemap_t *fresh;
+        sm_t *fresh;
         Size    new_sm_size;
         int     k;
 
@@ -1855,7 +1855,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
     PgTrePostingLeafHeader *hdr =
         (PgTrePostingLeafHeader *) PageGetContents(page);
     uint8  *sm_bytes;
-    sparsemap_t *smap;
+    sm_t *smap;
     Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     Size    smap_size;
 
@@ -1993,7 +1993,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
         uint8  *new_sm_bytes;
         Size    new_sm_size;
         char   *sm_area;
-        sparsemap_t *fresh;
+        sm_t *fresh;
         int     k;
 
         if (keep_n > 0)

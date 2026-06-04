@@ -114,6 +114,7 @@ PG_CPPFLAGS = \
     -I$(srcdir)/$(TRE_DIR)/local_includes \
     -I$(srcdir)/$(TRE_DIR) \
     -I$(srcdir)/$(TRE_DIR)/lib \
+    -DSPARSEMAP_PREFIX=__tre_ \
     -Wno-declaration-after-statement
 
 # Link TRE statically.

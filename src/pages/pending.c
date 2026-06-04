@@ -636,12 +636,12 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
     {
         MergeEntry *e = mc->bucket_tab[i];
         PgTreUpperRef ref;
-        sparsemap_t *existing;
-        sparsemap_t *merged;
+        sm_t *existing;
+        sm_t *merged;
         int k;
         size_t sz;
         uint8 *out_buf;
-        sparsemap_t *fresh;
+        sm_t *fresh;
 
         if (e == NULL)
             continue;
@@ -656,7 +656,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
          */
         {
             size_t cap = (size_t) e->n_tids * 16 + 1024;
-            sparsemap_t *fresh_acc = sm_create(cap);
+            sm_t *fresh_acc = sm_create(cap);
             if (fresh_acc == NULL)
                 ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                     errmsg("pg_tre: merge accumulator allocation failed")));
@@ -680,7 +680,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         /*
          * Union with the existing posting (if any).  pg_tre_posting_materialize
-         * returns a palloc-backed sparsemap_t wrap; sm_union returns a
+         * returns a palloc-backed sm_t wrap; sm_union returns a
          * new malloc-backed sparsemap.
          */
         existing = NULL;
@@ -695,7 +695,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         if (existing != NULL)
         {
-            sparsemap_t *u = sm_union(existing, merged);
+            sm_t *u = sm_union(existing, merged);
             free(existing);
             free(merged);
             merged = u;

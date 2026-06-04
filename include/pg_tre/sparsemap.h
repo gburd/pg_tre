@@ -258,14 +258,6 @@ extern "C" {
 
 /** Opaque handle to a sparsemap instance. */
 typedef struct sparsemap sm_t;
-/*
- * pg_tre compatibility shim: sparsemap 3.0.x/4.0.x renamed the public
- * type sparsemap_t -> sm_t.  pg_tre's call sites still use the
- * historical name; keep both working with an alias instead of churning
- * ~70 sites.  contrib/pg_tre_sync.sh overwrites this header on sync, so
- * re-apply this line after each sync until upstream restores the alias.
- */
-typedef struct sparsemap sparsemap_t;
 
 /** @brief Custom allocator hooks.
  *

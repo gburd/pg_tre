@@ -40,8 +40,15 @@ than returning wrong rows.
 ### Changed
 
 - Vendored sparsemap 4.0.0 (`sm.c`/`sm.h`) via the upstream
-  `contrib/pg_tre_sync.sh`.  Kept the `sparsemap_t -> sm_t`
-  compatibility typedef.
+  `contrib/pg_tre_sync.sh`.  Adopted the new public type name
+  `sm_t` at all pg_tre call sites (sparsemap 4.0.0 renamed
+  `sparsemap_t` -> `sm_t`); no compatibility alias.
+- Namespaced the embedded sparsemap with
+  `-DSPARSEMAP_PREFIX=__tre_` so every public sparsemap symbol
+  is emitted as `__tre_sm_*` (76 functions).  This prevents
+  link-time collisions if another library in the same backend
+  also vendors sparsemap.  Compile-time only; the serialized
+  wire format is unchanged.
 - `PG_TRE_FORMAT_VERSION_LATEST` and `..._MIN` are both 6.
 
 ### Verified

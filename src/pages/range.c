@@ -169,7 +169,7 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
     /* Iterate over all trigrams. */
     while (iter(iter_ctx, &trigram_hash, &posting_root, &inline_data, &inline_bytes))
     {
-        sparsemap_t *smap;
+        sm_t *smap;
 
         /* Materialize the posting's sparsemap. */
         smap = pg_tre_posting_materialize(index, posting_root, inline_data, inline_bytes);

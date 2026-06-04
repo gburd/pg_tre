@@ -145,7 +145,7 @@ extern PgTrePostingScan *pg_tre_posting_scan_begin(Relation index,
  * call to scan_next or scan_end.
  */
 extern bool pg_tre_posting_scan_next(PgTrePostingScan *s,
-                                     sparsemap_t **out,
+                                     sm_t **out,
                                      BlockNumber *min_tid_blk,
                                      BlockNumber *max_tid_blk);
 
@@ -154,7 +154,7 @@ extern bool pg_tre_posting_scan_next(PgTrePostingScan *s,
  * sparsemap under the caller's memory context.  Suitable for trigrams
  * whose posting is expected to be small or already cached hot.
  */
-extern sparsemap_t *pg_tre_posting_materialize(Relation index,
+extern sm_t *pg_tre_posting_materialize(Relation index,
                                                BlockNumber root,
                                                const uint8 *inline_data,
                                                Size inline_bytes);
