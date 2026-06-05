@@ -150,11 +150,28 @@ PG_TAP_TMPDIR ?= /tmp/pg_tre_tap_tmp
 # ------------------------------------------------------------------
 PG_VERSION_RAW := $(shell $(PG_CONFIG) --version 2>/dev/null)
 PG_MAJOR := $(shell echo '$(PG_VERSION_RAW)' | awk '{print $$2}' | cut -d. -f1)
+
+# Targets that only package or clean the source tree need no
+# PostgreSQL install and must not trip the version guard (the
+# release-tarball CI job runs `make dist` on a runner whose default
+# pg_config may be older than PG17).  Skip the guard only when every
+# requested goal is PG-independent; a bare `make` (empty MAKECMDGOALS,
+# i.e. the default build) still enforces it.
+PG_INDEPENDENT_GOALS := dist clean distclean
+PG_SKIP_VERSION_CHECK :=
+ifneq ($(MAKECMDGOALS),)
+ifeq ($(filter-out $(PG_INDEPENDENT_GOALS),$(MAKECMDGOALS)),)
+PG_SKIP_VERSION_CHECK := yes
+endif
+endif
+
+ifneq ($(PG_SKIP_VERSION_CHECK),yes)
 ifeq ($(PG_MAJOR),)
 $(error Could not determine PostgreSQL major version from PG_CONFIG=$(PG_CONFIG))
 endif
 ifeq ($(shell test $(PG_MAJOR) -lt 17 2>/dev/null && echo yes),yes)
 $(error pg_tre requires PostgreSQL 17 or newer; found $(PG_MAJOR))
+endif
 endif
 
 # ------------------------------------------------------------------
