@@ -1,0 +1,8 @@
+-- pg_tre 1.8.0 -> 1.8.1 upgrade.
+--
+-- No SQL-catalog changes, no on-disk format change, no behavior
+-- change.  1.8.1 is a release-pipeline fix only: 'make dist' no
+-- longer requires a PG17+ pg_config, so the tag-triggered CI
+-- release-tarball job passes.  Intentionally empty.
+--
+--     ALTER EXTENSION pg_tre UPDATE TO '1.8.1';

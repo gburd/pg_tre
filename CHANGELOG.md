@@ -6,6 +6,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.8.1] - 2026-06-04 - release-pipeline fix (green CI on tags)
+
+No extension code, on-disk format, or behavior change from 1.8.0
+(the compiled `.so` is byte-identical apart from the version
+string); no REINDEX.  This patch exists solely to make the
+tag-triggered release pipeline pass.
+
+### Fixed (CI)
+
+- The tag-only **release-tarball** job (`make dist`) aborted on
+  `Makefile:157: pg_tre requires PostgreSQL 17 or newer; found
+  16` because that job's runner `pg_config` is PostgreSQL 16 and
+  the Makefile's version guard runs on every target.  Every tag
+  push (1.6.1, 1.7.0, 1.8.0) therefore showed a red CI run even
+  though the build/test matrix, sanitizers, and pgspot were all
+  green on the corresponding `main` push.  `make dist` is pure
+  `git archive` + tar + gzip and needs no PostgreSQL, so the
+  version guard is now skipped when every requested goal is
+  PG-independent (`dist`/`clean`/`distclean`); a bare `make`
+  build and `make install` still enforce PG17+.
+
+Process note: 1.6.1/1.7.0/1.8.0 were tagged with local
+qualification green but the tag CI red (this packaging job).
+That gap is what this release closes; going forward a release is
+not considered done until the tag's CI is green.
+
+---
+
 ## [1.8.0] - 2026-06-04 - tuplesort-based build: bounded memory at scale
 
 No on-disk format change (still v6); same indexes, no REINDEX.

@@ -1,6 +1,6 @@
 # pg_tre status
 
-Released: **1.8.1-dev** (2026-06).  See `CHANGELOG.md` for full
+Released: **1.8.1** (2026-06).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
