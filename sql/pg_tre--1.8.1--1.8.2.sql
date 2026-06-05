@@ -1,0 +1,7 @@
+-- pg_tre 1.8.1 -> 1.8.2 upgrade.
+--
+-- No SQL-catalog, on-disk format, or behavior change.  1.8.2 is a
+-- CI/release-pipeline fix only (GitHub release-publish permission).
+-- Intentionally empty.
+--
+--     ALTER EXTENSION pg_tre UPDATE TO '1.8.2';

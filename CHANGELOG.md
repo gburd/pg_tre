@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.8.2] - 2026-06-05 - green CI on tags (release-publish permission)
+
+No extension/format/behavior change from 1.8.0/1.8.1; no REINDEX.
+Continues closing the tag-CI gap: after 1.8.1 fixed `make dist`,
+the tag release-artifacts job built the tarball but the GitHub
+release-publish step 403'd because the default `GITHUB_TOKEN` is
+read-only.  Grant `permissions: contents: write` and make the
+publish step best-effort (this repo's canonical releases are the
+Codeberg tags; GitHub is a mirror).  The tarball build remains
+the packaging gate.
+
+---
+
 ## [1.8.1] - 2026-06-04 - release-pipeline fix (green CI on tags)
 
 No extension code, on-disk format, or behavior change from 1.8.0
