@@ -310,6 +310,11 @@ jobs:
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-and-test, lint-docs]
+    # Allow the GITHUB_TOKEN to create a GitHub Release.  The default
+    # token is read-only; without this the publish step 403s with
+    # "Resource not accessible by integration".
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -322,6 +327,12 @@ jobs:
         run: make dist
 
       - name: Create release
+        # Best-effort: this repository's canonical releases are the
+        # git tags on Codeberg; the GitHub repo is a mirror.  The
+        # tarball *build* above is the packaging gate; publishing a
+        # GitHub Release is a convenience and must not red the
+        # pipeline if the mirror's token policy forbids it.
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           files: |
