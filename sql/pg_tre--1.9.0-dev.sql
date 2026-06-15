@@ -1,4 +1,4 @@
--- pg_tre 1.8.2 -- native index AM for approximate regex matching.
+-- pg_tre 1.9.0-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
