@@ -41,6 +41,7 @@ bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
 int  pg_tre_tier3_max_candidates   = 50000;
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
+double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
 
 void
 pg_tre_init_guc(void)
@@ -130,6 +131,14 @@ pg_tre_init_guc(void)
         " ceiling on build temp-disk consumption.",
         &pg_tre_build_max_entries_mb,
         0, 0, INT_MAX, PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
+
+    DefineCustomRealVariable("pg_tre.similarity_threshold",
+        "Threshold the %% operator uses for trigram-set similarity.",
+        "text %% text is true when tre_trgm_similarity(a, b) >= this"
+        " value.  Mirrors pg_trgm.similarity_threshold so queries"
+        " port unchanged.",
+        &pg_tre_similarity_threshold,
+        0.3, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 
     /*
      * Cardinality-aware build (1.2.1+).  Posting trees with fewer
