@@ -1,4 +1,4 @@
--- pg_tre 1.10.1-dev -- native index AM for approximate regex matching.
+-- pg_tre 1.10.1 -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -235,7 +235,7 @@ ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
 -- ---------------------------------------------------------------
--- 1.10.1-dev (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
+-- 1.10.1 (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
 -- Bind the built-in text pattern operators so the planner uses a
 -- pg_tre index for col LIKE '%foo%', col ~ 'fo+o', col = 'foo'.
 -- Each lowers to the trigram engine at k=0; the executor rechecks
@@ -300,7 +300,7 @@ COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
     'pg_tre_index_format_status().';
 
 -- ---------------------------------------------------------------
--- 1.10.1-dev: pg_trgm-compatible trigram-set similarity (Phase A / A2).
+-- 1.10.1: pg_trgm-compatible trigram-set similarity (Phase A / A2).
 -- Cheap, stateless Jaccard similarity over pg_trgm's trigram model;
 -- distinct from edit-distance tre_similarity / <@>.
 -- ---------------------------------------------------------------

@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.10.0] - 2026-06-05 - LIKE/ILIKE/regex/= index acceleration (Phase A / A1)
+## [1.10.1] - 2026-06-05 - LIKE/ILIKE/regex/= index acceleration (Phase A / A1)
 
 > North star: pg_tre is a REGEX index with edit distance.  A1
 > lets the planner use a pg_tre index for the operators people
@@ -15,6 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 > rechecks with the built-in operator.
 
 No on-disk format change; no REINDEX.
+
+> 1.10.0 was tagged on an incomplete commit; 1.10.1 re-ships the
+> complete A1 release under a clean tag.  There is no catalog or
+> format difference between a correctly-installed 1.10.0 and 1.10.1.
 
 ### Added
 
