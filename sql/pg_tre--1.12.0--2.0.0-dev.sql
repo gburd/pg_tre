@@ -1,9 +1,28 @@
--- pg_tre 1.12.0 -> 2.0.0-dev upgrade.
+-- pg_tre 1.12.0 -> 2.0.0 upgrade.
 --
--- This stub is filled in as catalog-changing features land in
--- the dev cycle.  At release time, run the audit from
--- RELEASING.md to confirm every new CREATE FUNCTION /
--- OPERATOR / OPERATOR CLASS / TYPE / CAST / ALTER OPERATOR
--- FAMILY in sql/pg_tre--2.0.0-dev.sql has a matching statement
--- here, and every removed/renamed object has a matching
--- DROP / ALTER.
+-- Phase B1: on-disk run/level catalog (format v6 -> v7).
+--
+-- The format change is PURELY ADDITIVE: an existing v6 index is read
+-- as a single implicit run, so it keeps working under v7 code with
+-- NO REINDEX.  To materialize the v7 catalog fields on the meta page
+-- (so the on-disk page is self-describing), run:
+--
+--   SELECT pg_tre_upgrade_index('your_index'::regclass);
+--
+-- This is optional in 2.0.0 (read-time normalization handles a v6
+-- meta page), and stamps the catalog header without rewriting any
+-- posting data.
+--
+-- New introspection function only; no catalog/operator changes.
+
+CREATE FUNCTION tre_run_catalog_status(regclass)
+    RETURNS TABLE(run_id bigint, level int4, n_tuples bigint,
+                  n_trigrams bigint, min_hash numeric, max_hash numeric)
+    AS 'MODULE_PATHNAME', 'tre_run_catalog_status'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE
+    ROWS 8;
+
+COMMENT ON FUNCTION tre_run_catalog_status(regclass) IS
+    'Introspection over the Phase B1 run/level catalog (format v7): '
+    'one row per live run, newest run_id first.  A v6 or default-v7 '
+    'index reports a single implicit run rooted at the index roots.';

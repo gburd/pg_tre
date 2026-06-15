@@ -16,7 +16,8 @@
 
 EXTENSION    = pg_tre
 MODULE_big   = pg_tre
-DATA         = sql/pg_tre--1.12.0.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql sql/pg_tre--1.5.4.sql sql/pg_tre--1.5.3.sql sql/pg_tre--1.5.2.sql sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+DATA         = sql/pg_tre--2.0.0-dev.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql sql/pg_tre--1.5.4.sql sql/pg_tre--1.5.3.sql sql/pg_tre--1.5.2.sql sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+       sql/pg_tre--1.12.0--2.0.0-dev.sql \
        sql/pg_tre--1.11.0--1.12.0.sql \
        sql/pg_tre--1.10.1--1.11.0.sql \
        sql/pg_tre--1.10.0--1.10.1.sql \
@@ -44,7 +45,7 @@ DATA         = sql/pg_tre--1.12.0.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sq
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge testregex
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog testregex
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -386,7 +387,7 @@ coverage-report:
 # ------------------------------------------------------------------
 # Release tarball
 # ------------------------------------------------------------------
-PG_TRE_VERSION = 1.12.0
+PG_TRE_VERSION = 2.0.0-dev
 DIST_NAME      = pg_tre-$(PG_TRE_VERSION)
 
 dist:

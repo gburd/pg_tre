@@ -1,0 +1,78 @@
+-- Phase B1: run/level catalog (format v7).
+-- A freshly built index has exactly one implicit run (run_id 0,
+-- level 1) rooted at the index roots, and its scan results are
+-- identical to a forced seq scan.  This is the "worst case = today"
+-- guarantee: one run behaves exactly like the pre-v7 structure.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/run_catalog.sql:6: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+CREATE TABLE rc_t(id serial primary key, body text);
+CREATE TABLE
+INSERT INTO rc_t(body)
+SELECT md5(g::text) || (CASE WHEN g % 50 = 0 THEN ' findme' ELSE '' END)
+FROM generate_series(1, 2000) g;
+INSERT 0 2000
+CREATE INDEX rc_idx ON rc_t USING tre (body);
+psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: collected 60280 trigram entries from 2000 heap tuples
+psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: built 4152 posting trees
+psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: build complete, indexed 2000 heap tuples into 4152 trigrams
+CREATE INDEX
+ANALYZE rc_t;
+ANALYZE
+-- Exactly one live run, the implicit single run.
+SELECT count(*) AS n_runs FROM tre_run_catalog_status('rc_idx');
+ n_runs 
+--------
+      1
+(1 row)
+
+SELECT run_id, level FROM tre_run_catalog_status('rc_idx');
+ run_id | level 
+--------+-------
+      0 |     1
+(1 row)
+
+-- The index is at format v7.
+SELECT format_version FROM pg_tre_index_format_status('rc_idx');
+ format_version 
+----------------
+              7
+(1 row)
+
+-- Scan result equals seq-scan ground truth.
+SET enable_seqscan = off;
+SET
+SELECT count(*) AS idx_count FROM rc_t WHERE body %~~ tre_pattern('findme', 0);
+ idx_count 
+-----------
+        40
+(1 row)
+
+SET enable_seqscan = on; SET enable_indexscan = off; SET enable_bitmapscan = off;
+SET
+SET
+SET
+SELECT count(*) AS seq_count FROM rc_t WHERE body %~~ tre_pattern('findme', 0);
+ seq_count 
+-----------
+        40
+(1 row)
+
+-- upgrade_index on an already-v7 index is a no-op; results unchanged.
+SELECT pg_tre_upgrade_index('rc_idx');
+ pg_tre_upgrade_index 
+----------------------
+ 
+(1 row)
+
+SET enable_seqscan = off;
+SET
+SELECT count(*) AS post_upgrade FROM rc_t WHERE body %~~ tre_pattern('findme', 0);
+ post_upgrade 
+--------------
+           40
+(1 row)
+
+DROP TABLE rc_t;
+DROP TABLE

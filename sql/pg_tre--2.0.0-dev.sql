@@ -1,4 +1,4 @@
--- pg_tre 1.12.0 -- native index AM for approximate regex matching.
+-- pg_tre 2.0.0-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -235,7 +235,7 @@ ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
 -- ---------------------------------------------------------------
--- 1.12.0 (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
+-- 2.0.0-dev (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
 -- Bind the built-in text pattern operators so the planner uses a
 -- pg_tre index for col LIKE '%foo%', col ~ 'fo+o', col = 'foo'.
 -- Each lowers to the trigram engine at k=0; the executor rechecks
@@ -299,8 +299,20 @@ COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
     'Cheap O(1); for the authoritative full-walk view use '
     'pg_tre_index_format_status().';
 
+CREATE FUNCTION tre_run_catalog_status(regclass)
+    RETURNS TABLE(run_id bigint, level int4, n_tuples bigint,
+                  n_trigrams bigint, min_hash numeric, max_hash numeric)
+    AS 'MODULE_PATHNAME', 'tre_run_catalog_status'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE
+    ROWS 8;
+
+COMMENT ON FUNCTION tre_run_catalog_status(regclass) IS
+    'Introspection over the Phase B1 run/level catalog (format v7): '
+    'one row per live run, newest run_id first.  A v6 or default-v7 '
+    'index reports a single implicit run rooted at the index roots.';
+
 -- ---------------------------------------------------------------
--- 1.12.0: pg_trgm-compatible trigram-set similarity (Phase A / A2).
+-- 2.0.0-dev: pg_trgm-compatible trigram-set similarity (Phase A / A2).
 -- Cheap, stateless Jaccard similarity over pg_trgm's trigram model;
 -- distinct from edit-distance tre_similarity / <@>.
 -- ---------------------------------------------------------------
@@ -328,7 +340,7 @@ CREATE OPERATOR <-> (
 );
 
 -- ---------------------------------------------------------------
--- 1.12.0 (Phase A / A2 remainder): word_similarity operators.
+-- 2.0.0-dev (Phase A / A2 remainder): word_similarity operators.
 -- pg_trgm-compatible asymmetric word-boundary similarity:
 --   word_similarity(a,b)        = best Jaccard of a vs any extent of b
 --   strict_word_similarity(a,b) = same, extents pinned to word bounds
