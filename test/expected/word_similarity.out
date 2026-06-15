@@ -1,0 +1,100 @@
+-- Phase A (A2 remainder): word_similarity / strict_word_similarity.
+-- Values must equal pg_trgm's (verified against the live extension):
+--   word_similarity('cat','category')                = 0.75
+--   word_similarity('word','two words here')         = 0.8
+--   strict_word_similarity('word','two words here')  = 0.5714286
+-- The pg_tre operators (% / <-> / word ones) intentionally collide
+-- with pg_trgm's by name; the two extensions are never co-installed.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/word_similarity.sql:8: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+SELECT tre_word_similarity('cat', 'category')            AS ws_cat_category;
+ ws_cat_category 
+-----------------
+            0.75
+(1 row)
+
+SELECT tre_word_similarity('cat', 'a category dog')      AS ws_cat_extent;
+ ws_cat_extent 
+---------------
+          0.75
+(1 row)
+
+SELECT tre_word_similarity('word', 'two words here')     AS ws_word;
+ ws_word 
+---------
+     0.8
+(1 row)
+
+SELECT tre_word_similarity('foo', 'the foobar baz')      AS ws_foo;
+ ws_foo 
+--------
+   0.75
+(1 row)
+
+SELECT tre_word_similarity('xyz', 'abcdefg')             AS ws_nomatch;
+ ws_nomatch 
+------------
+          0
+(1 row)
+
+SELECT tre_word_similarity('', 'empty')                  AS ws_empty;
+ ws_empty 
+----------
+        0
+(1 row)
+
+SELECT tre_strict_word_similarity('word', 'two words here') AS sws_word;
+ sws_word  
+-----------
+ 0.5714286
+(1 row)
+
+SELECT tre_strict_word_similarity('cat', 'category')        AS sws_cat;
+ sws_cat 
+---------
+     0.3
+(1 row)
+
+-- Operators.
+SELECT 'cat' <%  'a category dog'  AS op_word_sim;        -- true (>= 0.3)
+ op_word_sim 
+-------------
+ t
+(1 row)
+
+SELECT 'xyz' <%  'abcdefg'         AS op_word_sim_no;     -- false
+ op_word_sim_no 
+----------------
+ f
+(1 row)
+
+SELECT round((('cat' <<-> 'a category dog')::numeric), 6) AS op_word_dist;
+ op_word_dist 
+--------------
+     0.250000
+(1 row)
+
+SELECT 'word' <<% 'two words here' AS op_strict_sim;      -- 0.5714 >= 0.3 -> true
+ op_strict_sim 
+---------------
+ t
+(1 row)
+
+SELECT round((('word' <<<-> 'two words here')::numeric), 6) AS op_strict_dist;
+ op_strict_dist 
+----------------
+       0.428571
+(1 row)
+
+-- Threshold GUC is honored by the % family.
+SET pg_tre.similarity_threshold = 0.9;
+SET
+SELECT 'cat' <% 'a category dog' AS op_high_threshold;    -- 0.75 < 0.9 -> false
+ op_high_threshold 
+-------------------
+ f
+(1 row)
+
+RESET pg_tre.similarity_threshold;
+RESET

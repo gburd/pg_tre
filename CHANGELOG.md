@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.11.0] - 2026-06-05 - word_similarity / strict_word_similarity (Phase A / A2)
+
+> North star: pg_tre is a REGEX index with edit distance.  A2's
+> Jaccard similarity exists only so a user can drop pg_trgm and
+> keep its cheap similarity operators with the SAME numbers.
+
+No on-disk format change; no REINDEX.
+
+### Added
+
+- **`tre_word_similarity(text, text)` and
+  `tre_strict_word_similarity(text, text)`** -- pg_trgm-compatible
+  asymmetric word-boundary similarity.  `word_similarity(a, b)` is
+  the greatest trigram Jaccard similarity of `a` against any
+  contiguous trigram extent of `b`; the strict variant pins
+  extents to word boundaries.  Faithful port of pg_trgm's
+  `iterate_word_similarity` over pg_tre's codepoint trigrams.
+- **Operators**: `<%` (word_similarity >= threshold), `<<->`
+  (1 - word_similarity, distance), `<<%` (strict variant), and
+  `<<<->` (strict distance) -- mirroring pg_trgm.
+- The `%` family honors `pg_tre.similarity_threshold` (1.9.0).
+
+### Verified
+
+- Numerically **identical to pg_trgm** across 15 varied pairs
+  (substrings, multibyte `café`, case-folding, digits, empty
+  strings, multi-word): zero mismatches.  Examples:
+  `word_similarity('cat','category')=0.75`,
+  `word_similarity('word','two words here')=0.8`,
+  `strict_word_similarity('word','two words here')=0.5714286`.
+- 24/24 regression (new `test/sql/word_similarity.sql`).
+
+### Notes
+
+- These are functional/operator semantics only; KNN over Jaccard
+  (index-assisted `ORDER BY col <-> 'x'`) is a later item.
+- Combined with A1 (1.10.x) and A2 similarity (1.9.0), a single
+  pg_tre index now backs `LIKE`/`~`/`=`, and the full pg_trgm
+  similarity operator set (`%`, `<->`, `<%`, `<<->`, `<<%`,
+  `<<<->`) is available.  Remaining Phase A: accurate `{~k}`
+  selectivity (A3).
+
+---
+
 ## [1.10.1] - 2026-06-05 - LIKE/ILIKE/regex/= index acceleration (Phase A / A1)
 
 > North star: pg_tre is a REGEX index with edit distance.  A1

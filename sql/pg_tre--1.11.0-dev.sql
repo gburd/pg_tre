@@ -1,4 +1,4 @@
--- pg_tre 1.10.1 -- native index AM for approximate regex matching.
+-- pg_tre 1.11.0-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -235,7 +235,7 @@ ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
 -- ---------------------------------------------------------------
--- 1.10.1 (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
+-- 1.11.0-dev (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
 -- Bind the built-in text pattern operators so the planner uses a
 -- pg_tre index for col LIKE '%foo%', col ~ 'fo+o', col = 'foo'.
 -- Each lowers to the trigram engine at k=0; the executor rechecks
@@ -300,7 +300,7 @@ COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
     'pg_tre_index_format_status().';
 
 -- ---------------------------------------------------------------
--- 1.10.1: pg_trgm-compatible trigram-set similarity (Phase A / A2).
+-- 1.11.0-dev: pg_trgm-compatible trigram-set similarity (Phase A / A2).
 -- Cheap, stateless Jaccard similarity over pg_trgm's trigram model;
 -- distinct from edit-distance tre_similarity / <@>.
 -- ---------------------------------------------------------------
@@ -325,4 +325,57 @@ CREATE OPERATOR % (
 CREATE OPERATOR <-> (
     LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_trgm_distance,
     COMMUTATOR = <->
+);
+
+-- ---------------------------------------------------------------
+-- 1.11.0 (Phase A / A2 remainder): word_similarity operators.
+-- pg_trgm-compatible asymmetric word-boundary similarity:
+--   word_similarity(a,b)        = best Jaccard of a vs any extent of b
+--   strict_word_similarity(a,b) = same, extents pinned to word bounds
+-- Operators mirror pg_trgm:
+--   a <%  b  = word_similarity(a,b)        >= threshold
+--   a <<-> b = 1 - word_similarity(a,b)    (distance)
+--   a <<%  b = strict_word_similarity(a,b) >= threshold
+--   a <<<-> b = 1 - strict_word_similarity(a,b)
+-- ---------------------------------------------------------------
+CREATE FUNCTION tre_word_similarity(text, text)
+    RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_word_similarity'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_strict_word_similarity(text, text)
+    RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_strict_word_similarity'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_word_sim_op(text, text)
+    RETURNS bool AS 'MODULE_PATHNAME', 'pg_tre_word_sim_op'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_word_dist_op(text, text)
+    RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_word_dist_op'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_strict_word_sim_op(text, text)
+    RETURNS bool AS 'MODULE_PATHNAME', 'pg_tre_strict_word_sim_op'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_strict_word_dist_op(text, text)
+    RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_strict_word_dist_op'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+CREATE OPERATOR <% (
+    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_word_sim_op,
+    RESTRICT = contsel, JOIN = contjoinsel
+);
+
+CREATE OPERATOR <<-> (
+    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_word_dist_op
+);
+
+CREATE OPERATOR <<% (
+    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_strict_word_sim_op,
+    RESTRICT = contsel, JOIN = contjoinsel
+);
+
+CREATE OPERATOR <<<-> (
+    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_strict_word_dist_op
 );
