@@ -167,7 +167,18 @@ trgm_set(const char *str, int len)
                         hcap *= 2;
                         hbuf = (uint32 *) repalloc(hbuf, sizeof(uint32) * hcap);
                     }
-                    hbuf[hn++] = (uint32) pg_tre_hash_trigram_cp(t);
+                    {
+                        /*
+                         * Fold the full 64-bit trigram hash into 32
+                         * bits (XOR halves).  A bare (uint32) cast
+                         * would keep only the low half, which encodes
+                         * just (cp0, cp1) -- dropping the third
+                         * codepoint and collapsing every "  X" leading
+                         * trigram to one value.
+                         */
+                        uint64 fh = pg_tre_hash_trigram_cp(t);
+                        hbuf[hn++] = (uint32) (fh ^ (fh >> 32));
+                    }
                     ring[0] = ring[1];
                     ring[1] = ring[2];
                 }

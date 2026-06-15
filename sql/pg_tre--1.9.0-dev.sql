@@ -282,3 +282,31 @@ COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
     'minimum per-page format_version known to exist in the index.  '
     'Cheap O(1); for the authoritative full-walk view use '
     'pg_tre_index_format_status().';
+
+-- ---------------------------------------------------------------
+-- 1.9.0: pg_trgm-compatible trigram-set similarity (Phase A / A2).
+-- Cheap, stateless Jaccard similarity over pg_trgm's trigram model;
+-- distinct from edit-distance tre_similarity / <@>.
+-- ---------------------------------------------------------------
+
+CREATE FUNCTION tre_trgm_similarity(text, text)
+    RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_trgm_similarity'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_trgm_distance(text, text)
+    RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_trgm_distance'
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION tre_trgm_sim_op(text, text)
+    RETURNS bool AS 'MODULE_PATHNAME', 'pg_tre_trgm_sim_op'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+CREATE OPERATOR % (
+    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_trgm_sim_op,
+    COMMUTATOR = %, RESTRICT = contsel, JOIN = contjoinsel
+);
+
+CREATE OPERATOR <-> (
+    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_trgm_distance,
+    COMMUTATOR = <->
+);
