@@ -1,0 +1,6 @@
+-- pg_tre 1.11.0 -> 1.12.0 upgrade.
+--
+-- Phase A (A3): accurate %~~ / {~k} selectivity estimation.  This is
+-- a pure planner-side improvement in the C code (tre_pattern_sel now
+-- reads real per-trigram posting cardinalities); there is no catalog
+-- or on-disk change, so this upgrade is intentionally empty.
