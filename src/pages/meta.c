@@ -56,6 +56,17 @@ pg_tre_meta_init(Page page)
     meta->created_xid        = GetCurrentTransactionIdIfAny();
 
     /*
+     * Phase B1 (v7) run catalog: a fresh index has one implicit run
+     * rooted at root_upper/root_range, so there is no catalog page.
+     * Stamp the fields explicitly (rather than rely on read-time
+     * normalization) so the on-disk page is self-describing.
+     */
+    meta->next_run_id        = 1;
+    meta->run_catalog_head   = InvalidBlockNumber;
+    meta->n_runs             = 0;
+    meta->max_levels         = 7;
+
+    /*
      * Place the lower/upper pointers past the meta struct so PageAddItem
      * (which we don't use on this page, but which PageInit expects to be
      * valid) remains self-consistent.
@@ -91,6 +102,22 @@ pg_tre_meta_read(Relation index, PgTreMetaPageData *out)
      */
     if (out->min_page_format_version == 0)
         out->min_page_format_version = out->format_version;
+
+    /*
+     * Phase B1 (v7) run catalog.  A pre-v7 (v6) meta page left these
+     * fields zero in the former reserved[] tail.  Normalize a v6 (or
+     * un-initialized v7) page to the single-implicit-run state:
+     * run_catalog_head = InvalidBlockNumber (NOT 0, which is a valid
+     * block), n_runs = 0 (meaning "one implicit run rooted at
+     * root_upper/root_range"), and a default Hanoi cap.  next_run_id
+     * starts at 1 so the first real flushed run gets a nonzero id.
+     */
+    if (out->n_runs == 0 && out->run_catalog_head == 0)
+        out->run_catalog_head = InvalidBlockNumber;
+    if (out->max_levels == 0)
+        out->max_levels = 7;
+    if (out->next_run_id == 0)
+        out->next_run_id = 1;
 
     UnlockReleaseBuffer(buf);
 }

@@ -92,6 +92,7 @@ OBJS = \
     src/pages/posting.o \
     src/pages/pending.o \
     src/pages/range.o \
+    src/pages/run_catalog.o \
     src/wal/xlog.o \
     src/query/tre_grammar.o \
     src/query/tokens.o \

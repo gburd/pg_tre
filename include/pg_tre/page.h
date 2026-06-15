@@ -42,7 +42,8 @@ typedef enum PageTreKind
     PG_TRE_PAGE_POSTING   = 4,
     PG_TRE_PAGE_POSTING_L = 5,
     PG_TRE_PAGE_RANGE     = 6,
-    PG_TRE_PAGE_PENDING   = 7
+    PG_TRE_PAGE_PENDING   = 7,
+    PG_TRE_PAGE_RUN_CATALOG = 8     /* format v7: run/level catalog (Phase B1) */
 } PageTreKind;
 
 /*
@@ -120,8 +121,27 @@ typedef struct PgTreMetaPageData
      */
     uint32      min_page_format_version;
 
+    /*
+     * 2.0.0 (Phase B1): run/level catalog.  These fields are carved
+     * from the former reserved[] space and are zero on a pre-v7
+     * (v6) meta page, which pg_tre_meta_read interprets as "one
+     * implicit run rooted at root_upper/root_range, no catalog
+     * page" -- identical behavior to today.
+     *
+     *   next_run_id      monotonic 64-bit run-id allocator (never
+     *                    wraps, never reuses).  0 on a v6 page.
+     *   run_catalog_head first catalog page, or InvalidBlockNumber
+     *                    for the single-implicit-run default.
+     *   n_runs           count of live runs (0 == implicit single).
+     *   max_levels       Hanoi level cap (default 7).
+     */
+    uint64      next_run_id;
+    BlockNumber run_catalog_head;
+    uint32      n_runs;
+    uint32      max_levels;
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[27];
+    uint32      reserved[22];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;
@@ -206,6 +226,47 @@ typedef struct PgTreRangeLeafEntry
     uint32      bloom_bytes;            /* size of bloom that follows */
     /* bloom bytes follow inline */
 } PgTreRangeLeafEntry;
+
+/* ---- Run/level catalog (format v7, Phase B1) ---- */
+
+/* Per-run flags in PgTreRun.flags. */
+#define PG_TRE_RUN_LIVE      0x0001   /* run participates in scans */
+#define PG_TRE_RUN_TOMBSTONE 0x0002   /* run holds only tombstones (deletes) */
+
+/*
+ * One run: a self-contained pg_tre sub-index (upper-tree + range
+ * tier + posting trees) over a slice of ingested rows.  run_id is
+ * monotonic 64-bit (never wraps, never reused), mirroring aether's
+ * RunId; it is NOT a transaction id (B1 has no visibility axis).
+ * [min_trigram_hash, max_trigram_hash] is the run-skip range
+ * filter (aether's Surf analogue): a scan whose queried trigram
+ * hash is outside the range skips this run.
+ */
+typedef struct PgTreRun
+{
+    uint64      run_id;
+    uint32      level;              /* Hanoi level, 1-based (0 = nursery) */
+    uint32      flags;
+    BlockNumber root_upper;
+    BlockNumber root_range;
+    uint32      _pad0;
+    uint64      n_tuples;
+    uint64      n_trigrams;
+    uint64      min_trigram_hash;
+    uint64      max_trigram_hash;
+} PgTreRun;                         /* 64 bytes, 8-aligned */
+
+/*
+ * Run catalog page header: an array of PgTreRun follows immediately
+ * after PageGetContents.  Pages chain via right_link when there are
+ * more runs than fit on one page (~126 runs/page).
+ */
+typedef struct PgTreRunCatalogHeader
+{
+    BlockNumber right_link;         /* next catalog page, or Invalid */
+    uint32      n_entries;          /* PgTreRun records on this page */
+    uint32      _pad0;
+} PgTreRunCatalogHeader;
 
 /* ---- Range summary page header (format v5+) ----
  *

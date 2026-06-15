@@ -50,11 +50,14 @@
  *
  * Reader policy: any version in [PG_TRE_FORMAT_VERSION_MIN,
  * PG_TRE_FORMAT_VERSION_LATEST] is readable on the page-decode side.
- * As of 1.12.0 MIN == LATEST == 6: there is no in-place upgrade from
- * v<6 because the embedded sparsemap bytes are unreadable; REINDEX is
- * the migration (and the data-loss remedy).  See doc/onpage_format.md.
+ * As of 2.0.0 LATEST == 7, MIN == 6: v7 adds the run/level catalog
+ * (Phase B1) but is purely additive -- a v6 index is read as a
+ * single implicit run with no catalog page, so v6 indexes work
+ * unchanged under v7 code with NO REINDEX.  (Contrast the v5->v6
+ * sparsemap break, which required REINDEX.)  See
+ * doc/specs/phaseB1-run-catalog.md and doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 6
+#define PG_TRE_FORMAT_VERSION_LATEST 7
 #define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the

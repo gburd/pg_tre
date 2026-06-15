@@ -150,14 +150,38 @@ pg_tre_upgrade_page_to_latest(Page page)
     {
         case 3:
         case 4:
+        case 5:
+        case 6:
             /*
-             * Non-range pages: byte-identical across v3, v4, v5.  We
+             * Non-range pages: byte-identical across v3..v7.  We
              * just need to flip the per-page version stamp below.
+             * v6 -> v7 (Phase B1 run catalog) is purely additive:
+             * existing pages are unchanged, and the meta page's new
+             * v7 catalog fields are initialized separately (see the
+             * meta-page arm below).
              */
             break;
         default:
             elog(ERROR, "pg_tre: page format upgrade from v%u not implemented",
                  from);
+    }
+
+    /*
+     * v6 -> v7: a v6 meta page left the run-catalog fields zero in
+     * the former reserved[] tail.  Initialize them to the
+     * single-implicit-run state so the upgraded on-disk page is
+     * self-describing (matches pg_tre_meta_init for a fresh index).
+     */
+    if (opq->page_kind == (uint16) PG_TRE_PAGE_META && from < 7)
+    {
+        PgTreMetaPage meta = PgTreMetaPageGet(page);
+
+        if (meta->next_run_id == 0)
+            meta->next_run_id = 1;
+        if (meta->n_runs == 0 && meta->run_catalog_head == 0)
+            meta->run_catalog_head = InvalidBlockNumber;
+        if (meta->max_levels == 0)
+            meta->max_levels = 7;
     }
 
     opq->format_version = PG_TRE_FORMAT_VERSION_LATEST;
