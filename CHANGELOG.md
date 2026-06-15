@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.12.0] - 2026-06-05 - accurate selectivity (Phase A / A3)
+
+> North star: pg_tre is a REGEX index with edit distance.  A3
+> makes the planner cost regex/LIKE predicates correctly so it
+> stops choosing the index when a seq scan wins.
+
+No on-disk format change; no REINDEX.
+
+### Fixed
+
+- **`%~~` selectivity was always `rows=1`**, so the planner chose a
+  pg_tre index for *every* predicate -- including patterns matching
+  most of the table, where a seq scan is far cheaper.  This was the
+  root cause of the field-report slowdown on non-selective queries.
+
+### Changed
+
+- `tre_pattern_sel` now reads **real per-trigram posting
+  cardinalities** from the index (a new `pg_tre_posting_cardinality`
+  walks the posting leaf chain, capped to bound plan-time I/O on hot
+  trigrams) instead of a single global mean density.
+- For an exact (k=0) pattern, the trigrams of a literal co-occur, so
+  the AND selectivity is the rarest required trigram's selectivity
+  (min_sel), not an independence product (which under-estimated by
+  orders of magnitude).  On the test corpus the estimates are now
+  exact: `common_tok` -> 5000, `rare_tok` -> 100, `unique_zzz` -> 1,
+  and the planner seq-scans the 50%-match pattern while index-scanning
+  the 1-row pattern.
+- The duplicated estimator in the cost-estimate path is unified onto
+  the shared `pg_tre_estimate_trigram_selectivity`.
+
+### Notes / honest limits
+
+- **Fuzzy (k>0) selectivity is conservative**, biased toward a seq
+  scan.  Edit-distance tiling expands a short pattern into thousands
+  of variant trigrams that genuinely defeat pruning, so the estimate
+  over-states matches rather than risk a slow index scan on a
+  non-selective fuzzy query.  Precise k>0 estimation is future work.
+- 25/25 regression (new `test/sql/selectivity.sql` asserts the
+  plan-choice contract; `planner_auto` estimates improved from
+  `rows=1` to accurate counts).
+
+---
+
 ## [1.11.0] - 2026-06-05 - word_similarity / strict_word_similarity (Phase A / A2)
 
 > North star: pg_tre is a REGEX index with edit distance.  A2's
