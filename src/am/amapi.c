@@ -28,7 +28,7 @@ tre_handler(PG_FUNCTION_ARGS)
 {
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
-    amroutine->amstrategies    = 2;
+    amroutine->amstrategies    = 7;
     amroutine->amsupport       = 4;
     amroutine->amoptsprocnum   = 0;
 

@@ -12,6 +12,14 @@
 /* Strategy numbers for the text operator class. */
 #define PG_TRE_STRATEGY_APPROX_MATCH   1   /* text '%~~' tre_pattern */
 #define PG_TRE_STRATEGY_DISTANCE       2   /* text '<@>' tre_pattern (ORDER BY) */
+/* Phase A / A1: pg_trgm-parity operators with a text RHS, lowered
+ * to the same trigram engine at k=0; executor rechecks with the
+ * built-in operator so the index is a lossy candidate filter. */
+#define PG_TRE_STRATEGY_LIKE           3   /* text '~~'  text  (LIKE) */
+#define PG_TRE_STRATEGY_ILIKE          4   /* text '~~*' text  (ILIKE) */
+#define PG_TRE_STRATEGY_REGEX          5   /* text '~'   text  (regex) */
+#define PG_TRE_STRATEGY_IREGEX         6   /* text '~*'  text  (iregex) */
+#define PG_TRE_STRATEGY_EQUAL          7   /* text '='   text  (equality) */
 
 /* Support function numbers (custom -- no shared-with-core semantics). */
 #define PG_TRE_SUPPORT_EXTRACT_VALUE   1

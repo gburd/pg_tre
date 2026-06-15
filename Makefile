@@ -97,6 +97,7 @@ OBJS = \
     src/query/tiling.o \
     src/query/uleven.o \
     src/query/trgm_similarity.o \
+    src/query/like_translate.o \
     src/query/debug.o
 #   src/query/tiling.o  -- Phase 5 READ side, uncomment when integrating
 #   src/query/uleven.o  -- Phase 5 READ side, uncomment when integrating

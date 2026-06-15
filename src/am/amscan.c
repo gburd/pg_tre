@@ -33,6 +33,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
+#include "pg_tre/like_translate.h"
 #include "pg_tre/amapi.h"
 #include "pg_tre/bloom.h"
 #include "pg_tre/pattern_cache.h"
@@ -183,11 +184,21 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
     if (scan->numberOfKeys >= 1)
     {
         sk = &scan->keyData[0];
-        if (sk->sk_strategy != PG_TRE_STRATEGY_APPROX_MATCH)
-            ereport(ERROR,
-                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("pg_tre: unsupported scan strategy %d",
-                            sk->sk_strategy)));
+        switch (sk->sk_strategy)
+        {
+            case PG_TRE_STRATEGY_APPROX_MATCH:
+            case PG_TRE_STRATEGY_LIKE:
+            case PG_TRE_STRATEGY_ILIKE:
+            case PG_TRE_STRATEGY_REGEX:
+            case PG_TRE_STRATEGY_IREGEX:
+            case PG_TRE_STRATEGY_EQUAL:
+                break;
+            default:
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("pg_tre: unsupported scan strategy %d",
+                                sk->sk_strategy)));
+        }
     }
     else
     {
@@ -201,9 +212,55 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 
     old = MemoryContextSwitchTo(st->scan_cxt);
 
-    pat = (struct TrePatternData *) DatumGetPointer(sk->sk_argument);
-    pattern_str = tre_pattern_get_text(pat, &pattern_len);
-    max_cost = tre_pattern_get_max_cost(pat);
+    /*
+     * Acquire the pattern string + edit-distance budget.
+     *
+     * Strategy 1 (%~~) and 2 (<@>) carry a tre_pattern RHS with an
+     * explicit max_cost.  The A1 parity strategies (LIKE/ILIKE/
+     * regex/iregex/=) carry a plain text RHS and always run at k=0
+     * (exact); they are lowered into the same regex/trigram engine,
+     * and the executor rechecks with the built-in operator so the
+     * index is a lossy candidate filter only.
+     */
+    if (sk->sk_strategy == PG_TRE_STRATEGY_APPROX_MATCH ||
+        sk->sk_strategy == PG_TRE_STRATEGY_DISTANCE)
+    {
+        pat = (struct TrePatternData *) DatumGetPointer(sk->sk_argument);
+        pattern_str = tre_pattern_get_text(pat, &pattern_len);
+        max_cost = tre_pattern_get_max_cost(pat);
+    }
+    else
+    {
+        /* text RHS: detoast, translate to regex by strategy, k=0. */
+        text   *rhs = DatumGetTextPP(sk->sk_argument);
+        char   *raw = VARDATA_ANY(rhs);
+        int     rawlen = VARSIZE_ANY_EXHDR(rhs);
+
+        max_cost = 0;
+        switch (sk->sk_strategy)
+        {
+            case PG_TRE_STRATEGY_LIKE:
+            case PG_TRE_STRATEGY_ILIKE:
+                pattern_str = pg_tre_like_to_regex(raw, rawlen, '\\');
+                pattern_len = (int) strlen(pattern_str);
+                break;
+            case PG_TRE_STRATEGY_REGEX:
+            case PG_TRE_STRATEGY_IREGEX:
+                /* already a regex; copy into scan ctx (NUL-safe len). */
+                pattern_str = (char *) palloc(rawlen + 1);
+                memcpy(pattern_str, raw, rawlen);
+                pattern_str[rawlen] = '\0';
+                pattern_len = rawlen;
+                break;
+            case PG_TRE_STRATEGY_EQUAL:
+                pattern_str = pg_tre_literal_to_regex(raw, rawlen);
+                pattern_len = (int) strlen(pattern_str);
+                break;
+            default:
+                pattern_str = NULL;
+                pattern_len = 0;
+        }
+    }
 
     /* Phase 5: k > 0 is now supported via tiling + three-tier filtering.
      * Extraction may still return always_true if the pattern defeats tiling
