@@ -235,6 +235,22 @@ ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
 -- ---------------------------------------------------------------
+-- 1.10.0 (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
+-- Bind the built-in text pattern operators so the planner uses a
+-- pg_tre index for col LIKE '%foo%', col ~ 'fo+o', col = 'foo'.
+-- Each lowers to the trigram engine at k=0; the executor rechecks
+-- with the built-in operator (lossy candidate filter).
+--   3 = ~~ (LIKE)  4 = ~~* (ILIKE)  5 = ~ (regex)
+--   6 = ~* (iregex)  7 = = (equality)
+-- ---------------------------------------------------------------
+ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
+    OPERATOR 3 ~~  (text, text),
+    OPERATOR 4 ~~* (text, text),
+    OPERATOR 5 ~   (text, text),
+    OPERATOR 6 ~*  (text, text),
+    OPERATOR 7 =   (text, text);
+
+-- ---------------------------------------------------------------
 -- 1.5.0 addition: in-place format-upgrade infrastructure.
 --
 -- Per-page format_version is tracked in the opaque trailer of each

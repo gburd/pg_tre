@@ -1,0 +1,101 @@
+-- Phase A (A1): LIKE / ILIKE / ~ / ~* / = index acceleration.
+-- Each operator must (a) be answerable by a pg_tre index and
+-- (b) return exactly the same rows as a forced seq scan.  ILIKE
+-- and ~* fall back to full recheck (the index is case-sensitive)
+-- but must still be correct.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/like_accel.sql:6: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+CREATE TABLE la_t(id serial primary key, body text);
+CREATE TABLE
+INSERT INTO la_t(body)
+SELECT md5(g::text) || (CASE WHEN g % 10 = 0 THEN ' needle_xyz' ELSE '' END)
+FROM generate_series(1, 3000) g;
+INSERT 0 3000
+CREATE INDEX la_idx ON la_t USING tre (body);
+psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: collected 93300 trigram entries from 3000 heap tuples
+psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: built 4307 posting trees
+psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: build complete, indexed 3000 heap tuples into 4307 trigrams
+CREATE INDEX
+ANALYZE la_t;
+ANALYZE
+-- Index-driven counts.
+SET enable_seqscan = off;
+SET
+SELECT count(*) AS like_idx   FROM la_t WHERE body LIKE '%needle_xyz%';
+ like_idx 
+----------
+      300
+(1 row)
+
+SELECT count(*) AS regex_idx  FROM la_t WHERE body ~ 'needle_x.z';
+ regex_idx 
+-----------
+       300
+(1 row)
+
+SELECT count(*) AS ilike_idx  FROM la_t WHERE body ILIKE '%NEEDLE_XYZ%';
+ ilike_idx 
+-----------
+       300
+(1 row)
+
+SELECT count(*) AS iregex_idx FROM la_t WHERE body ~* 'NEEDLE';
+ iregex_idx 
+------------
+        300
+(1 row)
+
+-- Seq-scan ground truth (must equal the above).
+SET enable_seqscan = on;
+SET
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT count(*) AS like_seq   FROM la_t WHERE body LIKE '%needle_xyz%';
+ like_seq 
+----------
+      300
+(1 row)
+
+SELECT count(*) AS regex_seq  FROM la_t WHERE body ~ 'needle_x.z';
+ regex_seq 
+-----------
+       300
+(1 row)
+
+SELECT count(*) AS ilike_seq  FROM la_t WHERE body ILIKE '%NEEDLE_XYZ%';
+ ilike_seq 
+-----------
+       300
+(1 row)
+
+SELECT count(*) AS iregex_seq FROM la_t WHERE body ~* 'NEEDLE';
+ iregex_seq 
+------------
+        300
+(1 row)
+
+-- Sub-trigram pattern falls back gracefully (no crash, correct count).
+SET enable_seqscan = off;
+SET
+SELECT count(*) AS short_idx FROM la_t WHERE body LIKE '%xy%';
+ short_idx 
+-----------
+       300
+(1 row)
+
+SET enable_seqscan = on; SET enable_indexscan = off; SET enable_bitmapscan = off;
+SET
+SET
+SET
+SELECT count(*) AS short_seq FROM la_t WHERE body LIKE '%xy%';
+ short_seq 
+-----------
+       300
+(1 row)
+
+DROP TABLE la_t;
+DROP TABLE

@@ -279,6 +279,20 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: trigram extraction failed")));
 
+    /*
+     * Case-insensitive operators (ILIKE / ~*) cannot be safely
+     * trigram-accelerated: the index stores case-sensitive trigrams
+     * of the original text, so a differently-cased query would miss
+     * real matches (e.g. ILIKE '%NEEDLE%' against indexed 'needle').
+     * Force the always-true path so amgetbitmap emits a fully-lossy
+     * bitmap and the executor's recheck (texticlike / texticregexeq)
+     * filters every row -- correct, if no faster than a seq scan.
+     * A case-folded index is future work (would let these accelerate).
+     */
+    if (sk->sk_strategy == PG_TRE_STRATEGY_ILIKE ||
+        sk->sk_strategy == PG_TRE_STRATEGY_IREGEX)
+        st->q.always_true = true;
+
     st->query_valid = true;
     MemoryContextSwitchTo(old);
 }

@@ -6,6 +6,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.10.0] - 2026-06-05 - LIKE/ILIKE/regex/= index acceleration (Phase A / A1)
+
+> North star: pg_tre is a REGEX index with edit distance.  A1
+> lets the planner use a pg_tre index for the operators people
+> actually type -- LIKE, ~, = -- by lowering them into the SAME
+> trigram engine %~~ already uses.  No new matcher; the executor
+> rechecks with the built-in operator.
+
+No on-disk format change; no REINDEX.
+
+### Added
+
+- **`LIKE` / `~` / `=` are now index-accelerated.**  The
+  `tre_text_ops` operator family binds the built-in text pattern
+  operators as strategies 3-7 (`~~`, `~~*`, `~`, `~*`, `=`).  A
+  query like `col LIKE '%foo%'`, `col ~ 'fo+o'`, or `col = 'foo'`
+  now plans as an index scan on a pg_tre index.  Each pattern is
+  lowered to the trigram engine at k=0 (LIKE -> regex via
+  `% -> .*`, `_ -> .`, escape handling; `=` -> anchored literal
+  regex); the executor rechecks with the built-in operator
+  (`textlike`/`textregexeq`/`texteq`), so the index is a lossy
+  candidate filter and results are exact.  Verified
+  index-result == seq-scan ground truth.
+- New `src/query/like_translate.c` (LIKE/literal -> regex) and
+  the strategy-dispatched pattern acquisition in `amrescan` and
+  `amcostestimate`.
+
+### Notes / honest limits
+
+- **`ILIKE` and `~*` are correct but not accelerated.**  The
+  pg_tre index stores case-sensitive trigrams, so a
+  case-insensitive query would miss real matches if trigram-
+  filtered.  These strategies force the always-true (full
+  recheck) path: correct, but no faster than a seq scan.  A
+  case-folded index that would let them accelerate is future
+  work.
+- Sub-trigram patterns (e.g. `LIKE '%xy%'`) fall back to full
+  recheck, identical to pg_trgm's behavior.
+- This is A1 of the pg_trgm-replacement roadmap; combined with
+  A2's similarity (1.9.0), a user can now drive `LIKE`/`~`/`=`,
+  `%`, and `<->` off a single pg_tre index.  Remaining Phase A:
+  `word_similarity` and accurate `{~k}` selectivity (A3).
+
+---
+
 ## [1.9.0] - 2026-06-05 - pg_trgm-compatible similarity (Phase A / A2)
 
 > North star: pg_tre is a REGEX index with edit distance.  This

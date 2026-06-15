@@ -8,13 +8,16 @@
 
 #include "access/amapi.h"
 #include "catalog/pg_operator.h"
+#include "catalog/pg_type.h"
 #include "nodes/pathnodes.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
+#include "varatt.h"
 
 #include "pg_tre/amapi.h"
+#include "pg_tre/like_translate.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/regex_ast.h"
@@ -39,6 +42,25 @@ extract_query_from_pattern(struct TrePatternData *pat, TrigramQuery *q_out)
 	if (!regex_extract_query(&ctx, max_cost, q_out))
 		return false;
 
+	return true;
+}
+
+/*
+ * Lower an already-translated regex string (from a LIKE/literal/regex
+ * RHS, Phase A/A1) into a TrigramQuery at k=0, for cost estimation.
+ */
+static bool
+extract_query_from_text(const char *regex, int len, TrigramQuery *q_out)
+{
+	TreParseCtx ctx;
+
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.mcxt = CurrentMemoryContext;
+
+	if (!tre_parse_regex(&ctx, regex, len))
+		return false;
+	if (!regex_extract_query(&ctx, 0, q_out))
+		return false;
 	return true;
 }
 
@@ -156,21 +178,74 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 					rightop = (Node *) lsecond(opexpr->args);
 					if (IsA(rightop, Const) && !((Const *) rightop)->constisnull)
 					{
-						struct TrePatternData *pat;
-						pat = (struct TrePatternData *) DatumGetPointer(((Const *) rightop)->constvalue);
+						/*
+						 * Dispatch on the RHS constant type.  Strategy 1
+						 * carries a tre_pattern; the A1 parity operators
+						 * carry a plain text RHS and must be lowered via
+						 * the LIKE/literal-to-regex translation, not
+						 * reinterpreted as a tre_pattern struct.
+						 */
+						Const *rconst = (Const *) rightop;
+						Oid    rtype = rconst->consttype;
 
 						memset(&q, 0, sizeof(q));
-						if (extract_query_from_pattern(pat, &q))
+
+						if (rtype == TEXTOID)
 						{
-							/* Prefer relation tuple count when meta is stale. */
-							if (path->indexinfo->tuples > 0 &&
-							    path->indexinfo->tuples >
-							    (double) meta.n_tuples_indexed * 2.0)
+							/*
+							 * A1 parity operator.  Recover the operator's
+							 * strategy to translate correctly; default to
+							 * LIKE-style if unknown (harmless for a cost
+							 * estimate -- it only affects selectivity).
+							 */
+							text   *rhs = DatumGetTextPP(rconst->constvalue);
+							char   *raw = VARDATA_ANY(rhs);
+							int     rawlen = VARSIZE_ANY_EXHDR(rhs);
+							char   *rx;
+							StrategyNumber strat =
+								get_op_opfamily_strategy(opexpr->opno,
+								                         path->indexinfo->opfamily[0]);
+
+							if (strat == PG_TRE_STRATEGY_EQUAL)
+								rx = pg_tre_literal_to_regex(raw, rawlen);
+							else if (strat == PG_TRE_STRATEGY_REGEX ||
+							         strat == PG_TRE_STRATEGY_IREGEX)
 							{
-								meta.n_tuples_indexed = (uint64) path->indexinfo->tuples;
+								rx = (char *) palloc(rawlen + 1);
+								memcpy(rx, raw, rawlen);
+								rx[rawlen] = '\0';
 							}
-							sel = estimate_trigram_selectivity(&q, &meta);
-							have_query = true;
+							else   /* LIKE / ILIKE / unknown */
+								rx = pg_tre_like_to_regex(raw, rawlen, '\\');
+
+							if (extract_query_from_text(rx, (int) strlen(rx), &q))
+							{
+								if (path->indexinfo->tuples > 0 &&
+								    path->indexinfo->tuples >
+								    (double) meta.n_tuples_indexed * 2.0)
+									meta.n_tuples_indexed =
+										(uint64) path->indexinfo->tuples;
+								sel = estimate_trigram_selectivity(&q, &meta);
+								have_query = true;
+							}
+						}
+						else
+						{
+							struct TrePatternData *pat;
+							pat = (struct TrePatternData *) DatumGetPointer(rconst->constvalue);
+
+							if (extract_query_from_pattern(pat, &q))
+							{
+								/* Prefer relation tuple count when meta is stale. */
+								if (path->indexinfo->tuples > 0 &&
+								    path->indexinfo->tuples >
+								    (double) meta.n_tuples_indexed * 2.0)
+								{
+									meta.n_tuples_indexed = (uint64) path->indexinfo->tuples;
+								}
+								sel = estimate_trigram_selectivity(&q, &meta);
+								have_query = true;
+							}
 						}
 					}
 				}
