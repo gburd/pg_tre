@@ -995,6 +995,39 @@ pg_tre_posting_scan_end(PgTrePostingScan *s)
     pfree(s);
 }
 
+/*
+ * Total cardinality (distinct TID count) of a posting tree, for
+ * planner selectivity estimation (Phase A / A3).  Walks the
+ * right-link leaf chain (or the inline blob) summing each leaf's
+ * sparsemap cardinality.  To bound plan-time I/O on pathologically
+ * common trigrams, stops once `cap` is exceeded and returns `cap`
+ * (the caller only needs "this trigram is common" past that point).
+ * A cap <= 0 means no cap.
+ */
+uint64
+pg_tre_posting_cardinality(Relation index, BlockNumber root,
+                           const uint8 *inline_data, Size inline_bytes,
+                           uint64 cap)
+{
+    PgTrePostingScan *s;
+    sm_t   *sm;
+    uint64  total = 0;
+
+    s = pg_tre_posting_scan_begin(index, root, inline_data, inline_bytes);
+    while (pg_tre_posting_scan_next(s, &sm, NULL, NULL))
+    {
+        if (sm != NULL)
+            total += (uint64) sm_cardinality(sm);
+        if (cap > 0 && total >= cap)
+        {
+            total = cap;
+            break;
+        }
+    }
+    pg_tre_posting_scan_end(s);
+    return total;
+}
+
 sm_t *
 pg_tre_posting_materialize(Relation index, BlockNumber root,
                            const uint8 *inline_data, Size inline_bytes)

@@ -208,6 +208,15 @@ extern bool pg_tre_upper_lookup(Relation index, uint64 trigram_hash,
                                 PgTreUpperRef *out);
 extern void pg_tre_upper_release(PgTreUpperRef *ref);
 
+/*
+ * Total distinct-TID cardinality of a posting tree, for planner
+ * selectivity (Phase A / A3).  `cap > 0` bounds plan-time I/O: once
+ * the running total reaches `cap` the walk stops and returns `cap`.
+ */
+extern uint64 pg_tre_posting_cardinality(Relation index, BlockNumber root,
+                                         const uint8 *inline_data,
+                                         Size inline_bytes, uint64 cap);
+
 /* ---- Phase 5 payload APIs ---- */
 
 /*

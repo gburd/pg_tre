@@ -64,80 +64,6 @@ extract_query_from_text(const char *regex, int len, TrigramQuery *q_out)
 	return true;
 }
 
-static Selectivity
-estimate_trigram_selectivity(TrigramQuery *q, PgTreMetaPageData *meta)
-{
-	double mean_density;
-	double sel;
-	int i, j;
-
-	if (q->always_true || q->n == 0)
-		return 1.0;
-
-	if (meta->n_tuples_indexed == 0)
-		return 0.0001;
-
-	if (meta->n_trigrams == 0)
-	{
-		mean_density = 0.0001;
-	}
-	else
-	{
-		mean_density = (double) meta->mean_posting_cardinality / meta->n_tuples_indexed;
-		if (mean_density > 1.0)
-			mean_density = 1.0;
-		if (mean_density < 0.0001)
-			mean_density = 0.0001;
-	}
-
-	if (q->mode == TRIGRAM_QUERY_CNF)
-	{
-		sel = 1.0;
-		for (i = 0; i < q->n; i++)
-		{
-			const TrigramConjunct *conj = &q->conjuncts[i];
-			double conj_sel = 0.0;
-
-			for (j = 0; j < conj->n; j++)
-			{
-				conj_sel += mean_density;
-				if (conj_sel >= 1.0)
-				{
-					conj_sel = 1.0;
-					break;
-				}
-			}
-
-			sel *= conj_sel;
-		}
-	}
-	else
-	{
-		sel = 0.0;
-		for (i = 0; i < q->n; i++)
-		{
-			const TrigramConjunct *tile = &q->conjuncts[i];
-			double tile_sel = 1.0;
-
-			for (j = 0; j < tile->n; j++)
-			{
-				tile_sel *= mean_density;
-			}
-
-			sel += tile_sel;
-			if (sel >= 1.0)
-			{
-				sel = 1.0;
-				break;
-			}
-		}
-	}
-
-	if (sel < 1.0 / meta->n_tuples_indexed)
-		sel = 1.0 / meta->n_tuples_indexed;
-
-	return sel;
-}
 
 void
 pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
@@ -225,7 +151,7 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 								    (double) meta.n_tuples_indexed * 2.0)
 									meta.n_tuples_indexed =
 										(uint64) path->indexinfo->tuples;
-								sel = estimate_trigram_selectivity(&q, &meta);
+								sel = pg_tre_estimate_trigram_selectivity(index, &q, &meta);
 								have_query = true;
 							}
 						}
@@ -243,7 +169,7 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 								{
 									meta.n_tuples_indexed = (uint64) path->indexinfo->tuples;
 								}
-								sel = estimate_trigram_selectivity(&q, &meta);
+								sel = pg_tre_estimate_trigram_selectivity(index, &q, &meta);
 								have_query = true;
 							}
 						}

@@ -51,4 +51,15 @@ extern void pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
                                   BlockNumber root_range, uint64 n_trigrams,
                                   uint64 n_tuples_indexed);
 
+/*
+ * Planner selectivity estimate for a lowered TrigramQuery against an
+ * open pg_tre index (Phase A / A3).  Uses real per-trigram posting
+ * cardinalities read from the index.  Declared with opaque struct
+ * pointers to avoid pulling regex_ast.h into every meta.h consumer.
+ */
+struct TrigramQuery;
+extern double pg_tre_estimate_trigram_selectivity(Relation index,
+                                                  struct TrigramQuery *q,
+                                                  PgTreMetaPageData *meta);
+
 #endif /* PG_TRE_META_H */

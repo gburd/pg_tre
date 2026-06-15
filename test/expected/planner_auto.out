@@ -38,7 +38,7 @@ EXPLAIN (COSTS ON)
     SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0);
                             QUERY PLAN                             
 -------------------------------------------------------------------
- Seq Scan on planner_auto_small  (cost=0.00..3.29 rows=1 width=48)
+ Seq Scan on planner_auto_small  (cost=0.00..3.29 rows=2 width=48)
    Filter: (body %~~ 'approximate'::tre_pattern)
 (2 rows)
 
@@ -83,11 +83,13 @@ SET enable_seqscan = off;
 SET
 EXPLAIN (COSTS ON)
     SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0);
-                                         QUERY PLAN                                         
---------------------------------------------------------------------------------------------
- Index Scan using idx_auto_small on planner_auto_small  (cost=18.00..52.06 rows=1 width=48)
-   Index Cond: (body %~~ 'approximate'::tre_pattern)
-(2 rows)
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Bitmap Heap Scan on planner_auto_small  (cost=48.10..50.13 rows=2 width=48)
+   Recheck Cond: (body %~~ 'approximate'::tre_pattern)
+   ->  Bitmap Index Scan on idx_auto_small  (cost=0.00..48.10 rows=2 width=0)
+         Index Cond: (body %~~ 'approximate'::tre_pattern)
+(4 rows)
 
 \echo '--- Always-true pattern with enable_seqscan=off ---'
 --- Always-true pattern with enable_seqscan=off ---
@@ -146,7 +148,7 @@ EXPLAIN (COSTS ON)
     SELECT * FROM planner_auto_medium WHERE body %~~ tre_pattern('findme', 0);
                              QUERY PLAN                             
 --------------------------------------------------------------------
- Seq Scan on planner_auto_medium  (cost=0.00..7.79 rows=1 width=54)
+ Seq Scan on planner_auto_medium  (cost=0.00..7.79 rows=2 width=54)
    Filter: (body %~~ 'findme'::tre_pattern)
 (2 rows)
 
