@@ -1,5 +1,12 @@
 # Phase A — pg_trgm capability parity
 
+> **STATUS (shipped):** Phase A is complete.
+> - A1 LIKE/~/= index acceleration -- v1.10.1
+> - A2 similarity (%, <->) -- v1.9.0; word_similarity / strict_word_similarity (<%, <<->, <<%, <<<->) -- v1.11.0
+> - A3 accurate %~~ selectivity -- v1.12.0
+> All numerically verified against live pg_trgm where applicable; all tag CI green.
+
+
 > **North star: pg_tre is a REGEX index with edit distance.**
 > Phase A makes pg_tre a *superset* of pg_trgm's operator surface
 > so users can run one extension, without changing what pg_tre
