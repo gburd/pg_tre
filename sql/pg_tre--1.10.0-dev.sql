@@ -1,4 +1,4 @@
--- pg_tre 1.9.0 -- native index AM for approximate regex matching.
+-- pg_tre 1.10.0-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -284,7 +284,7 @@ COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
     'pg_tre_index_format_status().';
 
 -- ---------------------------------------------------------------
--- 1.9.0: pg_trgm-compatible trigram-set similarity (Phase A / A2).
+-- 1.10.0-dev: pg_trgm-compatible trigram-set similarity (Phase A / A2).
 -- Cheap, stateless Jaccard similarity over pg_trgm's trigram model;
 -- distinct from edit-distance tre_similarity / <@>.
 -- ---------------------------------------------------------------

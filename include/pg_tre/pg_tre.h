@@ -29,7 +29,7 @@
  *            Only RANGE pages differ between v4 and v5; other page
  *            kinds are byte-identical.  Readers handle v<5 range
  *            pages (no header) for back-compat with 1.4.x indexes.
- *   v6     - introduced in 1.9.0.  The vendored sparsemap was updated
+ *   v6     - introduced in 1.10.0-dev.  The vendored sparsemap was updated
  *            to 4.0.0, whose serialized "wire" format widened the
  *            per-chunk start offset from 32 to 64 bits (sparsemap
  *            SM_WIRE_VERSION 1 -> 2).  This fixes silent DATA LOSS for
@@ -50,7 +50,7 @@
  *
  * Reader policy: any version in [PG_TRE_FORMAT_VERSION_MIN,
  * PG_TRE_FORMAT_VERSION_LATEST] is readable on the page-decode side.
- * As of 1.9.0 MIN == LATEST == 6: there is no in-place upgrade from
+ * As of 1.10.0-dev MIN == LATEST == 6: there is no in-place upgrade from
  * v<6 because the embedded sparsemap bytes are unreadable; REINDEX is
  * the migration (and the data-loss remedy).  See doc/onpage_format.md.
  */
@@ -65,7 +65,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 1.9.0"
+#define PG_TRE_VERSION_STRING "pg_tre 1.10.0-dev"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;
