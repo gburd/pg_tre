@@ -1,0 +1,74 @@
+-- Phase A (A2): pg_trgm-compatible trigram similarity.
+-- Verifies tre_trgm_similarity / <-> / % semantics.  We can't
+-- install pg_trgm alongside (operator collision by design), so the
+-- expected values are pinned to pg_trgm's known outputs.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/trgm_similarity.sql:5: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+-- similarity matches pg_trgm similarity() exactly.
+SELECT round(tre_trgm_similarity('foo','foobar')::numeric, 6) AS foo_foobar;      -- 0.375
+ foo_foobar 
+------------
+   0.375000
+(1 row)
+
+SELECT round(tre_trgm_similarity('hello','hallo')::numeric, 6) AS hello_hallo;    -- 0.333333
+ hello_hallo 
+-------------
+    0.333333
+(1 row)
+
+SELECT round(tre_trgm_similarity('abc','xyz')::numeric, 6)  AS abc_xyz;           -- 0.000000
+ abc_xyz  
+----------
+ 0.000000
+(1 row)
+
+SELECT round(tre_trgm_similarity('cat','category')::numeric, 6) AS cat_category;  -- 0.300000
+ cat_category 
+--------------
+     0.300000
+(1 row)
+
+SELECT round(tre_trgm_similarity('aaa','aaa')::numeric, 6)   AS self;             -- 1.000000
+   self   
+----------
+ 1.000000
+(1 row)
+
+-- distance = 1 - similarity.
+SELECT round(tre_trgm_distance('foo','foobar')::numeric, 6) AS dist_foo_foobar;   -- 0.625000
+ dist_foo_foobar 
+-----------------
+        0.625000
+(1 row)
+
+-- % operator honors pg_tre.similarity_threshold.
+SET pg_tre.similarity_threshold = 0.3;
+SET
+SELECT 'foo' % 'foobar' AS at_0_375_thr_0_3;   -- true (0.375 >= 0.3)
+ at_0_375_thr_0_3 
+------------------
+ t
+(1 row)
+
+SET pg_tre.similarity_threshold = 0.5;
+SET
+SELECT 'foo' % 'foobar' AS at_0_375_thr_0_5;   -- false (0.375 < 0.5)
+ at_0_375_thr_0_5 
+------------------
+ f
+(1 row)
+
+RESET pg_tre.similarity_threshold;
+RESET
+-- <-> is orderable: closest first.
+WITH v(s) AS (VALUES ('foobar'),('food'),('xyz'),('fool'))
+SELECT s FROM v ORDER BY s <-> 'foo' LIMIT 3;
+   s    
+--------
+ food
+ fool
+ foobar
+(3 rows)
+

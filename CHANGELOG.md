@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.9.0] - 2026-06-05 - pg_trgm-compatible similarity (Phase A / A2)
+
+> North star: pg_tre is a REGEX index with edit distance.  This
+> release adds *capability parity* with pg_trgm's cheap similarity
+> so users can drop pg_trgm and keep `%`, `<->`, and the
+> similarity threshold -- it does not change what pg_tre is.
+
+No on-disk format change; no REINDEX.  `ALTER EXTENSION pg_tre
+UPDATE TO '1.9.0'` adds the new functions/operators.
+
+### Added
+
+- **Trigram-set (Jaccard) similarity, numerically identical to
+  pg_trgm**: `tre_trgm_similarity(text,text) -> float4`,
+  `tre_trgm_distance(text,text) -> float4` (1 - similarity), the
+  `text % text` threshold operator, and the `text <-> text`
+  distance operator.  These replicate pg_trgm's exact trigram
+  model (lowercase, alnum-word split, 2-leading/1-trailing-space
+  padding per word, deduplicated set) over UTF-8 codepoints.
+  Verified numerically equal to `pg_trgm.similarity()` across a
+  range of inputs (`foo|foobar`=0.375, `hello|hallo`=0.333,
+  `abc|xyz`=0, `cat|category`=0.3, ...).
+  - These are **cheap and stateless** and **distinct from**
+    pg_tre's edit-distance `tre_similarity` / `<@>`.  A user
+    porting `col % 'x'` or `ORDER BY col <-> 'x'` from pg_trgm
+    gets the same numbers.
+  - By design these operators **collide** with pg_trgm's own
+    `%`/`<->` if both extensions are installed: pg_tre *replaces*
+    pg_trgm; the two are not meant to co-exist.
+- **`pg_tre.similarity_threshold`** GUC (PGC_USERSET, default 0.3,
+  range 0..1), mirroring `pg_trgm.similarity_threshold`; the `%`
+  operator honors it.
+
+### Notes
+
+- This is the first piece of the documented pg_trgm-replacement
+  roadmap (`doc/specs/roadmap-pg_trgm-replacement.md`).  Still to
+  come in Phase A: `LIKE`/`ILIKE`/`~`/`=` index acceleration (A1)
+  and accurate `{~k}` selectivity (A3).  Index-side acceleration
+  of `<->`/`%` is a later refinement; A2 delivers the functional
+  and operator semantics.
+
+---
+
 ## [1.8.2] - 2026-06-05 - green CI on tags (release-publish permission)
 
 No extension/format/behavior change from 1.8.0/1.8.1; no REINDEX.
