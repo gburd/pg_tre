@@ -4,7 +4,7 @@
 %global pgname postgresql%{pgmajor}
 
 Name:           pg_tre
-Version:        1.10.0
+Version:        1.10.1-dev
 Release:        1%{?dist}
 Summary:        PostgreSQL approximate-regex index access method
 

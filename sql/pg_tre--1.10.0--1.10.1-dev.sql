@@ -1,0 +1,8 @@
+-- pg_tre 1.10.0 -> 1.10.1 upgrade.
+--
+-- 1.10.0's A1 release tag was published pointing at an incomplete
+-- commit (the version-bump landed but the release content did not),
+-- and the upstream remote enforces tag protection so the tag cannot
+-- be moved.  1.10.1 re-ships the complete, correct A1 release under
+-- a clean tag.  There is no catalog or on-disk difference between a
+-- correctly-installed 1.10.0 and 1.10.1; this upgrade is a no-op.
