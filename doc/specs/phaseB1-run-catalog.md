@@ -194,6 +194,47 @@ Deferred (NOT shipped) -- the catalog **writer**:
 
 ## Subsequent B1 increments (tracked, not built here)
 
+## B1.3 plan (crash-safe catalog writer + flush-to-run)
+
+The WAL bug that blocked the B1.2 writer is fully understood and is
+**ours, not upstream** (PG `xlogutils.c` PANICs if a `REGBUF_WILL_INIT`
+block is replayed without a zeroing redo routine, and `WILL_INIT`
+implies `NO_IMAGE`, so `WILL_INIT | FORCE_IMAGE` is contradictory).
+The correct writer pattern, matching the working posting writers:
+
+1. **Catalog page WAL:** register every catalog page (new or existing)
+   with `REGBUF_FORCE_IMAGE | REGBUF_STANDARD` -- never `WILL_INIT`.
+   `pg_tre_extend` physically extends the relation, so the block
+   exists at replay and the generic `pg_tre_redo_fpi` restores the
+   full image.  No new redo routine needed.
+2. **Atomicity:** do the catalog-page append, the meta-page update
+   (`next_run_id`, `run_catalog_head`, `n_runs`), the
+   `MarkBufferDirty`s, the `XLogInsert`, and the `PageSetLSN`s all
+   INSIDE one `START_CRIT_SECTION()/END_CRIT_SECTION()` (the
+   `finalize_merge` / nbtree discipline).  One WAL record covers both
+   blocks, so a crash never reproduces "pending consumed but run not
+   registered."
+3. **Flush-to-run:** refactor `pg_tre_pending_merge` so a flush builds
+   the run's upper tree from the pending entries ALONE (skip
+   `snapshot_existing_upper`), then -- in the SAME critical section
+   that truncates the consumed pending prefix (split out of
+   `finalize_merge`) -- appends the run via the writer above.  One run
+   per flush, far apart, so the multi-FPI-of-one-page-per-record
+   pattern that confused early testing does not arise in practice.
+4. **Gate:** extend `tap/crash_recovery.pl` to drive catalog appends
+   (flush-to-run) during the kill-9 load, asserting all runs survive
+   recovery and scan results match a from-scratch build.  Validate via
+   the `nightly-stress` workflow (`workflow_dispatch`), since the
+   local cluster cannot be launched from the agent harness.
+5. **Multi-run scan** (already shipped in B1.2) then becomes
+   exercised end-to-end.
+
+This is a focused, WAL-critical change that MUST land with the
+crash-recovery TAP gate green; it is not landed under time pressure
+without that gate.
+
+## Later increments
+
 - **B1.2 remainder / B1.3** crash-safe catalog writer +
   pending-flush-to-run + `next_run_id` allocation on flush (creates
   the first durable 2-run state; multi-run scan path exercised
