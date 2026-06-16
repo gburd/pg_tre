@@ -134,8 +134,31 @@ jobs:
         run: |
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-          # PostgreSQL::Test::Cluster ships under the server's perl tree.
-          PERLTREE=$(dirname $(dirname $($PG_CONFIG --pkglibdir)))/src/test/perl
+          # PostgreSQL::Test::Cluster ships with the apt server packages
+          # under pgxs/src/test/perl (PGDG layout), not the source-tree
+          # path.  Probe the known locations and pick the one that has
+          # Cluster.pm; skip with a clear note if none is installed.
+          PKGLIB=$($PG_CONFIG --pkglibdir)
+          CAND=(
+            "$PKGLIB/pgxs/src/test/perl"
+            "$(dirname "$(dirname "$PKGLIB")")/src/test/perl"
+          )
+          PERLTREE=""
+          for d in "${CAND[@]}"; do
+            if [ -f "$d/PostgreSQL/Test/Cluster.pm" ]; then PERLTREE="$d"; break; fi
+          done
+          if [ -z "$PERLTREE" ]; then
+            echo "PostgreSQL::Test::Cluster not found; installing test modules"
+            sudo apt-get install -y postgresql-${{ matrix.pg }} || true
+            for d in "${CAND[@]}"; do
+              if [ -f "$d/PostgreSQL/Test/Cluster.pm" ]; then PERLTREE="$d"; break; fi
+            done
+          fi
+          if [ -z "$PERLTREE" ]; then
+            echo "::error::PostgreSQL::Test::Cluster.pm not found in: ${CAND[*]}"
+            exit 1
+          fi
+          echo "Using PERL5LIB=$PERLTREE"
           export PERL5LIB="$PERLTREE"
           export PG_TEST_NOCLEAN=1
           # crash_recovery.pl exercises the Phase B1.3 crash-safe
