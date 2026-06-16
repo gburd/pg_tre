@@ -135,20 +135,19 @@ jobs:
         run: |
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          # PostgreSQL::Test::Cluster needs IPC::Run.
           perl -MIPC::Run -e1 2>/dev/null || sudo apt-get install -y libipc-run-perl
-          # The apt server packages ship the perl test modules under
-          # pgxs/src/test/perl; override the Makefile's pgrx-layout
-          # default to point there.
-          PERLTREE="$($PG_CONFIG --pkglibdir)/pgxs/src/test/perl"
-          # Use the Makefile's `tap` target (NO_NIX_SHELL=1) so PERL5LIB,
-          # PG_REGRESS, TMPDIR and PATH are all set the way the TAP
-          # harness expects.  It runs all tap/*.pl, including
-          # crash_recovery.pl, which exercises the Phase B1.3 crash-safe
-          # catalog writer: catalog-append WAL records are in flight at
-          # kill -9 and must survive replay (>= 2 runs after recovery).
-          NO_NIX_SHELL=1 make tap PG_CONFIG="$PG_CONFIG" \
-            PG_TAP_PERL5LIB="$PERLTREE"
+          # Replicate the env the Makefile 'tap' target sets, but run
+          # ONLY crash_recovery.pl (the Phase B1.3 gate) -- the other
+          # tap/*.pl are heavyweight and covered elsewhere.
+          export PERL5LIB="$($PG_CONFIG --pkglibdir)/pgxs/src/test/perl"
+          export PG_REGRESS="$($PG_CONFIG --pkglibdir)/pgxs/src/test/regress/pg_regress"
+          export TMPDIR=/tmp/pg_tre_tap_tmp
+          mkdir -p "$TMPDIR"
+          # crash_recovery.pl drives tre_debug_append_run every batch so
+          # catalog-append WAL records are in flight at kill -9, and
+          # asserts >= 2 runs survive replay -- the exact scenario that
+          # exposed the WILL_INIT bug the B1.3 writer fixes.
+          prove -v tap/crash_recovery.pl
 
       - name: Check sanitizer reports
         if: matrix.sanitize == 'asan'
