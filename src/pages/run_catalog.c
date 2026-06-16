@@ -15,15 +15,26 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "access/relation.h"
+#include "access/xlog.h"
+#include "access/xloginsert.h"
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
+#include "common/string.h"
 
 #include "pg_tre/buffer.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/run_catalog.h"
+#include "pg_tre/xlog.h"
+
+/* Max PgTreRun records that fit on one catalog page after the header. */
+#define RUN_CATALOG_CAP \
+    ((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
+      - MAXALIGN(sizeof(PageTreOpaqueData)) \
+      - MAXALIGN(sizeof(PgTreRunCatalogHeader))) / sizeof(PgTreRun))
 
 
 struct PgTreRunIter
@@ -185,6 +196,128 @@ pg_tre_run_catalog_close(PgTreRunIter *it)
         pfree(it);
 }
 
+/*
+ * Append a new run to the catalog (Phase B1.3).
+ *
+ * Allocates run->run_id from the meta page's monotonic next_run_id,
+ * stamps it into *run, appends the record to the head catalog page
+ * (creating the first catalog page on demand), and bumps n_runs.
+ *
+ * Crash-safety (the bug that blocked B1.2, now fixed): all page
+ * modifications -- the catalog-page append AND the meta-page update --
+ * happen inside ONE critical section, and both buffers are WAL-logged
+ * as full-page images under XLOG_PTRE_META_UPDATE in a single record.
+ * New catalog pages use REGBUF_FORCE_IMAGE (NOT REGBUF_WILL_INIT):
+ * pg_tre_extend has already physically extended the relation, so the
+ * block exists at replay and the generic pg_tre_redo_fpi restores the
+ * image without the WILL_INIT zeroing-redo contract (which our FPI
+ * redo does not implement and which PANICs recovery if violated).
+ *
+ * Caller must hold a lock excluding concurrent catalog writers (the
+ * flush/merge path holds the index's ShareUpdateExclusive).  The
+ * implicit run (run_id 0) is not stored; the first append yields a
+ * 2-run index (implicit + new).  Returns the assigned run_id.
+ */
+uint64
+pg_tre_run_catalog_append(Relation index, PgTreRun *run)
+{
+    Buffer      metabuf;
+    Page        metapage;
+    PgTreMetaPage meta;
+    Buffer      catbuf;
+    Page        catpage;
+    PgTreRunCatalogHeader *hdr;
+    PgTreRun   *runs;
+    uint64      assigned_id;
+
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    meta = PgTreMetaPageGet(metapage);
+
+    /* Normalize a pre-v7 meta tail in place (matches pg_tre_meta_read). */
+    if (meta->next_run_id == 0)
+        meta->next_run_id = 1;
+    if (meta->max_levels == 0)
+        meta->max_levels = 7;
+    if (meta->n_runs == 0 && meta->run_catalog_head == 0)
+        meta->run_catalog_head = InvalidBlockNumber;
+
+    assigned_id = meta->next_run_id;
+    run->run_id = assigned_id;
+
+    /* Obtain a catalog page with room, or create the first/new head. */
+    if (meta->run_catalog_head == InvalidBlockNumber)
+    {
+        catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
+        catpage = BufferGetPage(catbuf);
+        hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
+        hdr->right_link = InvalidBlockNumber;
+        hdr->n_entries = 0;
+        hdr->_pad0 = 0;
+    }
+    else
+    {
+        catbuf = pg_tre_read(index, meta->run_catalog_head,
+                             PG_TRE_PAGE_RUN_CATALOG, BUFFER_LOCK_EXCLUSIVE);
+        catpage = BufferGetPage(catbuf);
+        hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
+
+        if (hdr->n_entries >= RUN_CATALOG_CAP)
+        {
+            /* Head full: chain a fresh head page in front (newest-first). */
+            BlockNumber old_head = meta->run_catalog_head;
+            UnlockReleaseBuffer(catbuf);
+            catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
+            catpage = BufferGetPage(catbuf);
+            hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
+            hdr->right_link = old_head;
+            hdr->n_entries = 0;
+            hdr->_pad0 = 0;
+        }
+    }
+
+    runs = (PgTreRun *)
+        (((char *) PageGetContents(catpage)) +
+         MAXALIGN(sizeof(PgTreRunCatalogHeader)));
+
+    /* All page edits + WAL inside one critical section. */
+    START_CRIT_SECTION();
+
+    runs[hdr->n_entries] = *run;
+    hdr->n_entries++;
+    ((PageHeader) catpage)->pd_lower =
+        ((char *) &runs[hdr->n_entries] - (char *) catpage);
+
+    meta->next_run_id = assigned_id + 1;
+    meta->run_catalog_head = BufferGetBlockNumber(catbuf);
+    if (meta->n_runs == 0)
+        meta->n_runs = 2;   /* implicit base run + this one */
+    else
+        meta->n_runs++;
+
+    MarkBufferDirty(catbuf);
+    MarkBufferDirty(metabuf);
+
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        XLogRegisterBuffer(1, catbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
+        PageSetLSN(catpage, recptr);
+        PageSetLSN(metapage, recptr);
+    }
+
+    END_CRIT_SECTION();
+
+    UnlockReleaseBuffer(catbuf);
+    UnlockReleaseBuffer(metabuf);
+    return assigned_id;
+}
+
 uint32
 pg_tre_run_count(Relation index)
 {
@@ -269,3 +402,60 @@ tre_run_catalog_status(PG_FUNCTION_ARGS)
     return (Datum) 0;
 }
 
+
+/*
+ * tre_debug_append_run(idx regclass, min_hash numeric, max_hash numeric)
+ *   RETURNS bigint
+ *
+ * TEST-ONLY (Phase B1.3): register the index's current roots as an
+ * additional run with the given trigram-hash range, exercising the
+ * crash-safe catalog writer and the multi-run scan path before the
+ * production flush-to-run lands.  Shares the existing run's roots, so
+ * it validates the catalog + WAL + scan plumbing, not real run
+ * isolation.  Not part of the supported API; used by
+ * tap/crash_recovery.pl to prove catalog appends survive kill -9.
+ */
+PG_FUNCTION_INFO_V1(tre_debug_append_run);
+Datum
+tre_debug_append_run(PG_FUNCTION_ARGS)
+{
+    Oid                relid = PG_GETARG_OID(0);
+    Numeric            min_num = PG_GETARG_NUMERIC(1);
+    Numeric            max_num = PG_GETARG_NUMERIC(2);
+    uint64             min_hash;
+    uint64             max_hash;
+    Relation           index;
+    PgTreMetaPageData  meta;
+    PgTreRun           run;
+    uint64             id;
+    char              *s;
+
+    /* Trigram hashes span the full uint64 range; parse via text so
+     * values above 2^63 round-trip (numeric_int8 would overflow). */
+    s = DatumGetCString(DirectFunctionCall1(numeric_out,
+                                            NumericGetDatum(min_num)));
+    min_hash = strtou64(s, NULL, 10);
+    pfree(s);
+    s = DatumGetCString(DirectFunctionCall1(numeric_out,
+                                            NumericGetDatum(max_num)));
+    max_hash = strtou64(s, NULL, 10);
+    pfree(s);
+
+    index = relation_open(relid, RowExclusiveLock);
+    pg_tre_meta_read(index, &meta);
+
+    memset(&run, 0, sizeof(run));
+    run.level = 1;
+    run.flags = PG_TRE_RUN_LIVE;
+    run.root_upper = meta.root_upper;
+    run.root_range = meta.root_range;
+    run.n_tuples = meta.n_tuples_indexed;
+    run.n_trigrams = meta.n_trigrams;
+    run.min_trigram_hash = min_hash;
+    run.max_trigram_hash = max_hash;
+
+    id = pg_tre_run_catalog_append(index, &run);
+
+    relation_close(index, RowExclusiveLock);
+    PG_RETURN_INT64((int64) id);
+}

@@ -103,6 +103,15 @@ for my $cycle (1 .. $N_CYCLES) {
                 VALUES ($cycle, $batch_id, $lo, $hi);
                 COMMIT;
             });
+            # Phase B1.3: also append a catalog run each batch, so
+            # crash-safe-catalog-writer WAL records are in flight at
+            # kill -9.  Each append is its own committed statement
+            # (autocommit); a full-range run shares the index roots.
+            raw_psql(qq{
+                SELECT tre_debug_append_run('crash_idx'::regclass,
+                                            0::numeric,
+                                            18446744073709551615::numeric);
+            });
             $batch_id++;
             $next_seq = $hi + 1;
         }
@@ -199,6 +208,22 @@ for my $cycle (1 .. $N_CYCLES) {
     });
     is($idx_total, $seq_total,
        "cycle $cycle: total index count matches seq-scan count");
+
+    # ----------------------------------------------------------
+    # Phase B1.3: the crash-safe catalog writer.  At least one
+    # tre_debug_append_run committed before kill -9, so after WAL
+    # replay the run catalog must be readable and report >= 2 runs
+    # (implicit base run + appended catalog runs).  A regression in
+    # the catalog WAL path (e.g. the old REGBUF_WILL_INIT bug) would
+    # either PANIC recovery or silently revert the catalog to the
+    # last checkpoint -- caught here.
+    # ----------------------------------------------------------
+    my $runs = $node->safe_psql('postgres', qq{
+        SELECT count(*) FROM tre_run_catalog_status('crash_idx'::regclass);
+    });
+    ok((defined $runs && $runs >= 2),
+       "cycle $cycle: catalog runs survived crash recovery "
+       . "(got " . (defined $runs ? $runs : 'undef') . " runs)");
 }
 
 $node->stop('fast');

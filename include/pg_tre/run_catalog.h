@@ -40,6 +40,15 @@ extern bool pg_tre_run_catalog_next(PgTreRunIter *it, PgTreRun *out);
 /* Release the iterator. */
 extern void pg_tre_run_catalog_close(PgTreRunIter *it);
 
+/*
+ * Append a new run to the catalog (Phase B1.3).  Allocates and stamps
+ * run->run_id from the meta page's monotonic next_run_id, persists the
+ * record + meta update atomically (one WAL record, crash-safe), and
+ * bumps the live-run count.  Returns the assigned run_id.  Caller must
+ * hold a lock excluding concurrent catalog writers.
+ */
+extern uint64 pg_tre_run_catalog_append(Relation index, PgTreRun *run);
+
 
 /*
  * Total live-run count without iterating (reads the meta page).

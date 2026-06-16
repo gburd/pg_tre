@@ -409,3 +409,17 @@ COMMENT ON FUNCTION tre_estimate_index_build(regclass, int) IS
     'CREATE INDEX on a large column to size build_max_entries_mb and '
     'the temp tablespace up front.  est_temp_mb uses the same '
     'per-tuple cost as the build_max_entries_mb ceiling.';
+
+-- Phase B1.3 test helper (not supported API): register the index's
+-- current roots as an additional run with a trigram-hash range,
+-- exercising the crash-safe catalog writer + multi-run scan.  Used by
+-- tap/crash_recovery.pl to prove catalog appends survive kill -9.
+CREATE FUNCTION tre_debug_append_run(regclass, numeric, numeric)
+    RETURNS bigint
+    AS 'MODULE_PATHNAME', 'tre_debug_append_run'
+    LANGUAGE C STRICT VOLATILE;
+
+COMMENT ON FUNCTION tre_debug_append_run(regclass, numeric, numeric) IS
+    'TEST-ONLY (Phase B1.3): append a run sharing the index roots with '
+    'the given [min,max] trigram-hash range; exercises the crash-safe '
+    'catalog writer and multi-run scan.  Not part of the supported API.';
