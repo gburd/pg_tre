@@ -3,6 +3,7 @@
 -- (a) the estimate reflects the small distinct count, and
 -- (b) correctness is preserved (index matches == seq-scan matches).
 CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/build_dedup.sql:5: NOTICE:  extension "pg_tre" already exists, skipping
 CREATE EXTENSION
 CREATE TABLE dd_t(id serial primary key, body text);
 CREATE TABLE
