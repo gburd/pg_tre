@@ -160,6 +160,8 @@ jobs:
           fi
           echo "Using PERL5LIB=$PERLTREE"
           export PERL5LIB="$PERLTREE"
+          # PostgreSQL::Test::Cluster requires IPC::Run.
+          perl -MIPC::Run -e1 2>/dev/null || sudo apt-get install -y libipc-run-perl
           export PG_TEST_NOCLEAN=1
           # crash_recovery.pl exercises the Phase B1.3 crash-safe
           # catalog writer: catalog-append WAL records are in flight at
