@@ -133,41 +133,22 @@ jobs:
       - name: Run crash-recovery TAP (catalog WAL crash-safety)
         if: matrix.sanitize != 'asan'
         run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-          # PostgreSQL::Test::Cluster ships with the apt server packages
-          # under pgxs/src/test/perl (PGDG layout), not the source-tree
-          # path.  Probe the known locations and pick the one that has
-          # Cluster.pm; skip with a clear note if none is installed.
-          PKGLIB=$($PG_CONFIG --pkglibdir)
-          CAND=(
-            "$PKGLIB/pgxs/src/test/perl"
-            "$(dirname "$(dirname "$PKGLIB")")/src/test/perl"
-          )
-          PERLTREE=""
-          for d in "${CAND[@]}"; do
-            if [ -f "$d/PostgreSQL/Test/Cluster.pm" ]; then PERLTREE="$d"; break; fi
-          done
-          if [ -z "$PERLTREE" ]; then
-            echo "PostgreSQL::Test::Cluster not found; installing test modules"
-            sudo apt-get install -y postgresql-${{ matrix.pg }} || true
-            for d in "${CAND[@]}"; do
-              if [ -f "$d/PostgreSQL/Test/Cluster.pm" ]; then PERLTREE="$d"; break; fi
-            done
-          fi
-          if [ -z "$PERLTREE" ]; then
-            echo "::error::PostgreSQL::Test::Cluster.pm not found in: ${CAND[*]}"
-            exit 1
-          fi
-          echo "Using PERL5LIB=$PERLTREE"
-          export PERL5LIB="$PERLTREE"
-          # PostgreSQL::Test::Cluster requires IPC::Run.
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          # PostgreSQL::Test::Cluster needs IPC::Run.
           perl -MIPC::Run -e1 2>/dev/null || sudo apt-get install -y libipc-run-perl
-          export PG_TEST_NOCLEAN=1
-          # crash_recovery.pl exercises the Phase B1.3 crash-safe
+          # The apt server packages ship the perl test modules under
+          # pgxs/src/test/perl; override the Makefile's pgrx-layout
+          # default to point there.
+          PERLTREE="$($PG_CONFIG --pkglibdir)/pgxs/src/test/perl"
+          # Use the Makefile's `tap` target (NO_NIX_SHELL=1) so PERL5LIB,
+          # PG_REGRESS, TMPDIR and PATH are all set the way the TAP
+          # harness expects.  It runs all tap/*.pl, including
+          # crash_recovery.pl, which exercises the Phase B1.3 crash-safe
           # catalog writer: catalog-append WAL records are in flight at
           # kill -9 and must survive replay (>= 2 runs after recovery).
-          prove -v tap/crash_recovery.pl
+          NO_NIX_SHELL=1 make tap PG_CONFIG="$PG_CONFIG" \
+            PG_TAP_PERL5LIB="$PERLTREE"
 
       - name: Check sanitizer reports
         if: matrix.sanitize == 'asan'
