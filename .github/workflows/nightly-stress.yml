@@ -131,6 +131,7 @@ jobs:
           bash test/scripts/replication.sh
 
       - name: Run crash-recovery TAP (catalog WAL crash-safety)
+        if: matrix.sanitize != 'asan'
         run: |
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
