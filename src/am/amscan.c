@@ -43,6 +43,7 @@
 #include "pg_tre/posting.h"
 #include "pg_tre/range.h"
 #include "pg_tre/regex_ast.h"
+#include "pg_tre/run_catalog.h"
 #include "pg_tre/sparsemap.h"
 #include "pg_tre/tre_match.h"
 
@@ -517,19 +518,57 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
 
     for (i = 0; i < conj->n; i++)
     {
-        PgTreUpperRef ref;
+        uint64 h = conj->alts[i].trigram_hash;
         sm_t  *sm = NULL;
         sm_t  *pend;
 
-        if (pg_tre_upper_lookup(index, conj->alts[i].trigram_hash, &ref))
+        /*
+         * Phase B1.2: resolve the trigram across ALL runs and union
+         * the per-run postings (newest-run-wins is moot for B1.2
+         * inserts-only: a TID present in any run is a candidate; the
+         * executor rechecks).  For the common single-run index the
+         * iterator yields exactly one run rooted at the index roots,
+         * so this is identical to the pre-B1.2 single lookup.
+         */
         {
-            sm = pg_tre_posting_materialize(index, ref.root,
-                                            ref.inline_data,
-                                            ref.inline_bytes);
-            pg_tre_upper_release(&ref);
+            PgTreRunIter *it = pg_tre_run_catalog_open(index);
+            PgTreRun      run;
+
+            while (pg_tre_run_catalog_next(it, &run))
+            {
+                PgTreUpperRef ref;
+                sm_t         *run_sm;
+
+                /* Run-skip range filter (the Surf analogue). */
+                if (h < run.min_trigram_hash || h > run.max_trigram_hash)
+                    continue;
+
+                if (!pg_tre_upper_lookup_root(index, run.root_upper, h, &ref))
+                    continue;
+
+                run_sm = pg_tre_posting_materialize(index, ref.root,
+                                                    ref.inline_data,
+                                                    ref.inline_bytes);
+                pg_tre_upper_release(&ref);
+                if (run_sm == NULL)
+                    continue;
+
+                if (sm == NULL)
+                {
+                    sm = run_sm;
+                }
+                else
+                {
+                    sm_t *u = sm_union(sm, run_sm);
+                    free(sm);
+                    free(run_sm);
+                    sm = u;
+                }
+            }
+            pg_tre_run_catalog_close(it);
         }
 
-        pend = overlay_lookup(ov, conj->alts[i].trigram_hash);
+        pend = overlay_lookup(ov, h);
         if (pend != NULL)
         {
             if (sm == NULL)
@@ -1064,6 +1103,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     TriUpperCache  upper_cache;
     volatile bool  upper_cache_built = false;
     volatile bool  short_circuit = false;   /* CNF proved empty: result == NULL */
+    bool           single_run;              /* B1.2: tier-3 valid only if 1 run */
     int           i;
 
     *out_always_true = false;
@@ -1205,6 +1245,17 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     if (!short_circuit)
     {
     /*
+     * Phase B1.2: the tier-3 / positional refinements below resolve
+     * trigrams against the single index root via the upper-tree
+     * cache, so they are only valid when the index has exactly one
+     * run.  With multiple runs we skip them: they are lossy
+     * optimizations and the executor recheck stays authoritative, so
+     * results remain correct (just less pre-filtered).  Making the
+     * cache + filters run-aware is a later B1 increment.
+     */
+    single_run = (pg_tre_run_count(scan->indexRelation) == 1);
+
+    /*
      * Build the per-trigram upper-tree lookup cache.  Both tier-3 and
      * the Phase 5.1 positional filter walk every candidate TID and used
      * to call pg_tre_upper_lookup() in their innermost loop -- O(C*T)
@@ -1212,13 +1263,17 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
      * the lookups into a single O(T) pass; the inner loops do a small
      * linear-scan cache hit instead.
      */
-    tri_upper_cache_build(&upper_cache, scan->indexRelation, &st->q,
-                          st->scan_cxt);
-    upper_cache_built = true;
+    if (single_run)
+    {
+        tri_upper_cache_build(&upper_cache, scan->indexRelation, &st->q,
+                              st->scan_cxt);
+        upper_cache_built = true;
+    }
 
     /* Tier-3: per-tuple bloom filter (chain-rank gated; see comment in
      * pg_tre_amgetbitmap below). */
-    if (result != NULL && st->q.global_max_cost >= 0 &&
+    if (single_run &&
+        result != NULL && st->q.global_max_cost >= 0 &&
         pg_tre_tuple_bloom_enable &&
         !tre_query_is_single_trigram(&st->q) &&
         sm_cardinality((sm_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
@@ -1229,7 +1284,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     }
 
     /* Phase 5.1: positional filter (CNF only). */
-    if (result != NULL && sm_cardinality((sm_t *) result) > 0 &&
+    if (single_run &&
+        result != NULL && sm_cardinality((sm_t *) result) > 0 &&
         st->q.mode == TRIGRAM_QUERY_CNF &&
         pg_tre_tuple_bloom_enable &&
         !tre_query_is_single_trigram(&st->q) &&

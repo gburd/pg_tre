@@ -206,6 +206,13 @@ typedef struct PgTreUpperRef
 
 extern bool pg_tre_upper_lookup(Relation index, uint64 trigram_hash,
                                 PgTreUpperRef *out);
+/*
+ * Root-parameterized lookup (Phase B1.2): resolve a trigram against
+ * an arbitrary upper-tree root, used by the multi-run scan to look up
+ * a trigram within a specific run.
+ */
+extern bool pg_tre_upper_lookup_root(Relation index, BlockNumber root_upper,
+                                     uint64 trigram_hash, PgTreUpperRef *out);
 extern void pg_tre_upper_release(PgTreUpperRef *ref);
 
 /*

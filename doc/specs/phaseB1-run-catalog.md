@@ -157,11 +157,47 @@ Explicitly **not** in this increment: pending-flush-to-run, Hanoi
 merge, real multi-run state, collapse, lazy materialization. Those
 are subsequent commits on the 2.0 line, each behind tests.
 
+## B1.2 status (multi-run scan landed; catalog writer deferred)
+
+Delivered:
+
+- **Multi-run scan path.** `resolve_conjunct_with_overlay` iterates
+  the run catalog and unions each query trigram's postings across
+  all runs, applying the per-run `[min,max]` trigram-hash run-skip
+  filter (the aether `Surf` analogue).  For the single implicit
+  run this is byte-identical to the pre-v7 scan.
+- **`pg_tre_upper_lookup_root`** resolves a trigram against an
+  arbitrary run root (vs. only the index's `root_upper`).
+- **Tier-3 / positional refinements gated to single-run.** Those
+  lossy optimizations resolve against the single index root, so
+  with >1 run they are skipped; the executor recheck stays
+  authoritative, so results remain correct, just less pre-filtered.
+
+Deferred (NOT shipped) -- the catalog **writer**:
+
+- A WAL-logged `pg_tre_run_catalog_append` was prototyped but
+  **removed before shipping** because its crash-recovery replay was
+  not durable under repeated appends to the same catalog page: a
+  single post-checkpoint append replayed correctly, but several
+  rapid appends to one catalog page lost the meta-page update on
+  `kill -9` recovery.  Two bugs were found and fixed along the way
+  (a `REGBUF_WILL_INIT` FPI PANICs the generic `pg_tre_redo_fpi`;
+  page edits must be inside the critical section), but a residual
+  replay gap for the multi-FPI-of-one-page case remains.  Shipping
+  a WAL path that can silently drop runs on crash is unacceptable,
+  so the writer waits for B1.3 where the realistic flush-to-run
+  (one run per merge, far apart) and a properly-tested redo land
+  together.
+- Consequently there is no user-facing way to create a second run
+  yet; the multi-run scan infrastructure is correct but exercised
+  only for the implicit run until the writer returns.
+
 ## Subsequent B1 increments (tracked, not built here)
 
-- **B1.2** pending-flush-to-run + `next_run_id` allocation on
-  flush (creates the first 2-run state; multi-run scan path
-  exercised).
+- **B1.2 remainder / B1.3** crash-safe catalog writer +
+  pending-flush-to-run + `next_run_id` allocation on flush (creates
+  the first durable 2-run state; multi-run scan path exercised
+  end-to-end with a from-scratch == multi-run results test).
 - **B1.3** Hanoi leveling + tuplesort merge (`merge_strategy.rs`
   port); write-amplification bounded by `max_levels`.
 - **B1.4** adaptive collapse to single run under low write

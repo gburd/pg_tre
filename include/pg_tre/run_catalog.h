@@ -40,6 +40,7 @@ extern bool pg_tre_run_catalog_next(PgTreRunIter *it, PgTreRun *out);
 /* Release the iterator. */
 extern void pg_tre_run_catalog_close(PgTreRunIter *it);
 
+
 /*
  * Total live-run count without iterating (reads the meta page).
  * Returns 1 for the single-implicit-run case.

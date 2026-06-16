@@ -391,3 +391,4 @@ CREATE OPERATOR <<% (
 CREATE OPERATOR <<<-> (
     LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_strict_word_dist_op
 );
+

@@ -25,16 +25,16 @@
 #include "pg_tre/page.h"
 #include "pg_tre/run_catalog.h"
 
+
 struct PgTreRunIter
 {
     Relation    index;
 
-    /* Single-implicit-run mode. */
-    bool        implicit;
+    /* Implicit base run (run_id 0), served first. */
     bool        implicit_served;
     PgTreRun    implicit_run;
 
-    /* Catalog-chain mode. */
+    /* Catalog-chain walk for additional runs (run_id >= 1). */
     BlockNumber cur_page;       /* current catalog page, or Invalid */
     int         cur_idx;        /* index into the current page's runs */
     int         cur_n;          /* run count on the current page */
@@ -49,34 +49,39 @@ pg_tre_run_catalog_open(Relation index)
     pg_tre_meta_read(index, &meta);
     it->index = index;
 
-    if (meta.n_runs == 0 ||
-        meta.run_catalog_head == InvalidBlockNumber)
+    /*
+     * The implicit base run (run_id 0) is ALWAYS present: it is the
+     * structure rooted at the meta page's root_upper/root_range and
+     * holds the bulk of the index's data.  Catalog runs (run_id >= 1)
+     * are ADDITIONAL runs flushed on top of it; they are never a
+     * replacement for the base run until a real merge consumes it.
+     * The iterator therefore yields the implicit base run first
+     * (full trigram range -- never skipped), then walks the catalog
+     * chain for any additional runs.
+     */
+    it->implicit_served = false;
+    it->implicit_run.run_id = 0;
+    it->implicit_run.level = 1;
+    it->implicit_run.flags = PG_TRE_RUN_LIVE;
+    it->implicit_run.root_upper = meta.root_upper;
+    it->implicit_run.root_range = meta.root_range;
+    it->implicit_run._pad0 = 0;
+    it->implicit_run.n_tuples = meta.n_tuples_indexed;
+    it->implicit_run.n_trigrams = meta.n_trigrams;
+    it->implicit_run.min_trigram_hash = 0;
+    it->implicit_run.max_trigram_hash = UINT64_MAX;
+
+    if (meta.run_catalog_head == InvalidBlockNumber)
     {
-        /*
-         * Single implicit run: the whole index is one run rooted at
-         * the meta page's roots.  Trigram-range filter is fully open
-         * (every trigram may be present), so no run is ever skipped.
-         */
-        it->implicit = true;
-        it->implicit_served = false;
-        it->implicit_run.run_id = 0;
-        it->implicit_run.level = 1;
-        it->implicit_run.flags = PG_TRE_RUN_LIVE;
-        it->implicit_run.root_upper = meta.root_upper;
-        it->implicit_run.root_range = meta.root_range;
-        it->implicit_run._pad0 = 0;
-        it->implicit_run.n_tuples = meta.n_tuples_indexed;
-        it->implicit_run.n_trigrams = meta.n_trigrams;
-        it->implicit_run.min_trigram_hash = 0;
-        it->implicit_run.max_trigram_hash = UINT64_MAX;
+        /* No catalog runs: only the implicit base run exists. */
+        it->cur_page = InvalidBlockNumber;
     }
     else
     {
-        it->implicit = false;
         it->cur_page = meta.run_catalog_head;
-        it->cur_idx = 0;
-        it->cur_n = 0;
     }
+    it->cur_idx = 0;
+    it->cur_n = 0;
     return it;
 }
 
@@ -113,16 +118,19 @@ catalog_load_page(PgTreRunIter *it)
 bool
 pg_tre_run_catalog_next(PgTreRunIter *it, PgTreRun *out)
 {
-    if (it->implicit)
+    /* Serve the implicit base run (run_id 0) first. */
+    if (!it->implicit_served)
     {
-        if (it->implicit_served)
-            return false;
         it->implicit_served = true;
         *out = it->implicit_run;
         return true;
     }
 
-    /* Catalog-chain mode. */
+    /* No catalog chain: only the implicit run exists. */
+    if (!BlockNumberIsValid(it->cur_page) && it->cur_n == 0)
+        return false;
+
+    /* Then walk catalog runs (run_id >= 1). */
     for (;;)
     {
         CHECK_FOR_INTERRUPTS();
@@ -183,11 +191,14 @@ pg_tre_run_count(Relation index)
     PgTreMetaPageData meta;
 
     pg_tre_meta_read(index, &meta);
-    if (meta.n_runs == 0 ||
-        meta.run_catalog_head == InvalidBlockNumber)
+    /* n_runs already counts the implicit base run (it is set to 2 on
+     * the first catalog append: implicit + new).  Zero means a fresh
+     * index with only the implicit run. */
+    if (meta.n_runs == 0)
         return 1;
     return meta.n_runs;
 }
+
 
 /*
  * tre_run_catalog_status(idx regclass)
@@ -257,3 +268,4 @@ tre_run_catalog_status(PG_FUNCTION_ARGS)
     relation_close(index, AccessShareLock);
     return (Datum) 0;
 }
+

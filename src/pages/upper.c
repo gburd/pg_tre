@@ -421,17 +421,32 @@ bool
 pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
 {
     PgTreMetaPageData meta;
+
+    /* Resolve against the single index root (the implicit run). */
+    pg_tre_meta_read(index, &meta);
+    return pg_tre_upper_lookup_root(index, meta.root_upper, trigram_hash, out);
+}
+
+/*
+ * Root-parameterized lookup (Phase B1.2): resolve a trigram against
+ * an arbitrary upper-tree root, so the multi-run scan can resolve a
+ * trigram independently within each run.  Identical descent logic to
+ * pg_tre_upper_lookup; the only difference is the caller supplies the
+ * root rather than reading meta.root_upper.
+ */
+bool
+pg_tre_upper_lookup_root(Relation index, BlockNumber root_upper,
+                         uint64 trigram_hash, PgTreUpperRef *out)
+{
     Buffer  buf;
     Page    page;
     PageTreOpaque opq;
     BlockNumber blk;
     int     i;
 
-    /* Read meta to get root_upper. */
-    pg_tre_meta_read(index, &meta);
-    if (meta.root_upper == InvalidBlockNumber)
+    if (root_upper == InvalidBlockNumber)
     {
-        /* Empty index. */
+        /* Empty run/index. */
         out->upper_buf = InvalidBuffer;
         out->root = InvalidBlockNumber;
         out->inline_data = NULL;
@@ -446,7 +461,7 @@ pg_tre_upper_lookup(Relation index, uint64 trigram_hash, PgTreUpperRef *out)
      * level dispatches to a single child by selecting the rightmost
      * entry whose first_key <= trigram_hash.
      */
-    blk = meta.root_upper;
+    blk = root_upper;
     for (;;)
     {
         BlockNumber child_blk = InvalidBlockNumber;

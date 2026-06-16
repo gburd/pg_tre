@@ -26,3 +26,4 @@ COMMENT ON FUNCTION tre_run_catalog_status(regclass) IS
     'Introspection over the Phase B1 run/level catalog (format v7): '
     'one row per live run, newest run_id first.  A v6 or default-v7 '
     'index reports a single implicit run rooted at the index roots.';
+
