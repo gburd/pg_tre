@@ -276,6 +276,32 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     int32       cp;
     int         cp_start;  /* byte offset where current codepoint starts */
     PgTreBloom *bloom = NULL;
+    /*
+     * Per-row de-duplication of (trigram, tid) emissions.
+     *
+     * Natural text repeats trigrams heavily within a single row (a
+     * message body mentions the same words many times).  The old
+     * build emitted one sort tuple per trigram *occurrence* -- so a
+     * row with trigram "abc" at 50 byte offsets produced 50 sort
+     * tuples that all collapse to the same posting TID.  With
+     * tuplesort's per-tuple overhead this exploded build temp disk
+     * (a production user reported ~21 GB of temp for tens of MB of
+     * indexed text).  We now emit each distinct (trigram, tid) once,
+     * keeping the FIRST position.  Dropping the later positions is
+     * correctness-safe: per-occurrence positions only feed the
+     * optional tier-3.1 positional filter, which is a lossy
+     * refinement over candidates the executor rechecks anyway --
+     * fewer positions means at most less pre-filtering, never a
+     * missed match.
+     *
+     * The set is a simple open-addressing table of the row's trigram
+     * hashes, sized to the row length and reset per row.
+     */
+    uint64     *seen = NULL;
+    uint32      seen_cap = 0;
+    uint32      seen_mask = 0;
+    uint32      seen_n = 0;
+    bool        seen_zero = false;   /* whether trigram_hash==0 was emitted */
 
     if (isnull)
         return;
@@ -284,6 +310,29 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
     txt = DatumGetTextPP(value);
     str = VARDATA_ANY(txt);
     len = VARSIZE_ANY_EXHDR(txt);
+
+    /*
+     * Size the per-row de-dup set to the next power of two >= len
+     * (an upper bound on distinct trigrams in the row), with a small
+     * floor.  Open-addressing load factor stays <= 0.5 because we
+     * never insert more than `len` distinct hashes into a table of
+     * capacity >= len*2 ... we use len rounded up then doubled-ish:
+     * cap = next_pow2(len + 8) gives headroom; if a pathological row
+     * exceeds it we simply skip dedup for the overflow (still
+     * correct, just less collapsing).
+     */
+    {
+        uint32 want = (uint32) (len > 0 ? len : 1) + 8;
+        uint32 cap = 16;
+        while (cap < want)
+            cap <<= 1;
+        if (cap > (1u << 22))   /* clamp at 4M slots (32 MB) for huge rows */
+            cap = (1u << 22);
+        seen_cap = cap;
+        seen_mask = cap - 1;
+        seen = (uint64 *) palloc0(sizeof(uint64) * cap);
+        seen_n = 0;
+    }
 
     /* Phase 5: get or create the per-TID bloom filter. */
     if (pg_tre_tuple_bloom_enable)
@@ -338,6 +387,50 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
             trigram_hash = pg_tre_hash_trigram_cp(ring);
 
             /*
+             * Per-row de-dup: skip this emission if we have already
+             * emitted (trigram_hash, tid) for the current row.  Open-
+             * addressing probe; slot value 0 means empty.  A genuine
+             * hash of 0 is handled by the seen_zero flag.  If the set
+             * is full (pathological row beyond seen_cap), fall through
+             * and emit (correct, just no collapsing).
+             */
+            if (seen != NULL)
+            {
+                if (trigram_hash == 0)
+                {
+                    if (seen_zero)
+                        goto skip_emit;
+                    seen_zero = true;
+                }
+                else if (seen_n < seen_cap)
+                {
+                    uint32 slot = (uint32) (trigram_hash * 0x9E3779B97F4A7C15ULL
+                                            >> 40) & seen_mask;
+                    bool found = false;
+                    uint32 probes = 0;
+
+                    while (seen[slot] != 0)
+                    {
+                        if (seen[slot] == trigram_hash)
+                        {
+                            found = true;
+                            break;
+                        }
+                        slot = (slot + 1) & seen_mask;
+                        if (++probes >= seen_cap)
+                            break;   /* table full; emit without dedup */
+                    }
+                    if (found)
+                        goto skip_emit;
+                    if (seen[slot] == 0)
+                    {
+                        seen[slot] = trigram_hash;
+                        seen_n++;
+                    }
+                }
+            }
+
+            /*
              * Bounded-build guard: the build is bounded in *memory* by
              * maintenance_work_mem (tuplesort spills to disk), but a
              * runaway emission count still consumes temp disk.  Keep
@@ -387,8 +480,14 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
             /* Phase 5: add trigram to the per-tuple bloom. */
             if (bloom != NULL)
                 pg_tre_bloom_add_trigram(bloom, trigram_hash);
+
+        skip_emit:
+            ;   /* dedup landing pad: this (trigram,tid) already emitted */
         }
     }
+
+    if (seen != NULL)
+        pfree(seen);
 }
 
 /*
