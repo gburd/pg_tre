@@ -47,6 +47,9 @@
 #include "utils/tuplesort.h"
 #include "utils/typcache.h"
 
+#include "funcapi.h"
+#include "access/relation.h"
+
 #include "pg_tre/amapi.h"
 #include "pg_tre/bloom.h"
 #include "pg_tre/hash.h"
@@ -160,6 +163,20 @@ typedef struct UpperIterState
  * bytes preserve that under memcmp.
  */
 #define PG_TRE_SORTKEY_LEN 20
+
+/*
+ * Realistic temp-disk cost of one emitted trigram tuple inside
+ * tuplesort, in bytes.  The encoded key is 24 bytes (4-byte bytea
+ * header + 20-byte sortkey), but tuplesort_begin_datum wraps every
+ * by-reference Datum in a SortTuple plus a MinimalTuple and rounds
+ * up, so the on-tape/in-memory footprint is substantially larger.
+ * A production user measured ~21 GB of build temp for ~tens of MB
+ * of indexed text -- consistent with ~64 bytes per emitted tuple.
+ * build_max_entries_mb uses THIS figure (not the bare 24-byte key)
+ * so its ceiling tracks real temp-disk consumption rather than
+ * under-counting it ~2.5x.  See LIMITATIONS.md for the sizing model.
+ */
+#define PG_TRE_SORT_TUPLE_TEMP_BYTES 64
 
 static inline void
 encode_entry(uint8 *buf, uint64 trigram_hash, uint64 packed_tid,
@@ -331,7 +348,7 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
              */
             bstate->n_emitted++;
             if (pg_tre_build_max_entries_mb > 0 &&
-                (uint64) bstate->n_emitted * sizeof(TrigramTidEntry) >
+                (uint64) bstate->n_emitted * PG_TRE_SORT_TUPLE_TEMP_BYTES >
                     (uint64) pg_tre_build_max_entries_mb * 1024 * 1024)
                 ereport(ERROR,
                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -339,11 +356,13 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
                                 "pg_tre.build_max_entries_mb (%d MB)",
                                 pg_tre_build_max_entries_mb),
                          errdetail("The build emitted %lld trigram tuples "
-                                   "(~%lld MB of sort input).",
+                                   "(~%lld MB of build temp disk at ~%d "
+                                   "bytes/tuple).",
                                    (long long) bstate->n_emitted,
                                    (long long) ((uint64) bstate->n_emitted
-                                                * sizeof(TrigramTidEntry)
-                                                / (1024 * 1024))),
+                                                * PG_TRE_SORT_TUPLE_TEMP_BYTES
+                                                / (1024 * 1024)),
+                                   PG_TRE_SORT_TUPLE_TEMP_BYTES),
                          errhint("Raise pg_tre.build_max_entries_mb on a "
                                  "host with enough RAM/temp space, raise "
                                  "pg_tre.min_trigram_freq, index a "
@@ -836,4 +855,159 @@ pg_tre_ambuildempty(Relation index)
      * by test/scripts/wal_audit.sh.
      */
     pg_tre_build_empty_fork(index, INIT_FORKNUM);
+}
+
+/*
+ * tre_estimate_index_build(rel regclass, attno int) -> record
+ *
+ * Up-front sizing precheck for a TRE index build (customer ask:
+ * "tell me before I start whether it will fit").  Samples up to
+ * TRE_ESTIMATE_SAMPLE_ROWS rows of the target text column, counts
+ * distinct trigrams per row, and extrapolates to the whole table.
+ *
+ * Returns:
+ *   sample_rows      rows actually sampled
+ *   est_rows         relation live-tuple estimate
+ *   est_trigrams     extrapolated distinct (trigram,tid) emissions
+ *   est_temp_mb      estimated build temp-disk (emissions * ~64 B)
+ *   est_index_mb     rough final index size estimate
+ *
+ * The temp figure uses the same per-tuple cost the build's
+ * build_max_entries_mb ceiling uses, so an operator can size
+ * build_max_entries_mb / temp tablespace before committing.
+ */
+#define TRE_ESTIMATE_SAMPLE_ROWS 2000
+
+PG_FUNCTION_INFO_V1(tre_estimate_index_build);
+Datum
+tre_estimate_index_build(PG_FUNCTION_ARGS)
+{
+    Oid             relid = PG_GETARG_OID(0);
+    int             attno = PG_ARGISNULL(1) ? 1 : PG_GETARG_INT32(1);
+    Relation        rel;
+    TableScanDesc   scan;
+    TupleTableSlot *slot;
+    int64           sampled = 0;
+    int64           sample_trigrams = 0;   /* distinct (trigram) over sample */
+    double          rel_tuples;
+    int64           est_trigrams;
+    int64           est_temp_mb;
+    int64           est_index_mb;
+    TupleDesc       resdesc;
+    Datum           vals[5];
+    bool            nulls[5] = {false, false, false, false, false};
+    HeapTuple       restup;
+
+    if (get_call_result_type(fcinfo, NULL, &resdesc) != TYPEFUNC_COMPOSITE)
+        elog(ERROR, "tre_estimate_index_build must return a record type");
+    resdesc = BlessTupleDesc(resdesc);
+
+    rel = relation_open(relid, AccessShareLock);
+    rel_tuples = rel->rd_rel->reltuples > 0
+                 ? (double) rel->rd_rel->reltuples : 0.0;
+
+    slot = table_slot_create(rel, NULL);
+    scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL);
+
+    while (sampled < TRE_ESTIMATE_SAMPLE_ROWS &&
+           table_scan_getnextslot(scan, ForwardScanDirection, slot))
+    {
+        bool    isnull;
+        Datum   v;
+
+        CHECK_FOR_INTERRUPTS();
+        v = slot_getattr(slot, attno, &isnull);
+        sampled++;
+        if (isnull)
+            continue;
+        {
+            text         *txt = DatumGetTextPP(v);
+            const char   *str = VARDATA_ANY(txt);
+            int           len = VARSIZE_ANY_EXHDR(txt);
+            PgTreCpStream stream;
+            int32         ring[3];
+            int           ring_n = 0;
+            int32         cp;
+            uint64       *seen;
+            uint32        cap = 16, mask, n = 0;
+            bool          seen_zero = false;
+            uint32        want = (uint32) (len > 0 ? len : 1) + 8;
+
+            while (cap < want)
+                cap <<= 1;
+            if (cap > (1u << 22))
+                cap = (1u << 22);
+            mask = cap - 1;
+            seen = (uint64 *) palloc0(sizeof(uint64) * cap);
+
+            pg_tre_cpstream_init(&stream, str, len);
+            for (;;)
+            {
+                cp = pg_tre_cpstream_next(&stream);
+                if (cp < 0)
+                    break;
+                if (ring_n >= 3)
+                {
+                    ring[0] = ring[1]; ring[1] = ring[2]; ring[2] = cp;
+                }
+                else
+                {
+                    ring[ring_n++] = cp;
+                }
+                if (ring_n == 3)
+                {
+                    uint64 h = pg_tre_hash_trigram_cp(ring);
+                    if (h == 0)
+                    {
+                        if (!seen_zero) { seen_zero = true; sample_trigrams++; }
+                    }
+                    else if (n < cap)
+                    {
+                        uint32 slot2 = (uint32) (h * 0x9E3779B97F4A7C15ULL >> 40) & mask;
+                        bool found = false;
+                        uint32 probes = 0;
+                        while (seen[slot2] != 0)
+                        {
+                            if (seen[slot2] == h) { found = true; break; }
+                            slot2 = (slot2 + 1) & mask;
+                            if (++probes >= cap) break;
+                        }
+                        if (!found && seen[slot2] == 0)
+                        {
+                            seen[slot2] = h; n++; sample_trigrams++;
+                        }
+                    }
+                }
+            }
+            pfree(seen);
+        }
+    }
+
+    table_endscan(scan);
+    ExecDropSingleTupleTableSlot(slot);
+    relation_close(rel, AccessShareLock);
+
+    /* Extrapolate.  If reltuples is unknown (0), report per-sample only. */
+    if (rel_tuples <= 0)
+        rel_tuples = (double) sampled;
+    if (sampled > 0)
+        est_trigrams = (int64) ((double) sample_trigrams / (double) sampled
+                                * rel_tuples);
+    else
+        est_trigrams = 0;
+    est_temp_mb  = (int64) ((double) est_trigrams * PG_TRE_SORT_TUPLE_TEMP_BYTES
+                            / (1024.0 * 1024.0));
+    /* Final index: distinct trigrams collapse into posting trees; a
+     * conservative rough estimate is ~16 bytes per (trigram,tid)
+     * after sparsemap compression of the TID lists. */
+    est_index_mb = (int64) ((double) est_trigrams * 16.0
+                            / (1024.0 * 1024.0));
+
+    vals[0] = Int64GetDatum(sampled);
+    vals[1] = Int64GetDatum((int64) rel_tuples);
+    vals[2] = Int64GetDatum(est_trigrams);
+    vals[3] = Int64GetDatum(est_temp_mb);
+    vals[4] = Int64GetDatum(est_index_mb);
+    restup = heap_form_tuple(resdesc, vals, nulls);
+    PG_RETURN_DATUM(HeapTupleGetDatum(restup));
 }

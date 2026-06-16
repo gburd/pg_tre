@@ -16,17 +16,20 @@ report" below).
 > revisions of this file is fixed.  The table below now reflects
 > 1.8.0; for 1.6.x/1.7.x behavior see the git history.
 
-| dataset shape | safe? | notes (1.8.0) |
+| dataset shape | safe? | notes |
 |---|---|---|
-| ≤ 100k rows of long text (e.g., email bodies, ~1 KB) | ✅ | builds under any reasonable `maintenance_work_mem` |
-| ≤ 500k rows of short text (~50 chars) | ✅ | same |
-| 100k–500k rows of long text | ✅ | set `maintenance_work_mem` to taste (more = fewer merge passes); peak RSS stays bounded, not GBs |
-| ≥ 500k rows of long text | ✅ | builds memory-safely; use `CREATE INDEX CONCURRENTLY` to avoid the build lock; expect temp-disk use proportional to total trigram emissions |
-| ≥ 1M rows of any natural text | ⚠️ | builds memory-safely, but query-time selectivity and index size are the real questions — see Performance and the pairing advice below |
+| ≤ 100k rows of long text (e.g., email bodies, ~1 KB) | ✅ | builds memory-safely; **but check temp disk first** — ~64 B per trigram occurrence (run `tre_estimate_index_build`) |
+| ≤ 500k rows of short text (~50 chars) | ✅ | modest temp footprint; fine on a normal host |
+| 100k–500k rows of long text | ⚠️ | builds memory-safely, but build **temp disk** can reach tens of GB on long text — size it with `tre_estimate_index_build` before starting |
+| ≥ 500k rows of long text (multi-GB column) | ❌ (today) | memory-safe and cancellable, but build-time **temp-disk** is the wall: a production user measured ~21 GB temp at 2.1 % of a body corpus — hundreds of GB extrapolated. Pair with `pg_trgm` until 2.0's de-dup lands |
+| ≥ 1M rows of any natural text | ❌ (today) | same temp-disk wall; also query-time selectivity / index size questions |
 
-Memory is no longer the gating factor.  The remaining reasons to
-prefer the pairing below at very large scale are **query latency**
-and **index size**, not build OOM.  Pairing pg_tre with `pg_trgm`
+The gating factor at large scale is **build-time temp disk**, not
+memory (memory has been bounded by `maintenance_work_mem` since
+1.8.0).  A production user reported the index AM unusable on a
+multi-GB text column at every shipped version for the temp-disk
+reason; see the sizing section and field report below.  Pairing
+pg_tre with `pg_trgm`
 (GIN) for substring/`LIKE` and `tsvector` BM25 for ranked
 full-text, reserving pg_tre for true edit-distance/regex fuzzy
 matching, remains the recommended pattern for the largest
@@ -57,16 +60,56 @@ RAM for fewer merge passes and faster builds.
 What *does* still scale with corpus size:
 
 ```
-temp_disk    ≈ emitted_trigrams_per_row × N_rows × 24 B   (tuplesort spill)
-tid_bloom    ≈ N_rows × ~56 B                            (resident; O(distinct TIDs))
-index_size   ≈ grows with distinct trigrams + per-tuple bloom payload
+temp_disk    ≈ emitted_trigrams × ~64 B    (tuplesort spill, real cost)
+index_size   ≈ distinct_trigrams × ~16 B   (after sparsemap TID-list compression)
+tid_bloom    ≈ N_rows × ~56 B              (resident; O(distinct TIDs))
 ```
 
+**The temp-disk figure is the one that bites.** Each trigram
+*occurrence* in the text becomes one `tuplesort` entry; the encoded
+key is 24 bytes but tuplesort wraps every datum in a
+`SortTuple`+`MinimalTuple`, so the real on-disk cost is **~64 bytes
+per emitted tuple**. Natural text emits roughly one trigram per
+character, so:
+
+```
+temp_disk ≈ (bytes_of_text) × ~64 B/char     (worst case, no repetition)
+```
+
+**Field data point (production, v1.8.2):** a user indexing message
+bodies measured **~21 GB of build temp at 2.1 % of their body
+corpus** — consistent with ~64 B per emission over hundreds of MB
+of text. Extrapolated, a multi-GB text column needs **hundreds of
+GB of build-time temp disk**. If you do not have that, the build
+will not complete; size it up front.
+
+**Size it before you start.** As of 2.0 call:
+
+```sql
+SELECT * FROM tre_estimate_index_build('your_table'::regclass, attno);
+--  sample_rows | est_rows | est_trigrams | est_temp_mb | est_index_mb
+```
+
+It samples up to 2000 rows of the column and extrapolates the
+emission count, build temp-disk, and final index size. Set
+`pg_tre.build_max_entries_mb` from `est_temp_mb` (the GUC uses the
+same ~64 B/tuple cost), or decide the column is too large and pair
+with `pg_trgm` instead.
+
 The `pg_tre.build_max_entries_mb` GUC (default 0 = unlimited
-since 1.8.0) is an optional cap on the emitted-tuple count, i.e.
-a *temp-disk* safety valve — set it if you want the build to fail
-cleanly with `ERRCODE_PROGRAM_LIMIT_EXCEEDED` rather than fill
-the temp tablespace.
+since 1.8.0) caps build temp-disk: when emitted-tuple count × ~64 B
+would exceed it, the build fails cleanly with
+`ERRCODE_PROGRAM_LIMIT_EXCEEDED` (cancellable, never OOM) rather
+than filling the temp tablespace. As of 2.0 the ceiling is
+measured against the real ~64 B/tuple cost, not the bare 24 B key,
+so it tracks actual temp consumption.
+
+> **Roadmap (2.0):** per-row de-duplication of repeated trigrams
+> collapses the dominant cost — repetitive text (a body that
+> mentions the same words many times) emits one tuple per
+> *distinct* trigram per row instead of one per *occurrence*,
+> cutting temp-disk several-fold on natural text. Tracked for the
+> 2.0 line.
 
 ## Cancellability
 

@@ -27,3 +27,20 @@ COMMENT ON FUNCTION tre_run_catalog_status(regclass) IS
     'one row per live run, newest run_id first.  A v6 or default-v7 '
     'index reports a single implicit run rooted at the index roots.';
 
+
+-- Build sizing precheck (customer ask: estimate temp/final size before
+-- committing to a large index build).  Samples up to 2000 rows of the
+-- target text column and extrapolates.
+CREATE FUNCTION tre_estimate_index_build(regclass, int DEFAULT 1)
+    RETURNS TABLE(sample_rows bigint, est_rows bigint,
+                  est_trigrams bigint, est_temp_mb bigint,
+                  est_index_mb bigint)
+    AS 'MODULE_PATHNAME', 'tre_estimate_index_build'
+    LANGUAGE C STABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION tre_estimate_index_build(regclass, int) IS
+    'Estimate the temp-disk and final-index size of a TRE index build '
+    'on column `attno` of the table, by sampling rows.  Run before '
+    'CREATE INDEX on a large column to size build_max_entries_mb and '
+    'the temp tablespace up front.  est_temp_mb uses the same '
+    'per-tuple cost as the build_max_entries_mb ceiling.';
