@@ -82,3 +82,6 @@ coverage.info
 *.gcda
 *.gcno
 vendor/tre/.pg_tre-patched
+
+# direnv flake cache
+.direnv/
