@@ -24,6 +24,11 @@ FROM tre_estimate_index_build('dd_t'::regclass, 2);
 
 -- Correctness preserved: index matches must equal seq-scan matches.
 CREATE INDEX dd_idx ON dd_t USING tre (body);
+psql:test/sql/build_dedup.sql:20: NOTICE:  pg_tre: collected 2121 trigram entries from 300 heap tuples
+psql:test/sql/build_dedup.sql:20: NOTICE:  pg_tre: built 14 posting trees
+psql:test/sql/build_dedup.sql:20: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/build_dedup.sql:20: NOTICE:  pg_tre: build complete, indexed 300 heap tuples into 14 trigrams
+CREATE INDEX
 SELECT CASE WHEN
   (SELECT count(*) FROM dd_t WHERE body %~~ tre_pattern('needle', 0)) =
   (SELECT count(*) FROM dd_t WHERE body LIKE '%needle%')
