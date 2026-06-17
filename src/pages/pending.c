@@ -43,6 +43,7 @@
 #include "pg_tre/pending.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/posting.h"
+#include "pg_tre/run_catalog.h"
 #include "pg_tre/sparsemap.h"
 #include "pg_tre/upper.h"
 #include "pg_tre/xlog.h"
@@ -497,6 +498,9 @@ typedef struct MergeCtx
     int          bucket_cap;
     int          n_entries;
     MemoryContext mcxt;
+    bool         pending_only;   /* B1.3 flush-to-run: do NOT union with
+                                  * the existing posting -- the new run
+                                  * holds only the pending TIDs */
 } MergeCtx;
 
 static int
@@ -684,7 +688,8 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
          * new malloc-backed sparsemap.
          */
         existing = NULL;
-        if (pg_tre_upper_lookup(index, e->trigram_hash, &ref))
+        if (!mc->pending_only &&
+            pg_tre_upper_lookup(index, e->trigram_hash, &ref))
         {
             existing = pg_tre_posting_materialize(index, ref.root,
                                                   ref.inline_data,
@@ -1232,6 +1237,7 @@ pg_tre_pending_merge(Relation index)
     pg_tre_pending_scan_watermark(index, collect_pending_cb, &mc,
                                   &wm_tail, &wm_tail_n, &wm_head);
 
+    mc.pending_only = pg_tre_flush_to_run;
     materialize_merged_postings(index, &mc);
 
     /* Build a sorted array of MergeEntry pointers. */
@@ -1245,6 +1251,56 @@ pg_tre_pending_merge(Relation index)
     qsort(rs.sorted, k, sizeof(MergeEntry *), cmp_merge_hash);
     rs.n_sorted  = k;
     rs.i_sorted  = 0;
+
+    if (pg_tre_flush_to_run && k > 0)
+    {
+        /*
+         * Phase B1.3 flush-to-run: build a pending-ONLY run (its own
+         * upper tree over just the new TIDs) and append it to the run
+         * catalog, leaving the base run untouched.  The multi-run scan
+         * unions all runs at query time.  Order matters for crash
+         * safety: append the run (crash-safe, WAL'd) FIRST, then
+         * truncate the consumed pending prefix.  A crash between leaves
+         * the pending list intact -> the next merge re-flushes it into
+         * a second run with the same TIDs, which the scan's newest-wins
+         * union dedups -- wasteful but never wrong, and self-heals.
+         */
+        BlockNumber run_root;
+        PgTreRun    run;
+        uint64      consumed = 0;
+        uint64      lo_hash = rs.sorted[0]->trigram_hash;
+        uint64      hi_hash = rs.sorted[k - 1]->trigram_hash;
+
+        rs.existing = NULL;
+        rs.existing_inline = NULL;
+        rs.n_existing = 0;
+        rs.i_existing = 0;
+        rs.existing_cap = 0;
+
+        run_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
+
+        memset(&run, 0, sizeof(run));
+        run.level = 1;
+        run.flags = PG_TRE_RUN_LIVE;
+        run.root_upper = run_root;
+        run.root_range = InvalidBlockNumber;   /* runs have no range tier yet */
+        run.n_trigrams = (uint64) k;
+        run.min_trigram_hash = lo_hash;
+        run.max_trigram_hash = hi_hash;
+        (void) pg_tre_run_catalog_append(index, &run);
+
+        /* Truncate the consumed pending prefix; keep the base root
+         * (no-op root swap), so finalize_merge only does the truncate. */
+        finalize_merge(index, meta.root_upper, meta.root_range,
+                       meta.n_trigrams, meta.n_tuples_indexed,
+                       wm_tail, wm_tail_n, &consumed);
+        run.n_tuples = consumed / 5;          /* ~5 trigrams/row estimate */
+        n_merged = consumed;
+
+        MemoryContextSwitchTo(old);
+        MemoryContextDelete(merge_cxt);
+        return n_merged;
+    }
 
     snapshot_existing_upper(index, &rs, merge_cxt);
 

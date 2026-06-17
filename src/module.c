@@ -39,6 +39,7 @@ int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
+bool pg_tre_flush_to_run           = false; /* Phase B1.3: experimental */
 int  pg_tre_tier3_max_candidates   = 50000;
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
@@ -105,6 +106,20 @@ pg_tre_init_guc(void)
         NULL,
         &pg_tre_tuple_bloom_enable,
         true, PGC_SIGHUP, 0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("pg_tre.flush_to_run",
+        "Phase B1.3: flush the pending list into a new LSM run instead"
+        " of merging it into the single base structure.",
+        "When on, pg_tre_pending_merge builds a pending-only run (its own"
+        " upper tree + postings over just the newly-ingested TIDs) and"
+        " appends it to the run catalog, leaving the base run untouched;"
+        " the multi-run scan unions all runs at query time.  When off"
+        " (the default), the historical behavior is used: the pending"
+        " list is merged into the single base tree.  Runs accrue without"
+        " bound until Hanoi leveling / adaptive collapse (B1.4) lands, so"
+        " this is experimental and off by default.",
+        &pg_tre_flush_to_run,
+        false, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.tier3_max_candidates",
         "Skip per-tuple bloom and positional filters when the candidate"
