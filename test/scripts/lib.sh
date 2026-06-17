@@ -108,8 +108,12 @@ pg_initcluster() {
     } >> "$data_dir/postgresql.conf"
 
     mkdir -p "$TEST_TMPDIR"
-    "$PG_BIN/pg_ctl" -D "$data_dir" -l "$data_dir/logfile" \
-        -w start >/dev/null
+    if ! "$PG_BIN/pg_ctl" -D "$data_dir" -l "$data_dir/logfile" \
+            -w start >/dev/null; then
+        echo "pg_initcluster: pg_ctl start FAILED; server log follows:" >&2
+        sed 's/^/  [server] /' "$data_dir/logfile" >&2 2>/dev/null || true
+        return 1
+    fi
 }
 
 # pg_stopcluster <data_dir>
