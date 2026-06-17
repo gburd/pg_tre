@@ -194,6 +194,27 @@ Deferred (NOT shipped) -- the catalog **writer**:
 
 ## Subsequent B1 increments (tracked, not built here)
 
+## B1.3 status: COMPLETE (crash-validated)
+
+Both halves landed and validated under kill -9 via
+tap/crash_recovery.pl (nightly-stress plain leg):
+
+- **Crash-safe catalog writer** (`pg_tre_run_catalog_append`):
+  REGBUF_FORCE_IMAGE + all edits in one critical section.
+- **Pending-flush-to-run** (`pg_tre.flush_to_run`, default off):
+  VACUUM builds a pending-only run and appends it; the
+  multi-run scan unions base + runs.
+
+Crash test result: 317 / 616 catalog runs survived recovery
+across two kill-9 cycles, and every committed batch matched
+between index and seq-scan -- correctness preserved with
+production flush-to-run runs in flight at the crash.
+
+Remaining on the B1 line: B1.4 Hanoi leveling + adaptive
+collapse (bound run growth), B1.5 lazy materialization.
+Until B1.4, flush_to_run is experimental/off-by-default
+because runs accrue without bound.
+
 ## B1.3 plan (crash-safe catalog writer + flush-to-run)
 
 The WAL bug that blocked the B1.2 writer is fully understood and is
