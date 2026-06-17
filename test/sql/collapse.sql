@@ -1,7 +1,9 @@
 -- Phase B1.4: adaptive collapse.  When runs accrue past the Hanoi
 -- level cap (max_levels, default 7), VACUUM collapses them all back
--- into a single base run, bounding growth.  Results must be unchanged
--- and the catalog must return to single-run.
+-- into a single base run, bounding growth.  Output is reduced to
+-- deterministic tokens (NOTICEs suppressed, append results discarded)
+-- so the expected file is stable across runtime-dependent counts.
+SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS pg_tre;
 
 CREATE TABLE col_t(id serial primary key, body text);
@@ -10,26 +12,24 @@ SELECT md5(g::text) || (CASE WHEN g % 20 = 0 THEN ' findme' ELSE '' END)
 FROM generate_series(1, 1000) g;
 CREATE INDEX col_idx ON col_t USING tre (body);
 
--- Accrue many runs (more than max_levels=7) via the test helper.
--- Separate top-level statements so each append commits/persists.
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
-SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+-- Accrue 9 runs (base + 9 = 10 > max_levels=7) via the test helper.
+-- Wrap in a DO block so the per-call result rows are not emitted.
+DO $$
+BEGIN
+  FOR i IN 1..9 LOOP
+    PERFORM tre_debug_append_run('col_idx'::regclass, 0::numeric,
+                                 18446744073709551615::numeric);
+  END LOOP;
+END $$;
 
--- > 7 runs now (base + 9 appended).
+-- > 7 runs accrued.
 SELECT CASE WHEN count(*) > 7 THEN 'accrued_many' ELSE 'too_few' END AS before
 FROM tre_run_catalog_status('col_idx');
 
 -- VACUUM triggers the collapse (run count > max_levels).
 VACUUM col_t;
 
--- Back to a single run.
+-- Collapsed back to a single run.
 SELECT CASE WHEN count(*) = 1 THEN 'collapsed_to_one' ELSE 'still_many' END AS after
 FROM tre_run_catalog_status('col_idx');
 
