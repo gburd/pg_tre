@@ -20,7 +20,7 @@ RETURNS text LANGUAGE plpgsql AS $$
 DECLARE r record; node text;
 BEGIN
   FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
-    node := r."QUERY PLAN"->0->Plan->>Node Type;
+    node := r."QUERY PLAN"->0->'Plan'->>'Node Type';
   END LOOP;
   IF node ILIKE '%Index%' OR node ILIKE '%Bitmap%' THEN RETURN 'index';
   ELSIF node ILIKE '%Seq%' THEN RETURN 'seqscan';
@@ -51,13 +51,13 @@ SET
 SELECT pa_plan($$SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0)$$) AS forced_selective;
  forced_selective 
 ------------------
- index
+            index
 (1 row)
 
 SELECT pa_plan($$SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('row_42', 0)$$)      AS forced_very_selective;
  forced_very_selective 
 -----------------------
- index
+                 index
 (1 row)
 
 SET enable_seqscan = on;
@@ -65,17 +65,19 @@ SET
 
 -- Row-count correctness (the substantive guarantee).
 SELECT COUNT(*) AS approximate_matches
-FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0);
  approximate_matches 
 ---------------------
- 2
+                   2
+(1 row)
+
 (1 row)
 
 SELECT COUNT(*) AS row_42_matches
-FROM planner_auto_small WHERE body %~~ tre_pattern('row_42', 0);
  row_42_matches 
 ----------------
- 1
+              1
+(1 row)
+
 (1 row)
 
 
@@ -101,17 +103,18 @@ SET
 SELECT pa_plan($$SELECT * FROM planner_auto_medium WHERE body %~~ tre_pattern('findme', 0)$$) AS forced_medium;
  forced_medium 
 ---------------
- index
+         index
 (1 row)
 
 SET enable_seqscan = on;
 SET
 
 SELECT COUNT(*) AS findme_matches
-FROM planner_auto_medium WHERE body %~~ tre_pattern('findme', 0);
  findme_matches 
 ----------------
- 2
+              2
+(1 row)
+
 (1 row)
 
 DROP FUNCTION pa_plan(text);
