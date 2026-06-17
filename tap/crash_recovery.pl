@@ -112,6 +112,16 @@ for my $cycle (1 .. $N_CYCLES) {
                                             0::numeric,
                                             18446744073709551615::numeric);
             });
+            # Phase B1.3: every few batches, exercise the REAL
+            # production flush-to-run path (VACUUM with flush_to_run on
+            # builds a pending-only run and appends it crash-safely),
+            # so its WAL is also in flight at kill -9.
+            if ($batch_id % 4 == 3) {
+                raw_psql(qq{
+                    SET pg_tre.flush_to_run = on;
+                    VACUUM crash_test;
+                });
+            }
             $batch_id++;
             $next_seq = $hi + 1;
         }
