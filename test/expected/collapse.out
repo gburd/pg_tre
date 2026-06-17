@@ -1,1 +1,106 @@
-REGEN
+-- Phase B1.4: adaptive collapse.  When runs accrue past the Hanoi
+-- level cap (max_levels, default 7), VACUUM collapses them all back
+-- into a single base run, bounding growth.  Results must be unchanged
+-- and the catalog must return to single-run.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/collapse.sql:5: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+CREATE TABLE col_t(id serial primary key, body text);
+CREATE TABLE
+INSERT INTO col_t(body)
+SELECT md5(g::text) || (CASE WHEN g % 20 = 0 THEN ' findme' ELSE '' END)
+FROM generate_series(1, 1000) g;
+INSERT 0 1000
+CREATE INDEX col_idx ON col_t USING tre (body);
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: collected 30249 trigram entries from 1000 heap tuples
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: built 4163 posting trees
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: build complete, indexed 1000 heap tuples into 4163 trigrams
+CREATE INDEX
+-- Accrue many runs (more than max_levels=7) via the test helper.
+-- Separate top-level statements so each append commits/persists.
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    1
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    2
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    3
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    4
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    5
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    6
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    7
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    8
+(1 row)
+
+SELECT tre_debug_append_run('col_idx'::regclass, 0::numeric, 18446744073709551615::numeric);
+ tre_debug_append_run 
+----------------------
+                    9
+(1 row)
+
+-- > 7 runs now (base + 9 appended).
+SELECT CASE WHEN count(*) > 7 THEN 'accrued_many' ELSE 'too_few' END AS before
+FROM tre_run_catalog_status('col_idx');
+    before    
+--------------
+ accrued_many
+(1 row)
+
+-- VACUUM triggers the collapse (run count > max_levels).
+VACUUM col_t;
+VACUUM
+-- Back to a single run.
+SELECT CASE WHEN count(*) = 1 THEN 'collapsed_to_one' ELSE 'still_many' END AS after
+FROM tre_run_catalog_status('col_idx');
+      after       
+------------------
+ collapsed_to_one
+(1 row)
+
+-- Correctness preserved after collapse: index == seq-scan.
+SELECT CASE WHEN
+  (SELECT count(*) FROM col_t WHERE body %~~ tre_pattern('findme', 0)) =
+  (SELECT count(*) FROM col_t WHERE body LIKE '%findme%')
+  THEN 'collapse_correct' ELSE 'collapse_wrong' END AS result;
+      result      
+------------------
+ collapse_correct
+(1 row)
+
+DROP TABLE col_t;
+DROP TABLE

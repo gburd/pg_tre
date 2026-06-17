@@ -54,7 +54,7 @@ for t in "${TESTS[@]}"; do
         echo "ok  $t"
     else
         echo "FAIL $t"
-        sed -n '1,40p' "test/results/${t}.diff"
+        sed -n '1,200p' "test/results/${t}.diff"
         fail=1
     fi
 done
