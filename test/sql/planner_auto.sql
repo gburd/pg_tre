@@ -9,6 +9,7 @@
 -- and borderline small-table plans).
 --
 
+SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS pg_tre;
 
 -- Helper: report the top scan-node category for a query.
