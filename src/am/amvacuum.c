@@ -33,8 +33,10 @@
 #include "utils/rel.h"
 
 #include "pg_tre/amapi.h"
+#include "pg_tre/meta.h"
 #include "pg_tre/pending.h"
 #include "pg_tre/posting.h"
+#include "pg_tre/run_catalog.h"
 
 IndexBulkDeleteResult *
 pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
@@ -100,6 +102,26 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     /* Drain the pending list into the posting trees. */
     merged = pg_tre_pending_merge(info->index);
     (void) merged;    /* reporting via ereport would spam VACUUM output */
+
+    /*
+     * Phase B1.4 adaptive collapse: VACUUM is the natural compaction
+     * point for an index AM (no background thread).  Let runs accrue
+     * across VACUUMs (the LSM benefit), but collapse them all back
+     * into a single base run once the count exceeds the Hanoi level
+     * cap (max_levels, default 7) -- bounding run growth so scan cost
+     * stays near baseline and a quiescent index converges to the
+     * single-structure layout.  No-op when at/under the threshold, so
+     * this is free for the default (flush_to_run off) single-run case.
+     */
+    {
+        PgTreMetaPageData vmeta;
+        uint32            cap;
+
+        pg_tre_meta_read(info->index, &vmeta);
+        cap = (vmeta.max_levels > 0) ? vmeta.max_levels : 7;
+        if (pg_tre_run_count(info->index) > cap)
+            (void) pg_tre_collapse_runs(info->index);
+    }
 
     /*
      * Physically reclaim posting leaves that earlier ambulkdelete passes

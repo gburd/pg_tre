@@ -1351,6 +1351,136 @@ pg_tre_pending_merge(Relation index)
     return n_merged;
 }
 
+/*
+ * Snapshot one run's upper-tree leaves and fold every (trigram, TID)
+ * it holds into the MergeCtx (Phase B1.4 collapse).  Reuses the
+ * upper-tree walker (snapshot_upper_subtree) to enumerate the run's
+ * trigrams, then materializes each posting and enumerates its TIDs
+ * into the per-trigram accumulator.
+ */
+static void
+collapse_fold_run(Relation index, BlockNumber root_upper,
+                  MergeCtx *mc, MemoryContext mcxt)
+{
+    RebuildState rs;
+    int i;
+
+    if (root_upper == InvalidBlockNumber)
+        return;
+
+    memset(&rs, 0, sizeof(rs));
+    snapshot_upper_subtree(index, &rs, mcxt, root_upper);
+
+    for (i = 0; i < rs.n_existing; i++)
+    {
+        PgTreUpperLeafEntry *e = &rs.existing[i];
+        sm_t   *sm;
+        uint64  idx;
+        MergeEntry *me;
+
+        sm = pg_tre_posting_materialize(index, e->posting_root,
+                                        rs.existing_inline[i],
+                                        e->inline_bytes);
+        if (sm == NULL)
+            continue;
+
+        me = merge_find(mc, e->trigram_hash, true);
+        idx = SM_IDX_MAX;
+        while ((idx = sm_next_member(sm, idx)) != SM_IDX_MAX)
+        {
+            if (me->n_tids >= me->tids_alloced)
+            {
+                MemoryContext o = MemoryContextSwitchTo(mc->mcxt);
+                me->tids_alloced *= 2;
+                me->tids = repalloc(me->tids,
+                                    me->tids_alloced * sizeof(uint64));
+                MemoryContextSwitchTo(o);
+            }
+            me->tids[me->n_tids++] = idx;
+        }
+        free(sm);
+    }
+}
+
+/*
+ * Collapse ALL live runs (base + catalog) into a single fresh base
+ * run (Phase B1.4 adaptive collapse).  Bounds run growth: a
+ * quiescent index converges to the pre-v7 single-structure layout,
+ * so scan cost returns to baseline.  Driven from VACUUM.
+ *
+ * The merge is in TID space: fold every run's (trigram, TID) into a
+ * MergeCtx (de-duped per trigram by the sparsemap), materialize the
+ * unioned postings, bulkload a fresh upper tree, then atomically swap
+ * the meta root and reset the catalog to single-run
+ * (pg_tre_run_catalog_collapse_reset).  Returns the number of runs
+ * collapsed (0 if there was nothing to do).
+ */
+uint32
+pg_tre_collapse_runs(Relation index)
+{
+    PgTreMetaPageData meta;
+    MemoryContext     cxt, old;
+    MergeCtx          mc;
+    RebuildState      rs;
+    PgTreRunIter     *it;
+    PgTreRun          run;
+    uint32            n_runs;
+    int               i, k;
+    BlockNumber       new_root;
+
+    n_runs = pg_tre_run_count(index);
+    if (n_runs <= 1)
+        return 0;            /* already a single run -- nothing to do */
+
+    pg_tre_meta_read(index, &meta);
+
+    cxt = AllocSetContextCreate(CurrentMemoryContext,
+                                "pg_tre collapse", ALLOCSET_DEFAULT_SIZES);
+    old = MemoryContextSwitchTo(cxt);
+
+    memset(&mc, 0, sizeof(mc));
+    mc.bucket_cap = 256;
+    mc.bucket_tab = MemoryContextAllocZero(cxt,
+                       mc.bucket_cap * sizeof(MergeEntry *));
+    mc.mcxt       = cxt;
+    mc.pending_only = true;   /* postings come from the runs themselves */
+
+    /* Fold every live run's contents into the merge accumulator. */
+    it = pg_tre_run_catalog_open(index);
+    while (pg_tre_run_catalog_next(it, &run))
+        collapse_fold_run(index, run.root_upper, &mc, cxt);
+    pg_tre_run_catalog_close(it);
+
+    /* Materialize the per-trigram unioned postings (no existing-union;
+     * the runs ARE the source). */
+    materialize_merged_postings(index, &mc);
+
+    rs.sorted = MemoryContextAlloc(cxt, mc.n_entries * sizeof(MergeEntry *));
+    k = 0;
+    for (i = 0; i < mc.bucket_cap; i++)
+        if (mc.bucket_tab[i] != NULL)
+            rs.sorted[k++] = mc.bucket_tab[i];
+    Assert(k == mc.n_entries);
+    qsort(rs.sorted, k, sizeof(MergeEntry *), cmp_merge_hash);
+    rs.n_sorted  = k;
+    rs.i_sorted  = 0;
+    rs.existing = NULL;
+    rs.existing_inline = NULL;
+    rs.n_existing = 0;
+    rs.i_existing = 0;
+    rs.existing_cap = 0;
+
+    new_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
+
+    /* Atomically install the collapsed tree + reset the catalog. */
+    pg_tre_run_catalog_collapse_reset(index, new_root, meta.root_range,
+                                      (uint64) k, meta.n_tuples_indexed);
+
+    MemoryContextSwitchTo(old);
+    MemoryContextDelete(cxt);
+    return n_runs;
+}
+
 /* --------------------------------------------------------------------
  * WAL redo helper (called from src/wal/xlog.c)
  * -------------------------------------------------------------------- */

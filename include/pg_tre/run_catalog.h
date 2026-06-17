@@ -49,6 +49,18 @@ extern void pg_tre_run_catalog_close(PgTreRunIter *it);
  */
 extern uint64 pg_tre_run_catalog_append(Relation index, PgTreRun *run);
 
+/*
+ * Collapse the catalog to a single implicit run (Phase B1.4 adaptive
+ * collapse).  Caller has merged all live runs' postings into
+ * new_root_upper; this atomically swaps the meta root to it and
+ * resets the catalog to single-run state.  WAL-logged.
+ */
+extern void pg_tre_run_catalog_collapse_reset(Relation index,
+                                              BlockNumber new_root_upper,
+                                              BlockNumber new_root_range,
+                                              uint64 n_trigrams,
+                                              uint64 n_tuples);
+
 
 /*
  * Total live-run count without iterating (reads the meta page).

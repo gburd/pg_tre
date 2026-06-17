@@ -64,6 +64,14 @@ extern void pg_tre_pending_scan(Relation index,
 extern uint64 pg_tre_pending_merge(Relation index);
 
 /*
+ * Phase B1.4: collapse all live runs (base + catalog) into a single
+ * fresh base run, bounding run growth so a quiescent index converges
+ * to the single-structure layout.  Driven from VACUUM.  Returns the
+ * number of runs collapsed (0 when already single-run).
+ */
+extern uint32 pg_tre_collapse_runs(Relation index);
+
+/*
  * Apply a pending-insert delta to a tail page during WAL redo.
  * Used by pg_tre_redo_pending_insert_delta in src/wal/xlog.c.
  *

@@ -318,6 +318,61 @@ pg_tre_run_catalog_append(Relation index, PgTreRun *run)
     return assigned_id;
 }
 
+/*
+ * Collapse the run catalog back to a single implicit run (Phase B1.4
+ * adaptive collapse).  The caller has merged all live runs' postings
+ * into `new_root_upper` (a fresh upper tree); this atomically swaps
+ * the meta page's root_upper to it and resets the catalog to the
+ * single-implicit-run state (run_catalog_head = Invalid, n_runs = 0),
+ * so the index converges to the pre-v7 single-structure layout and
+ * scan cost returns to baseline.  The old catalog pages and the old
+ * base/run upper trees are leaked to the FSM's later reclamation
+ * (same deferred-recycle policy as the merge path); they are no
+ * longer reachable.  WAL-logged as a single meta-page FPI.
+ *
+ * Caller must hold a lock excluding concurrent catalog writers.
+ */
+void
+pg_tre_run_catalog_collapse_reset(Relation index, BlockNumber new_root_upper,
+                                  BlockNumber new_root_range,
+                                  uint64 n_trigrams, uint64 n_tuples)
+{
+    Buffer        metabuf;
+    Page          metapage;
+    PgTreMetaPage meta;
+
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    meta = PgTreMetaPageGet(metapage);
+
+    START_CRIT_SECTION();
+
+    meta->root_upper       = new_root_upper;
+    meta->root_range       = new_root_range;
+    meta->n_trigrams       = n_trigrams;
+    meta->n_tuples_indexed = n_tuples;
+    /* Reset to single-implicit-run.  Keep next_run_id monotonic. */
+    meta->run_catalog_head = InvalidBlockNumber;
+    meta->n_runs           = 0;
+
+    MarkBufferDirty(metabuf);
+
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
+        PageSetLSN(metapage, recptr);
+    }
+
+    END_CRIT_SECTION();
+
+    UnlockReleaseBuffer(metabuf);
+}
+
 uint32
 pg_tre_run_count(Relation index)
 {
