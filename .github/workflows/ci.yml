@@ -106,10 +106,15 @@ jobs:
         env:
           PGPORT: "5432"
         run: |
+          set -e
           for i in 1 2 3; do
               echo "==> Regression run $i/3"
-              PG_CONFIG=$(which pg_config) make localcheck \
-                  || PG_CONFIG=$(which pg_config) make check
+              # localcheck is the supported driver (run-regress.sh).  Do
+              # NOT fall back to 'make check' on failure: that target is
+              # unsupported here and its non-fatal exit silently masked
+              # real localcheck failures (CI went green while regression
+              # tests failed).  A localcheck failure must fail the step.
+              PG_CONFIG=$(which pg_config) make localcheck
           done
 
       - name: Upload regression artifacts on failure
