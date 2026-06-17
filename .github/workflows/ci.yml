@@ -99,10 +99,25 @@ jobs:
               sleep 1
           done
           sudo -u postgres createdb "$USER"
+          # run-regress.sh connects via local trust as the OS user
+          # ($USER = runner) with no -U, so that role must exist as a
+          # superuser (createdb/dropdb own the throwaway DB).  The
+          # default pg_createcluster only has 'postgres'; create the
+          # matching role.  (Previously masked: run-regress aborted on
+          # /bin/sh pipefail before reaching dropdb, then the
+          # '|| make check' fallback swallowed the failure.)
+          sudo -u postgres createuser --superuser "$USER"
         env:
           PGPORT: "5432"
 
       - name: Run regression tests (3x for flake detection)
+        # Linux only: the macOS legs validate build portability; the
+        # macOS PG setup installs PostgreSQL but does not start a
+        # server, so run-regress (which needs a running cluster) only
+        # runs on Linux.  (Previously the regression step ran on macOS
+        # too and failed with 'connection ... No such file or
+        # directory', masked by the now-removed '|| make check'.)
+        if: runner.os == 'Linux'
         env:
           PGPORT: "5432"
         run: |
