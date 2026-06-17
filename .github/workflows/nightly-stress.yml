@@ -77,11 +77,18 @@ jobs:
         env:
           CC: clang-18
           CFLAGS:  "-g -fsanitize=address,undefined -fno-omit-frame-pointer -Og"
-          LDFLAGS: "-fsanitize=address,undefined"
         run: |
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          make PG_CFLAGS="$CFLAGS" SHLIB_LINK="$LDFLAGS"
+          # SHLIB_LINK must KEEP the vendored TRE archive + -lm (the
+          # Makefile default is "$(TRE_LIB) -lm") and merely ADD the
+          # sanitizer flags; replacing it with only the asan flags
+          # dropped libtre.a and produced a pg_tre.so with an
+          # undefined tre_regerror symbol -- which failed to load
+          # ("could not start server") and masked the real cause for
+          # every prior nightly asan run.  Mirror the coverage build.
+          make PG_CFLAGS="$CFLAGS" \
+            SHLIB_LINK="vendor/tre/lib/.libs/libtre.a -lm -fsanitize=address,undefined"
           sudo env "PATH=$PATH" make install
 
       - name: Configure ASAN runtime (asan only)

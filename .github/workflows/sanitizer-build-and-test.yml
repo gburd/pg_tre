@@ -143,9 +143,13 @@ jobs:
           export PATH=$HOME/${{ env.PG_INSTALL_DIR }}/bin:$PATH
           # PG_CFLAGS is passed through to the extension build by
           # pgxs; CFLAGS is overridden by pgxs's own defaults.
+          # SHLIB_LINK must keep the vendored TRE archive + -lm and
+          # merely add the sanitizer flags -- replacing it with only
+          # the asan flags drops libtre.a and yields a pg_tre.so with
+          # an undefined tre_regerror symbol.
           make clean
           make PG_CFLAGS="${{ env.CFLAGS }}" \
-               SHLIB_LINK="${{ env.LDFLAGS }}" \
+               SHLIB_LINK="vendor/tre/lib/.libs/libtre.a -lm ${{ env.LDFLAGS }}" \
                PG_CONFIG=$HOME/${{ env.PG_INSTALL_DIR }}/bin/pg_config
 
       - name: Install pg_tre
