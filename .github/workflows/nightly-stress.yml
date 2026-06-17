@@ -94,12 +94,26 @@ jobs:
           # ASan-instrumented pg_tre.so is loaded.
           sudo sysctl -w vm.mmap_rnd_bits=28
           sudo sysctl -w kernel.randomize_va_space=0
+          # The pg_tre.so is built with -fsanitize=address,undefined but
+          # is loaded into a STOCK (non-instrumented) PGDG postgres.
+          # dlopen of an instrumented module into a non-instrumented
+          # binary fails ("could not start server") unless the ASan
+          # runtime is preloaded into the process that dlopens it.
+          # pg_ctl forks the postmaster from this shell, so exporting
+          # LD_PRELOAD via $GITHUB_ENV reaches the server.  clang's
+          # shared-lib runtime is libclang_rt.asan (NOT GCC's libasan).
+          ASAN_RT=$(clang-18 -print-file-name=libclang_rt.asan-x86_64.so)
+          echo "ASan runtime: $ASAN_RT"
+          test -e "$ASAN_RT" || { echo "::error::ASan runtime not found: $ASAN_RT"; exit 1; }
           # Suppressions live under test/lsan.supp.  detect_leaks=0
           # because PostgreSQL leaks transaction-lifetime allocations
-          # by design (see test/lsan.supp).
+          # by design (see test/lsan.supp).  verify_asan_link_order=0
+          # is required because the runtime is preloaded into
+          # uninstrumented binaries (pg_ctl/psql) too.
           mkdir -p ${{ github.workspace }}/sanitizer_logs
           {
-              echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:exitcode=27:log_path=${{ github.workspace }}/sanitizer_logs/asan:print_stacktrace=1"
+              echo "LD_PRELOAD=$ASAN_RT"
+              echo "ASAN_OPTIONS=detect_leaks=0:verify_asan_link_order=0:abort_on_error=1:exitcode=27:log_path=${{ github.workspace }}/sanitizer_logs/asan:print_stacktrace=1"
               echo "UBSAN_OPTIONS=halt_on_error=1:exitcode=27:print_stacktrace=1:log_path=${{ github.workspace }}/sanitizer_logs/ubsan"
               echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/test/lsan.supp"
           } >> "$GITHUB_ENV"
