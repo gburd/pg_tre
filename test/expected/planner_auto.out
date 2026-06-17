@@ -51,13 +51,13 @@ SET
 SELECT pa_plan($$SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('approximate', 0)$$) AS forced_selective;
  forced_selective 
 ------------------
- index           
+ index
 (1 row)
 
 SELECT pa_plan($$SELECT * FROM planner_auto_small WHERE body %~~ tre_pattern('row_42', 0)$$)      AS forced_very_selective;
  forced_very_selective 
 -----------------------
- index                
+ index
 (1 row)
 
 SET enable_seqscan = on;
@@ -101,7 +101,7 @@ SET
 SELECT pa_plan($$SELECT * FROM planner_auto_medium WHERE body %~~ tre_pattern('findme', 0)$$) AS forced_medium;
  forced_medium 
 ---------------
- index        
+ index
 (1 row)
 
 SET enable_seqscan = on;
