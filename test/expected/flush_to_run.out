@@ -1,1 +1,50 @@
-PLACEHOLDER - will be filled from CI diff
+-- Phase B1.3: pending-flush-to-run (the production multi-run path).
+-- With pg_tre.flush_to_run=on, VACUUM flushes the pending list into a
+-- NEW catalog run instead of merging into the base structure.  The
+-- multi-run scan must union base + run(s) and return exactly the same
+-- rows as a seq scan.  Assertions use single tokens to stay robust.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/flush_to_run.sql:6: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+CREATE TABLE ftr_t(id serial primary key, body text);
+CREATE TABLE
+INSERT INTO ftr_t(body)
+SELECT md5(g::text) || (CASE WHEN g % 25 = 0 THEN ' findme' ELSE '' END)
+FROM generate_series(1, 1000) g;
+INSERT 0 1000
+CREATE INDEX ftr_idx ON ftr_t USING tre (body);
+psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: collected 30179 trigram entries from 1000 heap tuples
+psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: built 4150 posting trees
+psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: build complete, indexed 1000 heap tuples into 4150 trigrams
+CREATE INDEX
+SET pg_tre.flush_to_run = on;
+SET
+INSERT INTO ftr_t(body)
+SELECT md5((g + 100000)::text) || (CASE WHEN g % 25 = 0 THEN ' findme' ELSE '' END)
+FROM generate_series(1, 1000) g;
+INSERT 0 1000
+VACUUM ftr_t;
+VACUUM
+-- At least 2 runs after the flush (base + flushed run).
+SELECT CASE WHEN count(*) > 1 THEN 'multiple_runs' ELSE 'single_run' END AS runs
+FROM tre_run_catalog_status('ftr_idx');
+     runs      
+---------------
+ multiple_runs
+(1 row)
+
+-- Correctness: index matches == seq-scan matches across all runs.
+SELECT CASE WHEN
+  (SELECT count(*) FROM ftr_t WHERE body %~~ tre_pattern('findme', 0)) =
+  (SELECT count(*) FROM ftr_t WHERE body LIKE '%findme%')
+  THEN 'multirun_correct' ELSE 'multirun_wrong' END AS result;
+      result      
+------------------
+ multirun_correct
+(1 row)
+
+SET pg_tre.flush_to_run = off;
+SET
+DROP TABLE ftr_t;
+DROP TABLE
