@@ -236,5 +236,33 @@ for my $cycle (1 .. $N_CYCLES) {
        . "(got " . (defined $runs ? $runs : 'undef') . " runs)");
 }
 
+# ----------------------------------------------------------
+# Phase B1.4: adaptive collapse.  After the cycles, the catalog
+# holds many runs (hundreds, well over max_levels=7).  A VACUUM
+# triggers pg_tre_collapse_runs, which must merge them all back
+# into a single base run with results unchanged.
+# ----------------------------------------------------------
+my $runs_before = $node->safe_psql('postgres', qq{
+    SELECT count(*) FROM tre_run_catalog_status('crash_idx'::regclass);
+});
+my $rows_before = $node->safe_psql('postgres', qq{
+    SET enable_seqscan = off;
+    SELECT count(*) FROM crash_test
+       WHERE body %~~ tre_pattern('crash_cycle', 1);
+});
+$node->safe_psql('postgres', 'VACUUM crash_test;');
+my $runs_after = $node->safe_psql('postgres', qq{
+    SELECT count(*) FROM tre_run_catalog_status('crash_idx'::regclass);
+});
+my $rows_after = $node->safe_psql('postgres', qq{
+    SET enable_seqscan = off;
+    SELECT count(*) FROM crash_test
+       WHERE body %~~ tre_pattern('crash_cycle', 1);
+});
+ok(($runs_before > 7 && $runs_after == 1),
+   "adaptive collapse: $runs_before runs -> $runs_after run after VACUUM");
+is($rows_after, $rows_before,
+   "adaptive collapse: query results unchanged across the collapse");
+
 $node->stop('fast');
 done_testing();
