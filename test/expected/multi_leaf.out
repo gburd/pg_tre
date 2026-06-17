@@ -23,7 +23,7 @@ FROM generate_series(1, 100000) AS i;
 INSERT 0 100000
 -- Create pg_tre index (should split 'the' posting across multiple leaves).
 CREATE INDEX multi_leaf_idx ON multi_leaf_test USING tre (body);
-psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: collected 5188895 trigram entries from 100000 heap tuples
+psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: collected 5088623 trigram entries from 100000 heap tuples
 psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built 1145 posting trees
 psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built range tier with 9 ranges across 1 pages
 psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: build complete, indexed 100000 heap tuples into 1145 trigrams
@@ -215,7 +215,7 @@ DROP TABLE multi_leaf_seq_ids;
 DROP TABLE
 -- REINDEX test: drop and rebuild the index to verify multi-leaf rebuild.
 REINDEX INDEX multi_leaf_idx;
-psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: collected 5188895 trigram entries from 100000 heap tuples
+psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: collected 5088623 trigram entries from 100000 heap tuples
 psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built 1145 posting trees
 psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built range tier with 9 ranges across 1 pages
 psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: build complete, indexed 100000 heap tuples into 1145 trigrams

@@ -21,7 +21,7 @@ INSERT INTO planner_auto_small VALUES
     (103, 'test case for selectivity verification');
 INSERT 0 3
 CREATE INDEX idx_auto_small ON planner_auto_small USING tre (body);
-psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: collected 4281 trigram entries from 103 heap tuples
+psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: collected 4280 trigram entries from 103 heap tuples
 psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: built 308 posting trees
 psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/planner_auto.sql:22: NOTICE:  pg_tre: build complete, indexed 103 heap tuples into 308 trigrams
@@ -135,7 +135,7 @@ INSERT INTO planner_auto_medium VALUES
     (503, 'random text without the keyword');
 INSERT 0 3
 CREATE INDEX idx_auto_medium ON planner_auto_medium USING tre (body);
-psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: collected 14369 trigram entries from 303 heap tuples
+psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: collected 12869 trigram entries from 303 heap tuples
 psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: built 518 posting trees
 psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/planner_auto.sql:76: NOTICE:  pg_tre: build complete, indexed 303 heap tuples into 518 trigrams

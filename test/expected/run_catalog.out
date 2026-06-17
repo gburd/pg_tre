@@ -13,7 +13,7 @@ SELECT md5(g::text) || (CASE WHEN g % 50 = 0 THEN ' findme' ELSE '' END)
 FROM generate_series(1, 2000) g;
 INSERT 0 2000
 CREATE INDEX rc_idx ON rc_t USING tre (body);
-psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: collected 60280 trigram entries from 2000 heap tuples
+psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: collected 60076 trigram entries from 2000 heap tuples
 psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: built 4152 posting trees
 psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/run_catalog.sql:12: NOTICE:  pg_tre: build complete, indexed 2000 heap tuples into 4152 trigrams

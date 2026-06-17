@@ -11,11 +11,11 @@ FROM generate_series(1, 1000) g;
 CREATE INDEX col_idx ON col_t USING tre (body);
 
 -- Accrue many runs (more than max_levels=7) via the test helper.
-SELECT 'appended' AS step
+-- count() forces all 9 function evaluations (no LIMIT short-circuit).
+SELECT count(*) AS appended
 FROM generate_series(1, 9) g,
      LATERAL tre_debug_append_run('col_idx'::regclass, 0::numeric,
-                                  18446744073709551615::numeric)
-LIMIT 1;
+                                  18446744073709551615::numeric) r;
 
 -- > 7 runs now (base + 9 appended).
 SELECT CASE WHEN count(*) > 7 THEN 'accrued_many' ELSE 'too_few' END AS before

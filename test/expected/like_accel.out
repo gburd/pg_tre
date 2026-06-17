@@ -13,7 +13,7 @@ SELECT md5(g::text) || (CASE WHEN g % 10 = 0 THEN ' needle_xyz' ELSE '' END)
 FROM generate_series(1, 3000) g;
 INSERT 0 3000
 CREATE INDEX la_idx ON la_t USING tre (body);
-psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: collected 93300 trigram entries from 3000 heap tuples
+psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: collected 93008 trigram entries from 3000 heap tuples
 psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: built 4307 posting trees
 psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/like_accel.sql:12: NOTICE:  pg_tre: build complete, indexed 3000 heap tuples into 4307 trigrams

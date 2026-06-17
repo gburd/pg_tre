@@ -3,6 +3,7 @@
 -- emission count, build temp-disk, and final index size.  Assertions
 -- return a single text token to avoid column-width fragility.
 CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/build_estimate.sql:5: NOTICE:  extension "pg_tre" already exists, skipping
 CREATE EXTENSION
 CREATE TABLE be_t(id serial primary key, body text);
 CREATE TABLE

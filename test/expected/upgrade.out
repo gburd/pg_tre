@@ -26,7 +26,7 @@ SELECT 'document number ' || i || ' contains ' ||
 FROM generate_series(1, 500) AS i;
 INSERT 0 500
 CREATE INDEX upg_idx ON upg_t USING tre (body);
-psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: collected 35392 trigram entries from 500 heap tuples
+psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: collected 35302 trigram entries from 500 heap tuples
 psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built 4548 posting trees
 psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/upgrade.sql:26: NOTICE:  pg_tre: build complete, indexed 500 heap tuples into 4548 trigrams

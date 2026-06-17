@@ -12,20 +12,20 @@ SELECT md5(g::text) || (CASE WHEN g % 20 = 0 THEN ' findme' ELSE '' END)
 FROM generate_series(1, 1000) g;
 INSERT 0 1000
 CREATE INDEX col_idx ON col_t USING tre (body);
-psql:test/sql/collapse.sql:12: NOTICE:  pg_tre: collected 30179 trigram entries from 1000 heap tuples
-psql:test/sql/collapse.sql:12: NOTICE:  pg_tre: built 4150 posting trees
-psql:test/sql/collapse.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
-psql:test/sql/collapse.sql:12: NOTICE:  pg_tre: build complete, indexed 1000 heap tuples into 4150 trigrams
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: collected 30249 trigram entries from 1000 heap tuples
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: built 4163 posting trees
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/collapse.sql:11: NOTICE:  pg_tre: build complete, indexed 1000 heap tuples into 4163 trigrams
 CREATE INDEX
 -- Accrue many runs (more than max_levels=7) via the test helper.
-SELECT 'appended' AS step
+-- count() forces all 9 function evaluations (no LIMIT short-circuit).
+SELECT count(*) AS appended
 FROM generate_series(1, 9) g,
      LATERAL tre_debug_append_run('col_idx'::regclass, 0::numeric,
-                                  18446744073709551615::numeric)
-LIMIT 1;
-   step   
+                                  18446744073709551615::numeric) r;
+ appended 
 ----------
- appended
+ 9
 (1 row)
 
 -- > 7 runs now (base + 9 appended).
