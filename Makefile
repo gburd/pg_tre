@@ -410,7 +410,7 @@ dist:
 # running postmaster (must have pg_tre in shared_preload_libraries).
 # Named localcheck to avoid overriding PGXS's standard `check` target.
 localcheck:
-	PG_CONFIG='$(PG_CONFIG)' $(SHELL) scripts/run-regress.sh
+	PG_CONFIG='$(PG_CONFIG)' bash scripts/run-regress.sh
 
 # Shell-based test scripts under test/scripts/.  Each script is
 # self-contained (initdb's its own cluster on a private port,
