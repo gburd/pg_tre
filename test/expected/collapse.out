@@ -23,7 +23,7 @@ FROM generate_series(1, 9) g,
      LATERAL tre_debug_append_run('col_idx'::regclass, 0::numeric,
                                   18446744073709551615::numeric)
 LIMIT 1;
-  step   
+   step   
 ----------
  appended
 (1 row)
