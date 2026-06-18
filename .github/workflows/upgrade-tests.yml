@@ -27,7 +27,7 @@ jobs:
         pg_version: ['18']
         # Add the previous release here whenever you cut a new one.
         # See RELEASING.md.
-        old_version: ['1.0.0', '1.1.0', '1.1.1']
+        old_version: ['1.0.0', '1.1.0', '1.1.1', '1.12.0']
         # When a release breaks on-disk format compatibility, list
         # the (old_version, pg_version) pairs to skip here.
         exclude: []
