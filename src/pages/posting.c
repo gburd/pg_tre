@@ -1100,6 +1100,35 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
         return sm;
     }
 
+    /*
+     * Coalesced entry (v8): inline_data is NULL but inline_bytes carries
+     * PG_TRE_COALESCED_FLAG | slot, and `root` is the coalesced page
+     * block (NOT a posting-tree root).  Resolve the slot to its inline
+     * sparsemap bytes and materialize from those.  Without this branch
+     * the BlockNumberIsValid(root) path below reads the coalesced page
+     * as a POSTING_L leaf -- the "page has kind 9, expected 5" error.
+     * The marker came from the index's own upper tree, so resolve with
+     * HASH_ANY (the slot's stored hash is authoritative).
+     */
+    if (BlockNumberIsValid(root) &&
+        (((uint32) inline_bytes) & PG_TRE_COALESCED_FLAG) != 0)
+    {
+        uint16        slot = (uint16) (((uint32) inline_bytes)
+                                       & PG_TRE_COALESCED_SLOT_MASK);
+        uint8        *blob;
+        Size          blob_len = 0;
+        sm_t         *sm;
+
+        blob = pg_tre_coalesced_resolve_slot(index, root, slot,
+                                             PG_TRE_COALESCED_HASH_ANY,
+                                             &blob_len);
+        if (blob == NULL || blob_len == 0)
+            return NULL;
+        sm = sm_open_copy(blob, blob_len, 64);
+        pfree(blob);
+        return sm;
+    }
+
     if (BlockNumberIsValid(root))
     {
         Buffer  buf = pg_tre_read(index, root, PG_TRE_PAGE_POSTING_L,

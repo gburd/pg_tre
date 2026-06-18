@@ -32,6 +32,15 @@
  */
 #define PG_TRE_COALESCE_MAX 3072
 
+/*
+ * Sentinel for pg_tre_coalesced_resolve_slot's trigram_hash argument:
+ * skip the hash-equality check (the slot's own stored hash is
+ * authoritative).  Use only when resolving a marker that came from the
+ * index's own upper tree (build / merge / range paths) where the hash
+ * is not at hand.  The within-page bounds check still applies.
+ */
+#define PG_TRE_COALESCED_HASH_ANY ((uint64) 0xFFFFFFFFFFFFFFFFULL)
+
 /* Usable content bytes on a coalesced page (after header + opaque). */
 static inline Size
 pg_tre_coalesced_budget(void)

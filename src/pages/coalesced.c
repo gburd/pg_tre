@@ -311,14 +311,26 @@ pg_tre_coalesced_resolve_slot(Relation index, BlockNumber blk,
 
     if (slot.trigram_hash != trigram_hash || !slot_within_page(&slot))
     {
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_DATA_CORRUPTED),
-                 errmsg("pg_tre: corrupt coalesced slot %u at block %u "
-                        "(slot hash %016llx, expected %016llx)",
-                        slot_idx, blk,
-                        (unsigned long long) slot.trigram_hash,
-                        (unsigned long long) trigram_hash)));
+        /*
+         * When the caller passes PG_TRE_COALESCED_HASH_ANY it is
+         * resolving a marker that came from the index's own upper
+         * tree (build/merge/range paths) and does not have the hash
+         * handy; the slot's own stored hash is authoritative.  Only
+         * the within-page bounds check applies in that case.
+         */
+        bool hash_ok = (trigram_hash == PG_TRE_COALESCED_HASH_ANY)
+                       || (slot.trigram_hash == trigram_hash);
+        if (!hash_ok || !slot_within_page(&slot))
+        {
+            UnlockReleaseBuffer(buf);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt coalesced slot %u at block %u "
+                            "(slot hash %016llx, expected %016llx)",
+                            slot_idx, blk,
+                            (unsigned long long) slot.trigram_hash,
+                            (unsigned long long) trigram_hash)));
+        }
     }
 
     /* Copy the sparsemap blob out so it survives buffer release. */
