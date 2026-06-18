@@ -140,11 +140,17 @@ BEGIN
   END LOOP;
   RETURN node ILIKE '%Index%' OR node ILIKE '%Bitmap%';
 END $$;
+-- k=1 (single edit) reliably plans to the index when forced on every
+-- supported PostgreSQL major.  We do NOT assert the plan choice for
+-- k=2: a 2-edit fuzzy query expands to a large trigram DNF whose cost
+-- can exceed even disabled-seqscan's, so the planner legitimately
+-- picks a seq scan on some versions (PG17 differs from PG18).  That
+-- plan choice is not a meaningful invariant -- the k=2 RESULT
+-- correctness is fully covered by p5_diff('...', 2) above (index ==
+-- seq).
 SET enable_seqscan = off;
 SELECT CASE WHEN p5_uses_index($$SELECT id FROM p5_docs WHERE body %~~ tre_pattern('hello', 1)$$)
             THEN 'k1_uses_index' ELSE 'k1_seq' END AS k1_plan;
-SELECT CASE WHEN p5_uses_index($$SELECT id FROM p5_docs WHERE body %~~ tre_pattern('approximate', 2)$$)
-            THEN 'k2_uses_index' ELSE 'k2_seq' END AS k2_plan;
 SET enable_seqscan = on;
 
 DROP FUNCTION p5_uses_index(text);
