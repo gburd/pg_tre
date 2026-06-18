@@ -506,12 +506,226 @@ overlay_free(PendingOverlay *ov)
 }
 
 /*
+ * Phase B1.5: per-scan crack cache (lazy per-trigram materialization).
+ *
+ * A multi-run scan resolves each query trigram by iterating every run
+ * and unioning the per-run postings.  When the same trigram_hash recurs
+ * across conjuncts/disjuncts of a query, the un-cracked path repeats
+ * that whole O(runs) iteration on every touch.  The crack cache
+ * materializes a trigram's union-across-runs sparsemap ON FIRST TOUCH
+ * and reuses it for every later touch in the same scan (and for the
+ * co-occurring trigrams of the rows touched, since they share the
+ * cache) -- this is the "cracking payoff" realized as a pure in-memory,
+ * read-only optimization.
+ *
+ * Safety: the cache writes nothing to disk, takes no locks, and is torn
+ * down with the scan.  Results are byte-identical to the un-cracked
+ * path (it caches the exact same union), so the executor recheck
+ * contract is untouched.  It is therefore correct on a hot standby /
+ * read-only transaction with no guard.  It is gated behind the
+ * default-off pg_tre.crack_on_read GUC only because the durable
+ * write-back (which WOULD need standby/crash guards) is deferred; see
+ * doc/specs/phaseB1-run-catalog.md B1.5.
+ *
+ * The cached sparsemaps are malloc'd (sm_t lives in malloc, like every
+ * other sm in this file); the cache owns them and frees them in
+ * crack_cache_destroy.  The struct itself is palloc'd in scan_cxt.
+ * Lookups return a COPY so the caller's union/free bookkeeping is
+ * unchanged.  ponytail: linear-probe open addressing -- a scan touches
+ * O(query trigrams) distinct hashes (tens), not millions; a tree/hash
+ * map would be more code for no measurable win at this size.
+ */
+typedef struct CrackCacheEntry
+{
+    uint64  hash;
+    bool    used;       /* slot occupied */
+    bool    present;    /* trigram resolved to a non-NULL union */
+    sm_t   *runs_sm;    /* malloc'd union across runs, or NULL */
+} CrackCacheEntry;
+
+typedef struct CrackCache
+{
+    int               cap;       /* power of two; 0 means disabled */
+    int               n;         /* occupied slots */
+    CrackCacheEntry  *slots;     /* palloc0'd in mcxt, cap entries */
+} CrackCache;
+
+static void
+crack_cache_init(CrackCache *cc, const TrigramQuery *q, MemoryContext mcxt)
+{
+    int total = 0;
+    int cap = 8;
+    int i;
+
+    cc->cap = 0;
+    cc->n = 0;
+    cc->slots = NULL;
+
+    if (!pg_tre_crack_on_read || q == NULL || q->n <= 0)
+        return;
+
+    for (i = 0; i < q->n; i++)
+        total += q->conjuncts[i].n;
+    if (total <= 0)
+        return;
+
+    /* Size to >= 2x the max distinct hashes so the table stays sparse. */
+    while (cap < total * 2)
+        cap <<= 1;
+
+    cc->slots = (CrackCacheEntry *)
+        MemoryContextAllocZero(mcxt, sizeof(CrackCacheEntry) * cap);
+    cc->cap = cap;
+}
+
+static void
+crack_cache_destroy(CrackCache *cc)
+{
+    int i;
+
+    if (cc->slots == NULL)
+        return;
+    for (i = 0; i < cc->cap; i++)
+        if (cc->slots[i].used && cc->slots[i].runs_sm != NULL)
+            free(cc->slots[i].runs_sm);
+    /* slots themselves are palloc'd in the scan context. */
+    cc->slots = NULL;
+    cc->cap = 0;
+    cc->n = 0;
+}
+
+/* Find the slot for hash (occupied or the empty slot to fill). */
+static inline CrackCacheEntry *
+crack_cache_slot(CrackCache *cc, uint64 hash)
+{
+    uint32 mask = (uint32) (cc->cap - 1);
+    uint32 i = (uint32) hash & mask;
+
+    for (;;)
+    {
+        CrackCacheEntry *e = &cc->slots[i];
+        if (!e->used || e->hash == hash)
+            return e;
+        i = (i + 1) & mask;
+    }
+}
+
+/*
+ * Resolve one trigram's union across ALL live runs.
+ *
+ * Returns a fresh malloc'd sparsemap the caller owns (or NULL if no
+ * run holds the trigram).  When the crack cache is enabled it
+ * materializes the union once per trigram per scan and returns a copy
+ * on subsequent touches; otherwise it does the run iteration every
+ * time (the pre-B1.5 behavior).
+ */
+static sm_t *
+resolve_trigram_runs(Relation index, uint64 h, CrackCache *cc)
+{
+    CrackCacheEntry *slot = NULL;
+    PgTreRunIter    *it;
+    PgTreRun         run;
+    sm_t            *sm = NULL;
+
+    if (cc != NULL && cc->slots != NULL)
+    {
+        slot = crack_cache_slot(cc, h);
+        if (slot->used)
+        {
+            /* Cache hit. */
+            if (!slot->present || slot->runs_sm == NULL)
+                return NULL;            /* known: no run holds this trigram */
+            {
+                sm_t *hit = sm_copy(slot->runs_sm);
+                if (hit != NULL)
+                    return hit;
+                /* Copy OOM: fall through and recompute from the runs
+                 * rather than returning NULL and dropping candidates. */
+                slot = NULL;
+            }
+        }
+    }
+
+    it = pg_tre_run_catalog_open(index);
+    while (pg_tre_run_catalog_next(it, &run))
+    {
+        PgTreUpperRef ref;
+        sm_t         *run_sm;
+
+        /* Run-skip range filter (the Surf analogue). */
+        if (h < run.min_trigram_hash || h > run.max_trigram_hash)
+            continue;
+
+        if (!pg_tre_upper_lookup_root(index, run.root_upper, h, &ref))
+            continue;
+
+        run_sm = pg_tre_posting_materialize(index, ref.root,
+                                            ref.inline_data,
+                                            ref.inline_bytes);
+        pg_tre_upper_release(&ref);
+        if (run_sm == NULL)
+            continue;
+
+        if (sm == NULL)
+        {
+            sm = run_sm;
+        }
+        else
+        {
+            sm_t *u = sm_union(sm, run_sm);
+            free(sm);
+            free(run_sm);
+            sm = u;
+        }
+    }
+    pg_tre_run_catalog_close(it);
+
+    if (slot != NULL)
+    {
+        /*
+         * Populate the cache; store a copy so we can hand the caller
+         * the original (avoids an extra copy on the first touch).  If
+         * the copy fails (OOM) or there were no postings, leave the
+         * slot occupied with runs_sm = NULL and present reflecting
+         * reality -- a later hit recomputes only when present is true
+         * but runs_sm is NULL would drop candidates, so we must NOT
+         * mark present=true without a valid copy.  When the copy fails
+         * for a non-empty union, leave the slot UNused so the next
+         * touch recomputes correctly (correctness over the cache win).
+         */
+        if (sm == NULL)
+        {
+            slot->used = true;
+            slot->hash = h;
+            slot->present = false;
+            slot->runs_sm = NULL;
+            cc->n++;
+        }
+        else
+        {
+            sm_t *cached = sm_copy(sm);
+            if (cached != NULL)
+            {
+                slot->used = true;
+                slot->hash = h;
+                slot->present = true;
+                slot->runs_sm = cached;
+                cc->n++;
+            }
+            /* else: leave slot unused; next touch recomputes. */
+        }
+    }
+    return sm;
+}
+
+/*
  * Build the candidate TID sparsemap for one conjunct: OR of its
  * disjuncts, including the pending-list overlay for each trigram.
  */
 static sm_t *
 resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
-                              MemoryContext cxt, const PendingOverlay *ov)
+                              MemoryContext cxt, const PendingOverlay *ov,
+                              CrackCache *cc)
 {
     sm_t *accum = NULL;
     int i;
@@ -519,7 +733,7 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
     for (i = 0; i < conj->n; i++)
     {
         uint64 h = conj->alts[i].trigram_hash;
-        sm_t  *sm = NULL;
+        sm_t  *sm;
         sm_t  *pend;
 
         /*
@@ -529,44 +743,13 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
          * executor rechecks).  For the common single-run index the
          * iterator yields exactly one run rooted at the index roots,
          * so this is identical to the pre-B1.2 single lookup.
+         *
+         * Phase B1.5: resolve_trigram_runs memoizes this union per
+         * trigram per scan (crack cache) when pg_tre.crack_on_read is
+         * on; with the GUC off it iterates the runs every time, exactly
+         * as before.
          */
-        {
-            PgTreRunIter *it = pg_tre_run_catalog_open(index);
-            PgTreRun      run;
-
-            while (pg_tre_run_catalog_next(it, &run))
-            {
-                PgTreUpperRef ref;
-                sm_t         *run_sm;
-
-                /* Run-skip range filter (the Surf analogue). */
-                if (h < run.min_trigram_hash || h > run.max_trigram_hash)
-                    continue;
-
-                if (!pg_tre_upper_lookup_root(index, run.root_upper, h, &ref))
-                    continue;
-
-                run_sm = pg_tre_posting_materialize(index, ref.root,
-                                                    ref.inline_data,
-                                                    ref.inline_bytes);
-                pg_tre_upper_release(&ref);
-                if (run_sm == NULL)
-                    continue;
-
-                if (sm == NULL)
-                {
-                    sm = run_sm;
-                }
-                else
-                {
-                    sm_t *u = sm_union(sm, run_sm);
-                    free(sm);
-                    free(run_sm);
-                    sm = u;
-                }
-            }
-            pg_tre_run_catalog_close(it);
-        }
+        sm = resolve_trigram_runs(index, h, cc);
 
         pend = overlay_lookup(ov, h);
         if (pend != NULL)
@@ -1100,6 +1283,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     volatile sm_t *filtered = NULL;   /* positional-filter result */
     PendingOverlay ov;
     volatile bool  overlay_built = false;
+    CrackCache     crack = {0};
+    volatile bool  crack_built = false;
     TriUpperCache  upper_cache;
     volatile bool  upper_cache_built = false;
     volatile bool  short_circuit = false;   /* CNF proved empty: result == NULL */
@@ -1125,6 +1310,15 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         overlay_build(&ov, scan->indexRelation, &st->q, st->scan_cxt);
         overlay_built = true;
 
+        /*
+         * Phase B1.5: per-scan crack cache.  No-op (cap 0) unless
+         * pg_tre.crack_on_read is on.  Memoizes each trigram's
+         * union-across-runs so a trigram touched K times in this scan
+         * iterates the runs once, not K times.
+         */
+        crack_cache_init(&crack, &st->q, st->scan_cxt);
+        crack_built = true;
+
         if (st->q.mode == TRIGRAM_QUERY_CNF)
         {
             /* CNF: AND across conjuncts. */
@@ -1133,7 +1327,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 sm_t *sm = resolve_conjunct_with_overlay(
                                       scan->indexRelation,
                                       &st->q.conjuncts[i],
-                                      st->scan_cxt, &ov);
+                                      st->scan_cxt, &ov, &crack);
                 if (sm == NULL)
                 {
                     if (result != NULL) { free((sm_t *) result); result = NULL; }
@@ -1455,6 +1649,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     tri_upper_cache_release(&upper_cache);
     upper_cache_built = false;
     }  /* if (!short_circuit) */
+
+    crack_cache_destroy(&crack);
+    crack_built = false;
     }
     PG_CATCH();
     {
@@ -1471,6 +1668,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
             free((sm_t *) result);
         if (overlay_built)
             overlay_free(&ov);
+        if (crack_built)
+            crack_cache_destroy(&crack);
         if (upper_cache_built)
             tri_upper_cache_release(&upper_cache);
         PG_RE_THROW();

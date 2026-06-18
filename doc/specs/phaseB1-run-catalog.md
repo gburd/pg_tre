@@ -266,3 +266,136 @@ without that gate.
   pressure (`adaptive.rs` mode transitions, tuned for an index AM).
 - **B1.5** lazy per-trigram materialization + co-occurrence
   coalescing (the cracking payoff).
+
+## B1.5 status: read-side crack cache landed; durable write-back deferred
+
+> **North star, restated: pg_tre is a REGEX index with edit distance.**
+> B1.5 changes HOW a trigram's postings are organized/materialized
+> across runs at query time, never WHAT the index matches.  The
+> executor recheck contract (amgetbitmap -> bitmap-heap-scan ->
+> recheck) is untouched; results are byte-identical with the feature
+> on or off.
+
+### What B1.5 is
+
+From the Phase-B spec: "A trigram's posting data need not be fully
+built until first queried: a cold trigram can live only in the newest
+run(s); on first query touching it, optionally promote/coalesce its
+postings across runs (a 'crack').  Opportunistically coalesce
+co-occurring trigrams of the rows we touch while we're there."
+
+There are two separable pieces:
+
+1. **The read-side crack** -- on a multi-run scan, materialize a
+   trigram's union-across-runs once and reuse it for repeat touches
+   (and for co-occurring trigrams of the same scan, since they share
+   the structure).
+2. **The durable write-back** -- persist that coalesced posting back
+   into a single catalog run so the NEXT scan touches fewer runs (the
+   self-organizing "cracking" that converges the index toward fewer,
+   denser runs without waiting for VACUUM-driven collapse).
+
+### Delivered: the read-side crack as a per-scan in-memory cache
+
+Gated behind a new default-off `pg_tre.crack_on_read` GUC
+(`PGC_USERSET`).  When on, `tre_compute_candidate_sm` builds a
+per-scan `CrackCache` (open-addressed, sized to >= 2x the query's
+distinct trigram count, palloc'd in the scan context).  The multi-run
+unioner `resolve_trigram_runs` (factored out of
+`resolve_conjunct_with_overlay`) memoizes each trigram's
+union-across-all-runs on first touch and returns a copy on every
+subsequent touch within the same scan, instead of re-iterating the
+run catalog every time.
+
+This is exactly "lazy per-trigram materialization": a trigram's full
+cross-run posting is materialized lazily, on first query touch, and
+the co-occurring trigrams of the rows touched share the same per-scan
+structure.
+
+**Why this is the safe increment, and why it needs no standby/crash
+proof:**
+
+- **Pure read.**  It writes nothing to disk, allocates no pages,
+  emits no WAL, and takes no buffer locks beyond the SHARE locks the
+  scan already takes.  It is therefore a correct no-op-on-results on a
+  hot standby and in a read-only transaction with **no guard needed**
+  -- there is simply nothing to suppress (contrast the write-back
+  below, which would require `RecoveryInProgress()` / `XactReadOnly`
+  guards).
+- **Results identical.**  The cache stores the *exact same* union the
+  un-cracked path computes; the pending-list overlay is still unioned
+  per touch (it is cheap and per-scan-mutable), so on/off differ only
+  in run-iteration count, never in the candidate set.  The executor
+  rechecks every row regardless.  Tested directly
+  (`test/sql/crack_on_read.sql`): on a genuine 2-run index, the
+  crack-off result, the crack-on result, and the seq-scan result all
+  agree.
+- **Worst case = today.**  With one run (the default index), the run
+  iterator yields a single run and the cache is a thin pass-through;
+  with the GUC off, `resolve_trigram_runs` iterates the runs exactly
+  as the pre-B1.5 code did.
+- **Bounded, crash-irrelevant memory.**  The cache lives in the scan
+  memory context and is torn down with the scan (or freed in the
+  `PG_CATCH` on error); the cached sparsemaps are malloc'd like every
+  other `sm_t` in the scan and freed in `crack_cache_destroy`.  An OOM
+  on the cache copy degrades to recomputation, never to a dropped
+  candidate (a cache-hit copy failure falls through to a full run
+  recompute rather than returning NULL).
+
+### Deferred (NOT shipped): the durable run-catalog write-back
+
+Persisting the coalesced posting back to disk during a scan is the
+high-risk half, and it is deferred because it cannot be made safe and
+proven without a cluster the agent harness can crash-test:
+
+1. **Lock safety.**  `amgetbitmap` runs under `AccessShareLock` on the
+   index.  `pg_tre_run_catalog_append` (and any collapse) mutates the
+   meta page + a catalog page and explicitly requires "a lock
+   excluding concurrent catalog writers" (the flush/merge path holds
+   `ShareUpdateExclusive`).  A read-side write would need lock-upgrade
+   machinery so two concurrent scans, or a scan racing a VACUUM flush,
+   cannot corrupt `next_run_id` / `run_catalog_head` / `n_runs`.
+   Designing and *crash-testing* that upgrade path is out of reach
+   here.
+2. **Standby / read-only.**  A read-side write must be a hard no-op on
+   a hot standby and in a read-only transaction
+   (`RecoveryInProgress()` || `XactReadOnly`), per Phase-B constraint
+   3.  That guard is easy to write but pointless to ship without the
+   lock-safe writer it would protect.
+3. **Write amplification, wrong direction.**  A naive
+   crack-writes-a-new-run scheme *grows* the run count on every cold
+   query -- the opposite of the payoff -- until B1.4 collapse runs.
+   The useful durable crack is an in-place coalesce that REPLACES the
+   per-run entries with one, which is a merge, not an append; that is
+   the province of the B1.4 collapse machinery driven from a write
+   context (VACUUM), where the lock and WAL discipline already exist
+   and are crash-validated.
+4. **Crash recovery.**  Any new durable run introduced on the read
+   path must be WAL'd with the same FORCE_IMAGE + single-critical-
+   section discipline as `pg_tre_run_catalog_append`, and validated
+   under `kill -9` via `tap/crash_recovery.pl` on the `nightly-stress`
+   workflow.  Shipping a read-path writer without that gate green is
+   exactly the failure mode that blocked the B1.2 writer; it is not
+   repeated here.
+
+**Conclusion.**  The honest, reviewable increment is the read-side
+crack as a per-scan in-memory optimization (shipped, gated, default
+off, tested for result-identity on a multi-run index), with the
+durable write-back deferred.  The durable coalesce already has a
+correct home: B1.4's VACUUM-driven `pg_tre_collapse_runs`, which runs
+in a write context with the proven WAL/lock discipline.  A future
+increment may add an advisory "this trigram is hot, prioritize it on
+the next collapse" hint emitted (not written) from the read path, but
+that is not required for the cracking payoff and is not built here.
+
+### Deliverables (this increment)
+
+1. `pg_tre.crack_on_read` GUC (`src/module.c`, `include/pg_tre/pg_tre.h`),
+   default off, experimental.
+2. `CrackCache` + `resolve_trigram_runs` in `src/am/amscan.c`; the
+   multi-run CNF unioner consults the cache.
+3. `test/sql/crack_on_read.sql` + expected output: on a 2-run index,
+   crack-off == crack-on == seq-scan (robust single-token style,
+   NOTICEs suppressed).  Added to the schedule in both
+   `scripts/run-regress.sh` and `Makefile`.
+4. This design note.

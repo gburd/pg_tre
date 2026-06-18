@@ -40,6 +40,7 @@ int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
 bool pg_tre_flush_to_run           = false; /* Phase B1.3: experimental */
+bool pg_tre_crack_on_read          = false; /* Phase B1.5: experimental */
 int  pg_tre_tier3_max_candidates   = 50000;
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
@@ -119,6 +120,24 @@ pg_tre_init_guc(void)
         " bound until Hanoi leveling / adaptive collapse (B1.4) lands, so"
         " this is experimental and off by default.",
         &pg_tre_flush_to_run,
+        false, PGC_USERSET, 0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("pg_tre.crack_on_read",
+        "Phase B1.5: coalesce a trigram's postings across runs once per"
+        " scan (lazy per-trigram materialization, the cracking payoff).",
+        "When on, a multi-run scan materializes each query trigram's"
+        " union across all runs at most once and reuses it for every"
+        " later touch of the same trigram in the same scan (and for"
+        " co-occurring trigrams of the rows touched).  This is a"
+        " per-scan, in-memory optimization only: it performs NO disk"
+        " write-back, takes no locks, and is a pure no-op on a hot"
+        " standby or read-only transaction.  Results are byte-identical"
+        " with or without it (the executor still rechecks every row)."
+        " The durable run-catalog crack (persisting the coalesced run so"
+        " the NEXT scan touches fewer runs) is deferred -- see"
+        " doc/specs/phaseB1-run-catalog.md B1.5.  Off by default; for the"
+        " common single-run index it has no effect.",
+        &pg_tre_crack_on_read,
         false, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.tier3_max_candidates",

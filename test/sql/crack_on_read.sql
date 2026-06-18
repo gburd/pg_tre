@@ -1,0 +1,57 @@
+-- Phase B1.5: lazy per-trigram materialization (the crack cache).
+-- pg_tre.crack_on_read memoizes a trigram's union-across-runs once per
+-- scan and reuses it for repeat touches.  It is a pure in-memory,
+-- read-only optimization: results MUST be byte-identical with the GUC
+-- on or off, and identical to a seq scan.  This test proves that on a
+-- genuine MULTI-run index (so the crack path is actually exercised).
+--
+-- NOTICEs from build/vacuum are suppressed so the expected output is
+-- deterministic and authorable without a running cluster; assertions
+-- use single tokens (robust style).  No \gset / EXPLAIN / multi-column
+-- dumps, so the expected file does not drift across PG versions.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+
+CREATE TABLE cor_t(id serial primary key, body text);
+INSERT INTO cor_t(body)
+SELECT md5(g::text) || (CASE WHEN g % 20 = 0 THEN ' alpha bravo' ELSE '' END)
+FROM generate_series(1, 1000) g;
+CREATE INDEX cor_idx ON cor_t USING tre (body);
+
+-- Flush a second run so the multi-run scan path (and thus the crack
+-- cache) is live, not the trivial single-run no-op.
+SET pg_tre.flush_to_run = on;
+INSERT INTO cor_t(body)
+SELECT md5((g + 500000)::text) || (CASE WHEN g % 20 = 0 THEN ' alpha bravo' ELSE '' END)
+FROM generate_series(1, 1000) g;
+VACUUM cor_t;
+SET pg_tre.flush_to_run = off;
+
+-- Confirm we really have >1 run (otherwise the test proves nothing).
+SELECT CASE WHEN count(*) > 1 THEN 'multiple_runs' ELSE 'single_run' END AS runs
+FROM tre_run_catalog_status('cor_idx');
+
+-- crack_on_read OFF: index result must equal the seq scan.
+SET pg_tre.crack_on_read = off;
+SELECT CASE WHEN
+  (SELECT count(*) FROM cor_t WHERE body %~~ tre_pattern('alpha bravo', 1)) =
+  (SELECT count(*) FROM cor_t WHERE body LIKE '%alpha bravo%')
+  THEN 'off_correct' ELSE 'off_wrong' END AS off_result;
+
+-- crack_on_read ON: same query, same multi-run index, must still equal
+-- the seq scan exactly (the crack is a no-op on results).
+SET pg_tre.crack_on_read = on;
+SELECT CASE WHEN
+  (SELECT count(*) FROM cor_t WHERE body %~~ tre_pattern('alpha bravo', 1)) =
+  (SELECT count(*) FROM cor_t WHERE body LIKE '%alpha bravo%')
+  THEN 'on_correct' ELSE 'on_wrong' END AS on_result;
+
+-- A second pattern with crack on, still correct (exercises a different
+-- trigram set against the same multi-run index).
+SELECT CASE WHEN
+  (SELECT count(*) FROM cor_t WHERE body %~~ tre_pattern('bravo', 0)) =
+  (SELECT count(*) FROM cor_t WHERE body LIKE '%bravo%')
+  THEN 'crack_correct' ELSE 'crack_wrong' END AS result2;
+
+SET pg_tre.crack_on_read = off;
+DROP TABLE cor_t;

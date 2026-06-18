@@ -83,6 +83,7 @@ extern int  pg_tre_match_timeout_ms;
 extern bool pg_tre_fastupdate;
 extern bool pg_tre_tuple_bloom_enable;
 extern bool pg_tre_flush_to_run;
+extern bool pg_tre_crack_on_read;
 extern int  pg_tre_tier3_max_candidates;
 extern int  pg_tre_build_max_entries_mb;
 extern double pg_tre_similarity_threshold;
