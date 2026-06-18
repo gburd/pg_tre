@@ -113,32 +113,27 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
      * rather than the whole catalog (which an all-at-once collapse of
      * hundreds of runs would make a multi-minute stall).
      *
-     * As a backstop, if the catalog has grown well past what Hanoi
-     * leveling should allow (e.g. a pathological burst that outran the
-     * per-VACUUM merge budget, or max_levels exceeded), fall back to a
-     * full collapse to single-run so scan cost can't degrade without
-     * bound.  Both are no-ops when there is only the implicit run, so
-     * the default (flush_to_run off) single-run case is unaffected.
+     * We deliberately do NOT collapse freshly-flushed runs back into
+     * the base on every VACUUM -- that would defeat flush-to-run (a
+     * run created by one VACUUM's pending drain would be folded away
+     * by the same VACUUM, so runs could never persist or accrue).
+     * Hanoi leveling keeps the run count logarithmically bounded;
+     * full collapse to a single run is reserved for a genuine
+     * pathological backstop (runs far past the Hanoi total capacity
+     * ~2^max_levels, i.e. leveling fell badly behind) so scan cost
+     * cannot degrade without bound.  Both are no-ops for the default
+     * single-run (flush_to_run off) case.
      */
     {
         PgTreMetaPageData vmeta;
+        uint32            cap, backstop;
 
-        /* Incrementally bound catalog growth one level at a time. */
         (void) pg_tre_hanoi_merge(info->index);
 
-        /*
-         * Convergence to single-run: if the index is quiescent (the
-         * pending list is empty -- no in-flight ingest) and runs
-         * remain in the catalog, fold them into the base run so a
-         * settled index returns to the single-structure layout and
-         * scan cost goes back to baseline.  Under active churn the
-         * pending list is non-empty, so we leave the Hanoi-leveled
-         * runs in place and only pay the bounded per-level merge.
-         * No-op for the default single-run (flush_to_run off) case.
-         */
         pg_tre_meta_read(info->index, &vmeta);
-        if (vmeta.pending_head == InvalidBlockNumber &&
-            pg_tre_run_count(info->index) > 1)
+        cap = (vmeta.max_levels > 0) ? vmeta.max_levels : 7;
+        backstop = (cap < 20) ? (1u << cap) : (1u << 20);
+        if (pg_tre_run_count(info->index) > backstop)
             (void) pg_tre_collapse_runs(info->index);
     }
 

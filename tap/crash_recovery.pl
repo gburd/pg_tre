@@ -237,13 +237,14 @@ for my $cycle (1 .. $N_CYCLES) {
 }
 
 # ----------------------------------------------------------
-# Phase B1.4: adaptive collapse.  Validate on a SMALL dedicated table
-# (collapsing the big crash_test's hundreds of accrued runs would be a
-# multi-minute O(runs x index) fold and is not the point -- the run
-# accumulation + survival is already asserted above).  Build a small
-# index, accrue >7 runs via the debug helper, VACUUM to trigger
-# pg_tre_collapse_runs, and assert it collapses to one run with the
-# query result unchanged.
+# Phase B1.4: Hanoi incremental level-merge.  Build a small index,
+# accrue >7 level-1 runs via the debug helper, VACUUM to trigger
+# pg_tre_hanoi_merge, and assert the catalog is level-merged down to a
+# small bounded count (NOT necessarily 1 -- Hanoi leaves a promoted
+# run + base; full collapse-to-1 is a pathological backstop only) with
+# the query result unchanged.  Validate on a SMALL table (folding the
+# big crash_test's hundreds of runs would be a multi-minute stall and
+# is not the point -- accumulation + crash survival is asserted above).
 # ----------------------------------------------------------
 $node->safe_psql('postgres', q{
     CREATE TABLE collapse_t (id serial primary key, body text);
@@ -271,10 +272,11 @@ my $crows_after = $node->safe_psql('postgres', q{
     SET enable_seqscan = off;
     SELECT count(*) FROM collapse_t WHERE body %~~ tre_pattern('findme', 0);
 });
-ok(($cruns_before > 7 && $cruns_after == 1),
-   "adaptive collapse: $cruns_before runs -> $cruns_after run after VACUUM");
+ok(($cruns_before > 7 && $cruns_after < $cruns_before && $cruns_after <= 3),
+   "Hanoi merge: $cruns_before runs -> $cruns_after runs after VACUUM "
+   . "(level-merged, bounded)");
 is($crows_after, $crows_before,
-   "adaptive collapse: query results unchanged across the collapse");
+   "Hanoi merge: query results unchanged across the merge");
 
 $node->stop('fast');
 done_testing();
