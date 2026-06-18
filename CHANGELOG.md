@@ -6,60 +6,136 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased] - 2.0.0-dev
+## [2.0.0] - 2026-06-18 - adaptive-LSM substrate + posting-page coalescing
 
-> North star: pg_tre is a REGEX index with edit distance.
-> Posting-page coalescing changes the on-disk layout/size of
-> postings, never what the index matches.  The executor recheck
-> contract is untouched; query results are byte-identical.
+> North star: pg_tre is a REGEX index with edit distance.  Every
+> change in this release is on-disk layout, write-path, or scan
+> mechanics; none of it changes what the index matches.  The
+> executor recheck contract is untouched and query results are
+> byte-identical (verified against sequential scan on Linux/x86_64
+> and FreeBSD/amd64).
 
-On-disk format bump **v7 -> v8, ADDITIVE: NO REINDEX**.  v6/v7
-indexes read unchanged (a coalesced page kind only appears in
-indexes built/rebuilt at v8, and old indexes never set the
-coalesced flag).  `PG_TRE_FORMAT_VERSION_MIN` stays 6.
+Major version bump for the on-disk format change, but the format
+bump is **v7 -> v8, ADDITIVE: NO REINDEX**.  v6/v7 indexes read
+unchanged (`PG_TRE_FORMAT_VERSION_MIN` stays 6; a coalesced page
+kind only appears in indexes built/rebuilt at v8, and old indexes
+never set the coalesced flag).  `ALTER EXTENSION pg_tre UPDATE` from
+1.6.0 or 1.12.0 is verified by the upgrade-tests CI matrix: the
+old-format index returns identical results after the upgrade with no
+REINDEX.
+
+All three new behaviors ship **off by default** behind GUCs
+(`pg_tre.flush_to_run`, `pg_tre.crack_on_read`,
+`pg_tre.coalesce_enable`).  The default build is byte-for-byte
+equivalent to 1.12.0.  A/B benchmarking (bench/RESULTS-v2.0-ab.md)
+found them performance-neutral when enabled (no regression) but
+without a measured benefit on single-run workloads, so they remain
+gated until a multi-run workload demonstrates the LSM/crack upside.
 
 ### Added
 
-- **Posting-page coalescing, Phase 1** (foundational; off by
-  default behind `pg_tre.coalesce_enable`).  See
-  `doc/specs/posting-page-coalescing.md`.
-  - New page kind `PG_TRE_PAGE_POSTING_COALESCED` (tag 9) that packs
-    the postings of multiple medium-cardinality trigrams onto one
-    page with an indirection table (`PgTreCoalescedHeader` +
-    `PgTreCoalescedSlot`), addressed by a slot index carried in the
-    upper-tree leaf entry's `inline_bytes` field
-    (`PG_TRE_COALESCED_FLAG`).
-  - Coalesced-page writer (`src/pages/coalesced.c`,
-    `pg_tre_coalesced_writer_begin/_add/_writer_finish`) and reader
-    (`pg_tre_coalesced_resolve_slot`).  WAL-logged as a full-page
-    image under `XLOG_PTRE_POSTING_INSERT` following the validated
-    run-catalog writer pattern (`REGBUF_FORCE_IMAGE`, one critical
-    section, no `REGBUF_WILL_INIT`).
-  - The build path packs medium-bucket postings
+- **Adaptive-LSM substrate (Phase B1)** -- the foundation for
+  "cracking" the index on the composable unit (the trigram),
+  modeled on Hanoi leveling + adaptive collapse.  All additive over
+  format v7 (v6 reads as one implicit run, no REINDEX).
+  - Run/level catalog: `PgTreRun` records (monotonic `run_id`,
+    Hanoi `level`, roots, `[min,max]` trigram-hash run-skip filter),
+    `PG_TRE_PAGE_RUN_CATALOG` page kind, meta fields
+    `next_run_id`/`run_catalog_head`/`n_runs`/`max_levels`.
+    Introspection via `tre_run_catalog_status(regclass)`.
+  - Multi-run scan: per-run posting resolution unioned with the
+    pending overlay, gated by the run-skip filter; a single implicit
+    run is byte-identical to the pre-v7 scan.
+  - Crash-safe catalog writer (`pg_tre_run_catalog_append`,
+    `REGBUF_FORCE_IMAGE`, one critical section) and `flush_to_run`
+    GUC: drain the pending list into a new LSM run instead of
+    merging into the base.  Crash-validated by `tap/crash_recovery.pl`.
+  - Adaptive compaction at VACUUM: incremental Hanoi level-merge
+    (`pg_tre_hanoi_merge`) folds the shallowest over-capacity level
+    into a promoted run; `pg_tre_collapse_runs` is the
+    full-collapse backstop.  Bounds run growth without an all-at-once
+    fold.  TAP-validated: 10 runs -> 2 after VACUUM, results unchanged.
+  - Read-side crack cache (`pg_tre.crack_on_read`): per-scan, in-
+    memory memoization of each query trigram's union across runs.
+    Result-identical, standby-safe, no disk write-back (durable
+    crack deferred).
+- **Posting-page coalescing, Phase 1** (`pg_tre.coalesce_enable`).
+  See `doc/specs/posting-page-coalescing.md`.
+  - New page kind `PG_TRE_PAGE_POSTING_COALESCED` (tag 9) packing
+    multiple medium-cardinality trigram postings onto one page with
+    an indirection table (`PgTreCoalescedHeader` +
+    `PgTreCoalescedSlot`), addressed by a slot index in the
+    upper-tree leaf entry's `inline_bytes` (`PG_TRE_COALESCED_FLAG`).
+  - Coalesced-page writer/reader (`src/pages/coalesced.c`), WAL-
+    logged as a full-page image (validated run-catalog pattern).
+  - The build path packs the medium bucket
     (`PG_TRE_INLINE_POSTING_MAX` < serialized sparsemap <=
-    `PG_TRE_COALESCE_MAX`) onto coalesced pages when
-    `pg_tre.coalesce_enable` is on; the read path resolves a
-    coalesced slot to an inline blob at the single upper-tree lookup
-    chokepoint, so every downstream consumer (materialize / scan /
-    cardinality / lookup) is unchanged.
-  - Phase 1 limitation: a coalesced posting drops its per-tuple
-    payload (blooms/positions).  Lossy-safe -- recheck is
-    authoritative -- and only forgoes the tier-3/positional
-    PRE-filter for coalesced trigrams.
+    `PG_TRE_COALESCE_MAX`) when enabled; the read path resolves a
+    coalesced slot at the single upper-tree lookup chokepoint, so
+    materialize / scan / cardinality / lookup are unchanged.
+  - `tre_coalesced_page_count(regclass)` diagnostic.
 - Format version bump v7 -> v8; `pg_tre_upgrade_index` accepts v7
   and stamps v8 (no-op rewrite, byte-identical non-coalesced pages).
-- `test/sql/coalesce.sql`: coalesce-on results == seq-scan,
-  coalesce-on index size <= coalesce-off, all pages at format v8.
+- Self-contained A/B benchmark harness (`bench/ab-bench.sh`): builds
+  pg_tre at HEAD and a prior release from source, runs its own
+  ephemeral PG18 cluster (no root, no system install), and compares
+  pg_tre-new vs pg_tre-old vs pg_trgm on build time, index size,
+  latency, and an accuracy oracle (index result set == seq-scan).
+  Realistic-corpus generator (`bench/gen_corpus_realistic.py`).
+- Regression coverage: `flush_to_run`, `crack_on_read`,
+  `run_catalog`, `coalesce`, `coalesce_vacuum`, plus the
+  `crash_recovery.pl` TAP for WAL-critical catalog/merge paths.
 
-### Deferred (not in this increment)
+### Fixed
 
-- Phase 2: build-side bin packing (first-fit-decreasing) and
-  flipping `pg_tre.coalesce_enable` on by default with a size
-  regression.
-- Phase 3: write-path migration of a coalesced trigram that grows
-  past its slot to a dedicated posting tree.
-- Phase 4: VACUUM tombstone + page-rewrite reclaim for coalesced
-  pages, and coalesced-page payload support.
+- Coalescing maintenance safety: `ambulkdelete` /
+  `posting_leaf_inline_delete` / the merge snapshot path are now
+  coalesced-aware.  A coalesced upper-tree entry stores the
+  coalesced-page block in `posting_root` and a `(flag | slot)`
+  marker in `inline_bytes`; the prior code read those as a posting-
+  tree root / blob length and would corrupt under VACUUM or merge
+  with coalescing on.
+- Coalesced-page read crash: `pg_tre_posting_materialize` resolves
+  the coalesced marker centrally (via `pg_tre_coalesced_resolve_slot`
+  with a `HASH_ANY` sentinel), fixing a "page has kind 9, expected
+  5" error at CREATE INDEX in the range-tier build path.
+- Build temp-disk blow-up on repetitive text: per-row
+  (trigram, tid) dedup in `extract_trigrams` collapses the sort
+  input ~200x on repetitive corpora; `build_max_entries_mb` now
+  meters real per-tuple cost.  Added `tre_estimate_index_build`.
+- Regression suite was not actually gating in CI (shell/pipefail +
+  missing superuser role + a `|| make check` fallback); the suite
+  now genuinely runs and gates on PG17 and PG18.
+- Upgrade-tests harness rebuilt: recursive clone of old tags (the
+  source tarball carried no submodules) and a meaningful matrix
+  (1.6.0, 1.12.0).
+
+### Deferred (not in this release)
+
+- Coalescing Phase 2-4: build-side bin packing (evaluated and
+  skipped -- ~2-3 slots/page, no FFD win), flipping the default,
+  write-path slot-growth migration, and VACUUM reclaim of
+  orphaned/dead coalesced slots (the maintenance paths are
+  coalesced-aware but do not yet reclaim space).
+- B1.5 durable crack write-back (persisting the coalesced run so
+  the next scan touches fewer runs): needs the lock-safe writer +
+  standby/crash gate.
+- Phase B2: the gated 2-D visibility LSM.
+
+### Upgrade
+
+- From 1.6.0 / 1.12.0: `ALTER EXTENSION pg_tre UPDATE TO '2.0.0';`
+  no REINDEX (format additive, MIN stays 6).  CI-verified.
+- From 1.0.x-1.5.x: those are format v3-v5; the sparsemap v5->v6
+  break (1.6.0) requires REINDEX after upgrading the SQL.
+- Restart the postmaster fully after installing the new `.so`
+  (`shared_preload_libraries = 'pg_tre'`).
+
+### Acknowledgements
+
+- TRE (Ville Laurikari) for the approximate-regex matcher.
+- The sparsemap design (Christoph Rupp) underlying the posting
+  tiers.
 
 ---
 
