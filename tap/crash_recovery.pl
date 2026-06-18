@@ -237,31 +237,43 @@ for my $cycle (1 .. $N_CYCLES) {
 }
 
 # ----------------------------------------------------------
-# Phase B1.4: adaptive collapse.  After the cycles, the catalog
-# holds many runs (hundreds, well over max_levels=7).  A VACUUM
-# triggers pg_tre_collapse_runs, which must merge them all back
-# into a single base run with results unchanged.
+# Phase B1.4: adaptive collapse.  Validate on a SMALL dedicated table
+# (collapsing the big crash_test's hundreds of accrued runs would be a
+# multi-minute O(runs x index) fold and is not the point -- the run
+# accumulation + survival is already asserted above).  Build a small
+# index, accrue >7 runs via the debug helper, VACUUM to trigger
+# pg_tre_collapse_runs, and assert it collapses to one run with the
+# query result unchanged.
 # ----------------------------------------------------------
-my $runs_before = $node->safe_psql('postgres', qq{
-    SELECT count(*) FROM tre_run_catalog_status('crash_idx'::regclass);
+$node->safe_psql('postgres', q{
+    CREATE TABLE collapse_t (id serial primary key, body text);
+    INSERT INTO collapse_t (body)
+    SELECT md5(g::text) || (CASE WHEN g % 20 = 0 THEN ' findme' ELSE '' END)
+    FROM generate_series(1, 500) g;
+    CREATE INDEX collapse_idx ON collapse_t USING tre (body);
 });
-my $rows_before = $node->safe_psql('postgres', qq{
+for my $n (1 .. 9) {
+    $node->safe_psql('postgres', q{
+        SELECT tre_debug_append_run('collapse_idx'::regclass, 0::numeric,
+                                    18446744073709551615::numeric);
+    });
+}
+my $cruns_before = $node->safe_psql('postgres',
+    q{SELECT count(*) FROM tre_run_catalog_status('collapse_idx'::regclass);});
+my $crows_before = $node->safe_psql('postgres', q{
     SET enable_seqscan = off;
-    SELECT count(*) FROM crash_test
-       WHERE body %~~ tre_pattern('crash_cycle', 1);
+    SELECT count(*) FROM collapse_t WHERE body %~~ tre_pattern('findme', 0);
 });
-$node->safe_psql('postgres', 'VACUUM crash_test;');
-my $runs_after = $node->safe_psql('postgres', qq{
-    SELECT count(*) FROM tre_run_catalog_status('crash_idx'::regclass);
-});
-my $rows_after = $node->safe_psql('postgres', qq{
+$node->safe_psql('postgres', 'VACUUM collapse_t;');
+my $cruns_after = $node->safe_psql('postgres',
+    q{SELECT count(*) FROM tre_run_catalog_status('collapse_idx'::regclass);});
+my $crows_after = $node->safe_psql('postgres', q{
     SET enable_seqscan = off;
-    SELECT count(*) FROM crash_test
-       WHERE body %~~ tre_pattern('crash_cycle', 1);
+    SELECT count(*) FROM collapse_t WHERE body %~~ tre_pattern('findme', 0);
 });
-ok(($runs_before > 7 && $runs_after == 1),
-   "adaptive collapse: $runs_before runs -> $runs_after run after VACUUM");
-is($rows_after, $rows_before,
+ok(($cruns_before > 7 && $cruns_after == 1),
+   "adaptive collapse: $cruns_before runs -> $cruns_after run after VACUUM");
+is($crows_after, $crows_before,
    "adaptive collapse: query results unchanged across the collapse");
 
 $node->stop('fast');
