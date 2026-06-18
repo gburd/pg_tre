@@ -205,6 +205,33 @@ produced only by a from-scratch build and never mutated in place,
 so the VACUUM interaction is "leave them alone," which is correct
 (stale-but-superset postings are filtered by recheck).
 
+**Maintenance-path safety (landed alongside the build/read path).**
+"Leave them alone" is not automatic: a coalesced upper-tree entry
+stores `posting_root = coalesced-page block` and `inline_bytes =
+PG_TRE_COALESCED_FLAG | slot`, so every maintenance routine that
+treats `posting_root` as a posting-tree root or `inline_bytes` as a
+blob length must special-case it or it corrupts.  Three such paths
+are now coalesced-aware (each skips or resolves the marker instead
+of misreading it):
+
+- `ambulkdelete` / `posting_upper_walk` — skips coalesced entries
+  (does not walk the coalesced page as a posting tree).
+- `posting_leaf_inline_delete` — skips coalesced entries (does not
+  read `flag | slot` as an inline-blob length).
+- `snapshot_upper_leaf` (merge / Hanoi / collapse) — preserves the
+  coalesced entry verbatim and does not consume from the inline
+  blob region; `collapse_fold_run` resolves the slot via
+  `pg_tre_coalesced_resolve_slot` before materializing.
+
+Result: with `pg_tre.coalesce_enable = on`, VACUUM, INSERT-driven
+merges, and Hanoi/collapse are all correct (verified by
+`coalesce_vacuum` regression and the full-corpus nightly).  Dead
+TIDs inside a coalesced posting are still not space-reclaimed (they
+are recheck-filtered, and a merge that touches the trigram rebuilds
+it as a dedicated leaf); in-place coalesced-page compaction is the
+remaining Phase 4 work.  `tre_coalesced_page_count(regclass)`
+exposes how many coalesced pages an index holds.
+
 ## On-disk format version — additive, NO REINDEX
 
 ```

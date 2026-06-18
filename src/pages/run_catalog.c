@@ -604,3 +604,43 @@ tre_debug_append_run(PG_FUNCTION_ARGS)
     relation_close(index, RowExclusiveLock);
     PG_RETURN_INT64((int64) id);
 }
+
+
+/*
+ * tre_coalesced_page_count(idx regclass) RETURNS bigint
+ *
+ * Diagnostic: count PG_TRE_PAGE_POSTING_COALESCED pages in the index.
+ * Used by the coalesce regression to confirm coalescing actually
+ * engaged (a coalesced page exists) so the VACUUM/merge safety paths
+ * are genuinely exercised, and by operators deciding whether to enable
+ * pg_tre.coalesce_enable.  Walks every block under AccessShareLock.
+ */
+PG_FUNCTION_INFO_V1(tre_coalesced_page_count);
+Datum
+tre_coalesced_page_count(PG_FUNCTION_ARGS)
+{
+    Oid          relid = PG_GETARG_OID(0);
+    Relation     index;
+    BlockNumber  nblocks;
+    BlockNumber  blk;
+    int64        count = 0;
+
+    index = relation_open(relid, AccessShareLock);
+    nblocks = RelationGetNumberOfBlocks(index);
+
+    for (blk = 0; blk < nblocks; blk++)
+    {
+        Buffer  buf = ReadBuffer(index, blk);
+        Page    page;
+
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+        if (!PageIsNew(page) &&
+            PageTreGetOpaque(page)->page_kind == PG_TRE_PAGE_POSTING_COALESCED)
+            count++;
+        UnlockReleaseBuffer(buf);
+    }
+
+    relation_close(index, AccessShareLock);
+    PG_RETURN_INT64(count);
+}

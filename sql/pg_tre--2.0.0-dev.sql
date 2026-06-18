@@ -423,3 +423,12 @@ COMMENT ON FUNCTION tre_debug_append_run(regclass, numeric, numeric) IS
     'TEST-ONLY (Phase B1.3): append a run sharing the index roots with '
     'the given [min,max] trigram-hash range; exercises the crash-safe '
     'catalog writer and multi-run scan.  Not part of the supported API.';
+
+CREATE FUNCTION tre_coalesced_page_count(regclass)
+    RETURNS bigint
+    AS 'MODULE_PATHNAME', 'tre_coalesced_page_count'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION tre_coalesced_page_count(regclass) IS
+    'Count PG_TRE_PAGE_POSTING_COALESCED pages (format v8) in the index. '
+    'Zero unless pg_tre.coalesce_enable was on at build time.';

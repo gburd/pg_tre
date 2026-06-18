@@ -1841,6 +1841,15 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
 
     for (i = 0; i < n_entries; i++)
     {
+        /*
+         * A coalesced entry (PG_TRE_COALESCED_FLAG set in inline_bytes)
+         * carries a (flag | slot) marker, NOT a blob length -- it has
+         * NO inline blob in this leaf.  Treating its marker as a byte
+         * count would read/write far past the page.  Skip it here and
+         * preserve it verbatim in the repack loop below.
+         */
+        if ((entries[i].inline_bytes & PG_TRE_COALESCED_FLAG) != 0)
+            continue;
         if (entries[i].inline_bytes > 0)
         {
             any_inline = true;
@@ -1876,6 +1885,10 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
             Size    blob_out = 0;
             uint64  blob_remaining = 0;
 
+            /* Coalesced marker: no inline blob to repack; leave the
+             * entry (and its flag|slot inline_bytes) untouched. */
+            if ((entries[i].inline_bytes & PG_TRE_COALESCED_FLAG) != 0)
+                continue;
             if (blob_in == 0)
                 continue;
 
@@ -2459,6 +2472,21 @@ posting_upper_walk(Relation index, BlockNumber blk,
             roots = (BlockNumber *) palloc((Size) n * sizeof(BlockNumber));
             for (i = 0; i < n; i++)
             {
+                /*
+                 * Skip coalesced entries: their posting_root is the
+                 * block of a shared PG_TRE_PAGE_POSTING_COALESCED page,
+                 * NOT a posting-tree root, so it must not be fed to
+                 * posting_tree_delete (which would walk it as a posting
+                 * tree -- wrong page kind).  Dead TIDs in a coalesced
+                 * posting are not reclaimed here; they are filtered by
+                 * the executor recheck (correct, just not space-
+                 * reclaimed), and a later merge that touches the
+                 * trigram rebuilds it as a dedicated leaf.  Full
+                 * coalesced-page reclaim is posting-page-coalescing
+                 * Phase 4.
+                 */
+                if ((entries[i].inline_bytes & PG_TRE_COALESCED_FLAG) != 0)
+                    continue;
                 /* Out-of-line posting trees are handled after release. */
                 if (BlockNumberIsValid(entries[i].posting_root))
                     roots[roots_n++] = entries[i].posting_root;

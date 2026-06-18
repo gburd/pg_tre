@@ -43,6 +43,7 @@
 #include "pg_tre/pending.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/posting.h"
+#include "pg_tre/coalesced.h"
 #include "pg_tre/run_catalog.h"
 #include "pg_tre/sparsemap.h"
 #include "pg_tre/upper.h"
@@ -910,7 +911,20 @@ snapshot_upper_leaf(RebuildState *r, MemoryContext mcxt, Buffer buf)
     {
         int dst = r->n_existing + i;
         r->existing[dst] = src[i];
-        if (src[i].inline_bytes > 0)
+        if ((src[i].inline_bytes & PG_TRE_COALESCED_FLAG) != 0)
+        {
+            /*
+             * Coalesced entry: inline_bytes is a (flag | slot) marker,
+             * not a blob length, and the blob lives on a separate
+             * coalesced page (not in this leaf).  Preserve the entry
+             * (posting_root = coalesced block, inline_bytes = marker)
+             * verbatim and do NOT consume from blob_base.  The merge's
+             * collapse_fold_run resolves it via pg_tre_posting_
+             * materialize, which honors the coalesced flag.
+             */
+            r->existing_inline[dst] = NULL;
+        }
+        else if (src[i].inline_bytes > 0)
         {
             uint8 *copy = MemoryContextAlloc(mcxt, src[i].inline_bytes);
             memcpy(copy, blob_base + inline_offset, src[i].inline_bytes);
@@ -1378,9 +1392,33 @@ collapse_fold_run(Relation index, BlockNumber root_upper,
         uint64  idx;
         MergeEntry *me;
 
-        sm = pg_tre_posting_materialize(index, e->posting_root,
-                                        rs.existing_inline[i],
-                                        e->inline_bytes);
+        if ((e->inline_bytes & PG_TRE_COALESCED_FLAG) != 0)
+        {
+            /*
+             * Coalesced entry (v8): resolve the slot on its shared
+             * coalesced page to the inline sparsemap bytes, then
+             * materialize from those.  posting_root here is the
+             * coalesced page block, not a posting-tree root.
+             */
+            uint16        slot = (uint16) (e->inline_bytes
+                                           & ~PG_TRE_COALESCED_FLAG);
+            const uint8  *blob;
+            Size          blob_len = 0;
+
+            blob = pg_tre_coalesced_resolve_slot(index, e->posting_root,
+                                                 slot, e->trigram_hash,
+                                                 &blob_len);
+            if (blob == NULL || blob_len == 0)
+                continue;
+            sm = pg_tre_posting_materialize(index, InvalidBlockNumber,
+                                            blob, blob_len);
+        }
+        else
+        {
+            sm = pg_tre_posting_materialize(index, e->posting_root,
+                                            rs.existing_inline[i],
+                                            e->inline_bytes);
+        }
         if (sm == NULL)
             continue;
 
