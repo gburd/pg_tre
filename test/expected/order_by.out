@@ -35,35 +35,52 @@ INSERT INTO ob_t (body)
 SELECT 'unrelated bystander row ' || g || ' xyzzy'
 FROM generate_series(1, 200) AS g;
 INSERT 0 200
+-- Suppress the version-varying build-progress NOTICEs (trigram/posting
+-- counts) so the expected file is stable across PG majors.
+SET client_min_messages = warning;
+SET
 CREATE INDEX ob_idx ON ob_t USING tre (body);
-psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: collected 6303 trigram entries from 210 heap tuples
-psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: built 412 posting trees
-psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
-psql:test/sql/order_by.sql:36: NOTICE:  pg_tre: build complete, indexed 210 heap tuples into 412 trigrams
 CREATE INDEX
 ANALYZE ob_t;
 ANALYZE
 -- ----------------------------------------------------------------
--- 1. Plan shape: Index Scan with Order By, no Sort.
+-- 1. Plan shape: index-driven ordered scan, no executor Sort.
 --    With k=0 the trigram extraction is non-trivial so the index
---    drives the scan (no always_true fallback).
+--    drives the scan (no always_true fallback).  Version-robust:
+--    probe the plan tree for an Index Scan carrying an Order By and
+--    the absence of any Sort node, via a single text token (no exact
+--    plan-shape dump, which differs across PG majors).
 -- ----------------------------------------------------------------
 SET enable_seqscan = off;
 SET
 SET enable_bitmapscan = off;
 SET
-EXPLAIN (COSTS OFF)
-SELECT id FROM ob_t
-WHERE body %~~ tre_pattern('foobar', 0)
-ORDER BY body <@> tre_pattern('foobar', 0)
-LIMIT 5;
-                      QUERY PLAN                      
-------------------------------------------------------
- Limit
-   ->  Index Scan using ob_idx on ob_t
-         Index Cond: (body %~~ 'foobar'::tre_pattern)
-         Order By: (body <@> 'foobar'::tre_pattern)
-(4 rows)
+CREATE FUNCTION ob_index_ordered(q text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE r record; plan jsonb; txt text;
+BEGIN
+  FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
+    plan := r."QUERY PLAN";
+  END LOOP;
+  txt := plan::text;
+  RETURN txt ILIKE '%Index Scan%'
+     AND txt ILIKE '%Order By%'
+     AND txt NOT ILIKE '%"Node Type": "Sort"%';
+END $$;
+CREATE FUNCTION
+SELECT CASE WHEN ob_index_ordered($$
+         SELECT id FROM ob_t
+         WHERE body %~~ tre_pattern('foobar', 0)
+         ORDER BY body <@> tre_pattern('foobar', 0)
+         LIMIT 5$$)
+            THEN 'index_ordered_no_sort' ELSE 'sort_or_seq' END AS plan_shape;
+      plan_shape       
+-----------------------
+ index_ordered_no_sort
+(1 row)
+
+DROP FUNCTION ob_index_ordered(text);
+DROP FUNCTION
 
 -- ----------------------------------------------------------------
 -- 2. Result correctness: rows in ascending distance order.

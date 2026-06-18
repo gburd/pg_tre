@@ -128,14 +128,26 @@ SELECT p5_diff('environment', 2);
 SELECT p5_diff('PostgreSQL', 2);
 SELECT p5_diff('performance', 2);
 
--- Verify EXPLAIN picks the bitmap index scan for k>0
+-- Verify the planner can use the index for k>0 patterns.
+-- Version-robust: assert plan-node category via single text tokens
+-- (no exact plan-shape dump, which differs across PG majors).
+CREATE FUNCTION p5_uses_index(q text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE r record; node text;
+BEGIN
+  FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
+    node := r."QUERY PLAN"->0->'Plan'->>'Node Type';
+  END LOOP;
+  RETURN node ILIKE '%Index%' OR node ILIKE '%Bitmap%';
+END $$;
 SET enable_seqscan = off;
-EXPLAIN (COSTS OFF)
-SELECT id FROM p5_docs WHERE body %~~ tre_pattern('hello', 1);
+SELECT CASE WHEN p5_uses_index($$SELECT id FROM p5_docs WHERE body %~~ tre_pattern('hello', 1)$$)
+            THEN 'k1_uses_index' ELSE 'k1_seq' END AS k1_plan;
+SELECT CASE WHEN p5_uses_index($$SELECT id FROM p5_docs WHERE body %~~ tre_pattern('approximate', 2)$$)
+            THEN 'k2_uses_index' ELSE 'k2_seq' END AS k2_plan;
+SET enable_seqscan = on;
 
-EXPLAIN (COSTS OFF)
-SELECT id FROM p5_docs WHERE body %~~ tre_pattern('approximate', 2);
-
+DROP FUNCTION p5_uses_index(text);
 DROP FUNCTION p5_diff(text, int);
 DROP INDEX p5_idx;
 DROP TABLE p5_docs;

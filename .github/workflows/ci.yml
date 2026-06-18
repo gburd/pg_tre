@@ -111,14 +111,15 @@ jobs:
           PGPORT: "5432"
 
       - name: Run regression tests (3x for flake detection)
-        # Linux + PG18 only.  The expected files are authored against
-        # PG18 output; PG17 produces different trigram/posting-tree
-        # counts and different planner choices for some tests, so PG17
-        # is a build-portability check (and the regression runs under
-        # PG18).  macOS legs validate build portability only (no server
-        # is started there).  Per-version expected files for PG17 are
-        # tracked follow-up (see notes).
-        if: runner.os == 'Linux' && matrix.pg == '18'
+        # Linux only.  The regression suite now runs on BOTH PG17 and
+        # PG18: the version-sensitive tests were made version-robust
+        # (build-progress NOTICEs suppressed; exact EXPLAIN plan-shape
+        # assertions replaced with single-token "uses index?" probes via
+        # EXPLAIN FORMAT JSON), so the expected files no longer depend
+        # on PG-major-specific trigram/posting counts or planner cost
+        # choices.  macOS legs validate build portability only (no
+        # server is started there).
+        if: runner.os == 'Linux'
         env:
           PGPORT: "5432"
         run: |

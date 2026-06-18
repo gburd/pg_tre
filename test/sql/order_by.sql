@@ -33,22 +33,42 @@ INSERT INTO ob_t (body)
 SELECT 'unrelated bystander row ' || g || ' xyzzy'
 FROM generate_series(1, 200) AS g;
 
+-- Suppress the version-varying build-progress NOTICEs (trigram/posting
+-- counts) so the expected file is stable across PG majors.
+SET client_min_messages = warning;
 CREATE INDEX ob_idx ON ob_t USING tre (body);
 ANALYZE ob_t;
 
 -- ----------------------------------------------------------------
--- 1. Plan shape: Index Scan with Order By, no Sort.
+-- 1. Plan shape: index-driven ordered scan, no executor Sort.
 --    With k=0 the trigram extraction is non-trivial so the index
---    drives the scan (no always_true fallback).
+--    drives the scan (no always_true fallback).  Version-robust:
+--    probe the plan tree for an Index Scan carrying an Order By and
+--    the absence of any Sort node, via a single text token (no exact
+--    plan-shape dump, which differs across PG majors).
 -- ----------------------------------------------------------------
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
 
-EXPLAIN (COSTS OFF)
-SELECT id FROM ob_t
-WHERE body %~~ tre_pattern('foobar', 0)
-ORDER BY body <@> tre_pattern('foobar', 0)
-LIMIT 5;
+CREATE FUNCTION ob_index_ordered(q text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE r record; plan jsonb; txt text;
+BEGIN
+  FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
+    plan := r."QUERY PLAN";
+  END LOOP;
+  txt := plan::text;
+  RETURN txt ILIKE '%Index Scan%'
+     AND txt ILIKE '%Order By%'
+     AND txt NOT ILIKE '%"Node Type": "Sort"%';
+END $$;
+SELECT CASE WHEN ob_index_ordered($$
+         SELECT id FROM ob_t
+         WHERE body %~~ tre_pattern('foobar', 0)
+         ORDER BY body <@> tre_pattern('foobar', 0)
+         LIMIT 5$$)
+            THEN 'index_ordered_no_sort' ELSE 'sort_or_seq' END AS plan_shape;
+DROP FUNCTION ob_index_ordered(text);
 
 -- ----------------------------------------------------------------
 -- 2. Result correctness: rows in ascending distance order.

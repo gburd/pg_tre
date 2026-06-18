@@ -20,23 +20,43 @@ SELECT 'The quick brown fox jumps over the lazy dog. Row ' || i
 FROM generate_series(1, 100000) AS i;
 
 -- Create pg_tre index (should split 'the' posting across multiple leaves).
+-- Suppress the version-varying build-progress NOTICEs (trigram/posting
+-- counts) here and for the later REINDEX so the expected file is stable
+-- across PG majors.
+SET client_min_messages = warning;
 CREATE INDEX multi_leaf_idx ON multi_leaf_test USING tre (body);
+RESET client_min_messages;
 
 -- Verify index built successfully (no errcode_program_limit_exceeded).
 SELECT pg_relation_size('multi_leaf_idx') > 0 AS index_exists;
 
+-- Plan-shape probe: assert the forced scan is what we expect, via a
+-- single text token (no exact plan-shape dump, which differs across
+-- PG majors).
+CREATE FUNCTION ml_uses_index(q text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE r record; txt text;
+BEGIN
+  FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
+    txt := r."QUERY PLAN"::text;
+  END LOOP;
+  -- Scan the whole plan tree (robust to Aggregate/Gather wrapping and
+  -- parallel plans) for an index or bitmap scan node.
+  RETURN txt ILIKE '%Index Scan%' OR txt ILIKE '%Bitmap%Scan%';
+END $$;
+
 -- Differential test 1: exact match for 'the' (should return all 100K rows).
 -- Compare index scan vs seq-scan.
 SET enable_seqscan = off;
-EXPLAIN (COSTS OFF)
-SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+SELECT CASE WHEN ml_uses_index($$SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0)$$)
+            THEN 'idx_forced_uses_index' ELSE 'idx_forced_seq' END AS plan1;
 SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
 
 SET enable_seqscan = on;
 SET enable_indexscan = off;
 SET enable_bitmapscan = off;
-EXPLAIN (COSTS OFF)
-SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
+SELECT CASE WHEN ml_uses_index($$SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0)$$)
+            THEN 'seq_forced_uses_index' ELSE 'seq_forced_seq' END AS plan2;
 SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
 
 SET enable_indexscan = on;
@@ -125,7 +145,13 @@ DROP TABLE multi_leaf_idx_ids;
 DROP TABLE multi_leaf_seq_ids;
 
 -- REINDEX test: drop and rebuild the index to verify multi-leaf rebuild.
+-- Suppress the version-varying rebuild NOTICEs too.
+SET client_min_messages = warning;
 REINDEX INDEX multi_leaf_idx;
+RESET client_min_messages;
+
+-- Clean up the plan-shape probe helper.
+DROP FUNCTION ml_uses_index(text);
 
 -- Verify rebuilt index still works correctly.
 SET enable_seqscan = off;

@@ -135,17 +135,32 @@ SELECT scan_exact_diff('xyz');                          -- no match
  OK  xyz
 (1 row)
 
--- Verify EXPLAIN picks the bitmap index scan.
+-- Verify the planner can use the index for a selective pattern.
+-- Version-robust: assert plan-node category via a single text token
+-- (no exact plan-shape dump, which differs across PG majors).
+CREATE FUNCTION scan_exact_uses_index(q text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE r record; node text;
+BEGIN
+  FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
+    node := r."QUERY PLAN"->0->'Plan'->>'Node Type';
+  END LOOP;
+  RETURN node ILIKE '%Index%' OR node ILIKE '%Bitmap%';
+END $$;
+CREATE FUNCTION
 SET enable_seqscan = off;
 SET
-EXPLAIN (COSTS OFF)
-SELECT id FROM scan_exact_docs WHERE body %~~ tre_pattern('hello', 0);
-                     QUERY PLAN                     
-----------------------------------------------------
- Index Scan using scan_exact_idx on scan_exact_docs
-   Index Cond: (body %~~ 'hello'::tre_pattern)
-(2 rows)
+SELECT CASE WHEN scan_exact_uses_index($$SELECT id FROM scan_exact_docs WHERE body %~~ tre_pattern('hello', 0)$$)
+            THEN 'scan_exact_uses_index' ELSE 'scan_exact_seq' END AS plan_choice;
+      plan_choice      
+-----------------------
+ scan_exact_uses_index
+(1 row)
 
+SET enable_seqscan = on;
+SET
+DROP FUNCTION scan_exact_uses_index(text);
+DROP FUNCTION
 DROP FUNCTION scan_exact_diff(text);
 DROP FUNCTION
 DROP INDEX scan_exact_idx;

@@ -22,12 +22,15 @@ SELECT 'The quick brown fox jumps over the lazy dog. Row ' || i
 FROM generate_series(1, 100000) AS i;
 INSERT 0 100000
 -- Create pg_tre index (should split 'the' posting across multiple leaves).
+-- Suppress the version-varying build-progress NOTICEs (trigram/posting
+-- counts) here and for the later REINDEX so the expected file is stable
+-- across PG majors.
+SET client_min_messages = warning;
+SET
 CREATE INDEX multi_leaf_idx ON multi_leaf_test USING tre (body);
-psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: collected 5088623 trigram entries from 100000 heap tuples
-psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built 1145 posting trees
-psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: built range tier with 9 ranges across 1 pages
-psql:test/sql/multi_leaf.sql:23: NOTICE:  pg_tre: build complete, indexed 100000 heap tuples into 1145 trigrams
 CREATE INDEX
+RESET client_min_messages;
+RESET
 -- Verify index built successfully (no errcode_program_limit_exceeded).
 SELECT pg_relation_size('multi_leaf_idx') > 0 AS index_exists;
  index_exists 
@@ -35,20 +38,31 @@ SELECT pg_relation_size('multi_leaf_idx') > 0 AS index_exists;
  t
 (1 row)
 
+-- Plan-shape probe: assert the forced scan is what we expect, via a
+-- single text token (no exact plan-shape dump, which differs across
+-- PG majors).
+CREATE FUNCTION ml_uses_index(q text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE r record; txt text;
+BEGIN
+  FOR r IN EXECUTE 'EXPLAIN (FORMAT JSON) ' || q LOOP
+    txt := r."QUERY PLAN"::text;
+  END LOOP;
+  -- Scan the whole plan tree (robust to Aggregate/Gather wrapping and
+  -- parallel plans) for an index or bitmap scan node.
+  RETURN txt ILIKE '%Index Scan%' OR txt ILIKE '%Bitmap%Scan%';
+END $$;
+CREATE FUNCTION
 -- Differential test 1: exact match for 'the' (should return all 100K rows).
 -- Compare index scan vs seq-scan.
 SET enable_seqscan = off;
 SET
-EXPLAIN (COSTS OFF)
-SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
-                       QUERY PLAN                        
----------------------------------------------------------
- Aggregate
-   ->  Bitmap Heap Scan on multi_leaf_test
-         Recheck Cond: (body %~~ 'the'::tre_pattern)
-         ->  Bitmap Index Scan on multi_leaf_idx
-               Index Cond: (body %~~ 'the'::tre_pattern)
-(5 rows)
+SELECT CASE WHEN ml_uses_index($$SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0)$$)
+            THEN 'idx_forced_uses_index' ELSE 'idx_forced_seq' END AS plan1;
+         plan1         
+-----------------------
+ idx_forced_uses_index
+(1 row)
 
 SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
  count  
@@ -62,14 +76,12 @@ SET enable_indexscan = off;
 SET
 SET enable_bitmapscan = off;
 SET
-EXPLAIN (COSTS OFF)
-SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
-                  QUERY PLAN                   
------------------------------------------------
- Aggregate
-   ->  Seq Scan on multi_leaf_test
-         Filter: (body %~~ 'the'::tre_pattern)
-(3 rows)
+SELECT CASE WHEN ml_uses_index($$SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0)$$)
+            THEN 'seq_forced_uses_index' ELSE 'seq_forced_seq' END AS plan2;
+     plan2      
+----------------
+ seq_forced_seq
+(1 row)
 
 SELECT COUNT(*) FROM multi_leaf_test WHERE body %~~ tre_pattern('the', 0);
  count  
@@ -214,12 +226,16 @@ DROP TABLE
 DROP TABLE multi_leaf_seq_ids;
 DROP TABLE
 -- REINDEX test: drop and rebuild the index to verify multi-leaf rebuild.
+-- Suppress the version-varying rebuild NOTICEs too.
+SET client_min_messages = warning;
+SET
 REINDEX INDEX multi_leaf_idx;
-psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: collected 5088623 trigram entries from 100000 heap tuples
-psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built 1145 posting trees
-psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: built range tier with 9 ranges across 1 pages
-psql:test/sql/multi_leaf.sql:128: NOTICE:  pg_tre: build complete, indexed 100000 heap tuples into 1145 trigrams
 REINDEX
+RESET client_min_messages;
+RESET
+-- Clean up the plan-shape probe helper.
+DROP FUNCTION ml_uses_index(text);
+DROP FUNCTION
 -- Verify rebuilt index still works correctly.
 SET enable_seqscan = off;
 SET
