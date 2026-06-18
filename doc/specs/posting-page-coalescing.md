@@ -334,15 +334,38 @@ ratio.
      unchanged.  This keeps Phase 1 reviewable and revertible: the
      new code paths exist and are tested, but the size change does
      not land until Phase 2 flips the default and measures it.
-2. **Phase 2 — bin packing in build + flip default.**  Sort the
-   medium bucket by size, first-fit-decreasing into coalesced pages,
-   enable by default, add the `size` regression comparing page
-   counts to the dedicated-leaf baseline.
+2. **Phase 2 — flip default + size regression.**  Enable by default
+   and add a `size` regression comparing coalesced-page counts to the
+   dedicated-leaf baseline.
+   - **First-fit-decreasing bin packing was evaluated and skipped.**
+     The medium bucket is `(2048, 3072]` bytes, so a coalesced page
+     holds only ~2–3 slots (8160-byte budget / ~2600-byte slot).
+     At 2–3 items per bin the FFD gain over the streaming greedy
+     writer is negligible, and FFD would require buffering the whole
+     medium bucket before packing.  The greedy next-fit writer is
+     near-optimal at this fanout; revisit only if the bucket bounds
+     widen.  The real coalescing win is *coalesced page vs dedicated
+     leaf* (a ~3× reduction for the medium bucket: ~3 postings share
+     one 8 KB page instead of wasting one each), not slot packing.
+   - **Flipping the default is deferred to the operator** (this work
+     keeps `pg_tre.coalesce_enable` off); the capability is complete
+     and maintenance-safe (below), ready to un-gate.
 3. **Phase 3 — write-path migration.**  A coalesced trigram that
    grows past its slot on insert migrates to a dedicated posting
    tree (upper-tree entry atomically swaps coalesced-slot → root).
+   - **Already handled implicitly by the merge path:** a pending
+     merge that touches a coalesced trigram materializes its existing
+     posting (resolving the slot), unions the new TIDs, and rebuilds
+     it as a *dedicated* leaf — the merge never re-coalesces.  The
+     orphaned coalesced slot leaks until a full rebuild (Phase 4
+     reclaim).  No in-place slot-growth migration is needed.
 4. **Phase 4 — vacuum reclaim.**  INVALID-slot tombstones; rewrite a
    coalesced page when live utilization drops below 50%.
+   - **First increment landed:** the maintenance paths
+     (`ambulkdelete`, `posting_leaf_inline_delete`, merge snapshot)
+     are now coalesced-aware and correct — VACUUM no longer corrupts
+     on coalesced entries.  Remaining: in-place compaction to
+     *reclaim* the space of dead/orphaned coalesced slots.
 
 ## Out of scope
 
