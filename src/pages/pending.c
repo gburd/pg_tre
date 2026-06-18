@@ -1481,6 +1481,167 @@ pg_tre_collapse_runs(Relation index)
     return n_runs;
 }
 
+/*
+ * Hanoi incremental level-merge (Phase B1.4 refinement).
+ *
+ * Instead of folding ALL runs into the base at once (O(runs x index),
+ * a multi-minute stall at hundreds of runs), merge only ONE
+ * over-capacity Hanoi level at a time: level L holds at most 2^(L-1)
+ * runs; when it exceeds that, merge exactly those level-L runs into a
+ * single new run promoted to level L+1, leaving the base run and all
+ * other levels untouched.  Per-merge work is bounded by one level's
+ * runs, not the whole catalog.
+ *
+ * Cascades: promoting into level L+1 may push it over capacity, so we
+ * loop until no level exceeds its cap (or we hit max_levels, beyond
+ * which the deepest level just accumulates -- the caller can still
+ * fall back to a full collapse if it wants single-run convergence).
+ *
+ * Returns the number of merge passes performed (0 if nothing was over
+ * capacity).  Driven from VACUUM.  Caller holds a lock excluding
+ * concurrent catalog writers (the index's ShareUpdateExclusive).
+ */
+#define PG_TRE_MAX_CATALOG_RUNS ((int) RUN_CATALOG_CAP)
+
+uint32
+pg_tre_hanoi_merge(Relation index)
+{
+    PgTreMetaPageData meta;
+    uint32  max_levels;
+    uint32  passes = 0;
+    int     guard;
+
+    pg_tre_meta_read(index, &meta);
+    max_levels = (meta.max_levels > 0) ? meta.max_levels : 7;
+
+    /* Bounded loop: at most one promotion per level, a few cascades. */
+    for (guard = 0; guard < 64; guard++)
+    {
+        PgTreRun      runs[PG_TRE_MAX_CATALOG_RUNS];
+        int           n_runs = 0;
+        PgTreRunIter *it;
+        PgTreRun      run;
+        uint32        target_level = 0;
+        int           per_level[64];
+        int           lv;
+
+        memset(per_level, 0, sizeof(per_level));
+
+        /* Collect the catalog runs (skip the implicit base, run_id 0). */
+        it = pg_tre_run_catalog_open(index);
+        while (pg_tre_run_catalog_next(it, &run))
+        {
+            if (run.run_id == 0)
+                continue;           /* base run is not catalog-merged */
+            if (n_runs >= PG_TRE_MAX_CATALOG_RUNS)
+                break;
+            runs[n_runs++] = run;
+            lv = (run.level >= 1 && run.level < 64) ? (int) run.level : 1;
+            per_level[lv]++;
+        }
+        pg_tre_run_catalog_close(it);
+
+        /* Find the shallowest level that exceeds its Hanoi capacity
+         * 2^(L-1).  Do not promote past max_levels. */
+        for (lv = 1; lv < (int) max_levels && lv < 64; lv++)
+        {
+            int cap = 1 << (lv - 1);
+            if (per_level[lv] > cap)
+            {
+                target_level = (uint32) lv;
+                break;
+            }
+        }
+        if (target_level == 0)
+            break;              /* no level over capacity -- done */
+
+        /* Merge all runs at target_level into one promoted run. */
+        {
+            MemoryContext cxt, old;
+            MergeCtx      mc;
+            RebuildState  rs;
+            PgTreRun      survivors[PG_TRE_MAX_CATALOG_RUNS];
+            PgTreRun      promoted;
+            int           n_surv = 0, i, k;
+            uint64        lo = UINT64_MAX, hi = 0, ntup = 0;
+            BlockNumber   new_root;
+            uint64        new_id;
+
+            cxt = AllocSetContextCreate(CurrentMemoryContext,
+                       "pg_tre hanoi merge", ALLOCSET_DEFAULT_SIZES);
+            old = MemoryContextSwitchTo(cxt);
+
+            memset(&mc, 0, sizeof(mc));
+            mc.bucket_cap = 256;
+            mc.bucket_tab = MemoryContextAllocZero(cxt,
+                               mc.bucket_cap * sizeof(MergeEntry *));
+            mc.mcxt = cxt;
+            mc.pending_only = true;
+
+            for (i = 0; i < n_runs; i++)
+            {
+                if ((int) runs[i].level == (int) target_level)
+                {
+                    collapse_fold_run(index, runs[i].root_upper, &mc, cxt);
+                    if (runs[i].min_trigram_hash < lo) lo = runs[i].min_trigram_hash;
+                    if (runs[i].max_trigram_hash > hi) hi = runs[i].max_trigram_hash;
+                    ntup += runs[i].n_tuples;
+                }
+                else
+                {
+                    survivors[n_surv++] = runs[i];
+                }
+            }
+
+            materialize_merged_postings(index, &mc);
+
+            rs.sorted = MemoryContextAlloc(cxt,
+                          mc.n_entries * sizeof(MergeEntry *));
+            k = 0;
+            for (i = 0; i < mc.bucket_cap; i++)
+                if (mc.bucket_tab[i] != NULL)
+                    rs.sorted[k++] = mc.bucket_tab[i];
+            Assert(k == mc.n_entries);
+            qsort(rs.sorted, k, sizeof(MergeEntry *), cmp_merge_hash);
+            rs.n_sorted = k; rs.i_sorted = 0;
+            rs.existing = NULL; rs.existing_inline = NULL;
+            rs.n_existing = 0; rs.i_existing = 0; rs.existing_cap = 0;
+
+            new_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
+
+            /* Allocate a fresh run_id for the promoted run by appending
+             * then immediately folding it into the rewrite -- but to
+             * keep next_run_id monotonic without a separate append, we
+             * reserve an id via a catalog append of the promoted run,
+             * then rewrite the full survivors+promoted list. */
+            memset(&promoted, 0, sizeof(promoted));
+            promoted.level = target_level + 1;
+            promoted.flags = PG_TRE_RUN_LIVE;
+            promoted.root_upper = new_root;
+            promoted.root_range = InvalidBlockNumber;
+            promoted.n_tuples = ntup;
+            promoted.n_trigrams = (uint64) k;
+            promoted.min_trigram_hash = (k > 0) ? lo : 0;
+            promoted.max_trigram_hash = (k > 0) ? hi : UINT64_MAX;
+            new_id = pg_tre_run_catalog_append(index, &promoted);
+            promoted.run_id = new_id;
+
+            /* Rewrite the catalog as survivors + promoted (the append
+             * above advanced next_run_id and added promoted to the
+             * catalog; rewrite installs the deduplicated final list and
+             * drops the merged level-L runs). */
+            survivors[n_surv++] = promoted;
+            pg_tre_run_catalog_rewrite(index, survivors, n_surv);
+
+            MemoryContextSwitchTo(old);
+            MemoryContextDelete(cxt);
+        }
+        passes++;
+    }
+
+    return passes;
+}
+
 /* --------------------------------------------------------------------
  * WAL redo helper (called from src/wal/xlog.c)
  * -------------------------------------------------------------------- */

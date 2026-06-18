@@ -72,6 +72,15 @@ extern uint64 pg_tre_pending_merge(Relation index);
 extern uint32 pg_tre_collapse_runs(Relation index);
 
 /*
+ * Phase B1.4 Hanoi incremental merge: merge one over-capacity Hanoi
+ * level at a time (level L holds <= 2^(L-1) runs) into a promoted
+ * level-(L+1) run, bounding per-merge work to a single level rather
+ * than folding the whole catalog at once.  Driven from VACUUM.
+ * Returns the number of merge passes performed.
+ */
+extern uint32 pg_tre_hanoi_merge(Relation index);
+
+/*
  * Apply a pending-insert delta to a tail page during WAL redo.
  * Used by pg_tre_redo_pending_insert_delta in src/wal/xlog.c.
  *

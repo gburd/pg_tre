@@ -61,6 +61,16 @@ extern void pg_tre_run_catalog_collapse_reset(Relation index,
                                               uint64 n_trigrams,
                                               uint64 n_tuples);
 
+/*
+ * Replace the entire catalog run list with `runs` (Phase B1.4 Hanoi
+ * incremental merge), atomically on one fresh catalog page.  The
+ * implicit base run (run_id 0) is not included and is untouched.
+ * n==0 resets to the single implicit run.  Caller holds a lock
+ * excluding concurrent catalog writers.
+ */
+extern void pg_tre_run_catalog_rewrite(Relation index,
+                                       const PgTreRun *runs, int n);
+
 
 /*
  * Total live-run count without iterating (reads the meta page).

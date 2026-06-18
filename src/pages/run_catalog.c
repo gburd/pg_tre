@@ -373,6 +373,99 @@ pg_tre_run_catalog_collapse_reset(Relation index, BlockNumber new_root_upper,
     UnlockReleaseBuffer(metabuf);
 }
 
+/*
+ * Replace the ENTIRE run catalog with the given list of runs
+ * (Phase B1.4 Hanoi incremental merge).  Writes the runs onto a
+ * single fresh catalog page and points the meta page at it, all in
+ * one WAL'd critical section.  The base implicit run (run_id 0) is
+ * NOT part of `runs` and is never touched -- only catalog runs
+ * (run_id >= 1) are rewritten.  `next_run_id` is left untouched
+ * (monotonic).  n_runs becomes 1 (implicit) + n.  Old catalog pages
+ * and the upper trees of dropped runs are leaked to FSM reclamation
+ * (same deferred-recycle policy as the merge path).
+ *
+ * Used by the level-merge driver: read the live catalog runs, merge
+ * the over-capacity level into one promoted run, then call this with
+ * (survivors + promoted) to install the new catalog atomically.
+ *
+ * If `n` is 0, resets to the single implicit run (run_catalog_head =
+ * Invalid).  Caller holds a lock excluding concurrent catalog writers.
+ */
+void
+pg_tre_run_catalog_rewrite(Relation index, const PgTreRun *runs, int n)
+{
+    Buffer        metabuf;
+    Page          metapage;
+    PgTreMetaPage meta;
+    Buffer        catbuf = InvalidBuffer;
+    Page          catpage = NULL;
+    BlockNumber   cat_blk = InvalidBlockNumber;
+
+    if (n < 0)
+        n = 0;
+    if (n > (int) RUN_CATALOG_CAP)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("pg_tre: run catalog rewrite exceeds one page (%d > %d)",
+                        n, (int) RUN_CATALOG_CAP)));
+
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    meta = PgTreMetaPageGet(metapage);
+
+    if (n > 0)
+    {
+        PgTreRunCatalogHeader *hdr;
+        PgTreRun *dst;
+        int i;
+
+        catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
+        catpage = BufferGetPage(catbuf);
+        cat_blk = BufferGetBlockNumber(catbuf);
+        hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
+        hdr->right_link = InvalidBlockNumber;
+        hdr->n_entries = (uint32) n;
+        hdr->_pad0 = 0;
+        dst = (PgTreRun *)
+            (((char *) PageGetContents(catpage)) +
+             MAXALIGN(sizeof(PgTreRunCatalogHeader)));
+        for (i = 0; i < n; i++)
+            dst[i] = runs[i];
+        ((PageHeader) catpage)->pd_lower =
+            ((char *) &dst[n] - (char *) catpage);
+    }
+
+    START_CRIT_SECTION();
+
+    meta->run_catalog_head = (n > 0) ? cat_blk : InvalidBlockNumber;
+    meta->n_runs           = (n > 0) ? (uint32) (n + 1) : 0;
+
+    if (n > 0)
+        MarkBufferDirty(catbuf);
+    MarkBufferDirty(metabuf);
+
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        if (n > 0)
+            XLogRegisterBuffer(1, catbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
+        PageSetLSN(metapage, recptr);
+        if (n > 0)
+            PageSetLSN(catpage, recptr);
+    }
+
+    END_CRIT_SECTION();
+
+    if (BufferIsValid(catbuf))
+        UnlockReleaseBuffer(catbuf);
+    UnlockReleaseBuffer(metabuf);
+}
+
 uint32
 pg_tre_run_count(Relation index)
 {

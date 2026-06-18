@@ -104,22 +104,34 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     (void) merged;    /* reporting via ereport would spam VACUUM output */
 
     /*
-     * Phase B1.4 adaptive collapse: VACUUM is the natural compaction
-     * point for an index AM (no background thread).  Let runs accrue
-     * across VACUUMs (the LSM benefit), but collapse them all back
-     * into a single base run once the count exceeds the Hanoi level
-     * cap (max_levels, default 7) -- bounding run growth so scan cost
-     * stays near baseline and a quiescent index converges to the
-     * single-structure layout.  No-op when at/under the threshold, so
-     * this is free for the default (flush_to_run off) single-run case.
+     * Phase B1.4 compaction: VACUUM is the natural compaction point
+     * for an index AM (no background thread).  Runs accrue across
+     * VACUUMs (the LSM benefit); we bound their growth incrementally
+     * via Hanoi level-merging -- each VACUUM merges at most one
+     * over-capacity level (level L holds <= 2^(L-1) runs) into a
+     * promoted run, so per-VACUUM work is bounded by a single level
+     * rather than the whole catalog (which an all-at-once collapse of
+     * hundreds of runs would make a multi-minute stall).
+     *
+     * As a backstop, if the catalog has grown well past what Hanoi
+     * leveling should allow (e.g. a pathological burst that outran the
+     * per-VACUUM merge budget, or max_levels exceeded), fall back to a
+     * full collapse to single-run so scan cost can't degrade without
+     * bound.  Both are no-ops when there is only the implicit run, so
+     * the default (flush_to_run off) single-run case is unaffected.
      */
     {
         PgTreMetaPageData vmeta;
-        uint32            cap;
+        uint32            cap, backstop;
+
+        (void) pg_tre_hanoi_merge(info->index);
 
         pg_tre_meta_read(info->index, &vmeta);
         cap = (vmeta.max_levels > 0) ? vmeta.max_levels : 7;
-        if (pg_tre_run_count(info->index) > cap)
+        /* Backstop: total runs far above the Hanoi total capacity
+         * (~2^max_levels) means leveling fell behind -- collapse. */
+        backstop = (cap < 20) ? (1u << cap) : (1u << 20);
+        if (pg_tre_run_count(info->index) > backstop)
             (void) pg_tre_collapse_runs(info->index);
     }
 
