@@ -28,10 +28,27 @@ This produces `doc/perf.md` with real benchmark numbers.
 
 ## Scripts
 
-- **fetch-corpus.sh** — Generates deterministic synthetic corpus (10k rows, ~200 chars each)
-- **load-and-index.sh** — Creates bench_tre and bench_trgm tables, builds indexes, measures build time
-- **run-queries.sh** — Runs query matrix (exact, k=1, k=2, multi-phrase), measures latency
-- **report.sh** — Aggregates results into doc/perf.md
+- **ab-bench.sh** — Self-contained A/B benchmark (PG 18+). Builds pg_tre at
+  the current checkout AND at a prior release (default v1.12.0) from source,
+  starts its own ephemeral cluster (no system PostgreSQL needed, no root: uses
+  `extension_control_path` + `dynamic_library_path`), loads a corpus, and
+  compares **pg_tre-new vs pg_tre-old vs pg_trgm** on build time, index size,
+  query latency (p50/p95), and an **accuracy oracle** (index result set ==
+  seq-scan result set, per query). pg_tre and pg_trgm live in separate
+  databases (they both define the `%` operator). Usage:
+
+      bench/ab-bench.sh --pg-config <pg18 pg_config> --src <checkout> \
+          --corpus <csv> --work <scratch dir> [--make gmake] [--old-version X]
+
+  Latest run: see `RESULTS-v2.0-ab.md`.
+- **gen_corpus_realistic.py** — Deterministic corpus with realistic selectivity
+  (planted tokens at ~5% / ~1% / ~0.08%): `python3 gen_corpus_realistic.py N out.csv`.
+  Use this for ab-bench; the older fetch-corpus.sh generates pathologically
+  non-selective rows.
+- **fetch-corpus.sh** — (legacy) deterministic synthetic corpus
+- **load-and-index.sh** — (legacy, fixed-port) pg_tre vs pg_trgm on one server
+- **run-queries.sh** — (legacy) query matrix + latency
+- **report.sh** — (legacy) aggregates into doc/perf.md
 
 ## Corpus
 
