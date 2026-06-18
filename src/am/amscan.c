@@ -871,9 +871,10 @@ tri_upper_entry_cmp(const void *a, const void *b)
  * entry exists AND the upper-tree lookup found the trigram (i.e.
  * pg_tre_upper_lookup would have returned true).  When true, *out is
  * filled with a synthetic PgTreUpperRef whose upper_buf is
- * InvalidBuffer; the caller must NOT call pg_tre_upper_release on
- * it (and doing so would be a no-op anyway since BufferIsValid is
- * false).
+ * InvalidBuffer and owns_inline is false (the cache owns the inline
+ * copy, not the ref); the caller must NOT call pg_tre_upper_release on
+ * it (and doing so is a no-op anyway: BufferIsValid is false and
+ * owns_inline is false, so neither the unlock nor the pfree fires).
  *
  * Entries are kept sorted by hash (see tri_upper_cache_build), so this
  * is a binary search.
@@ -902,6 +903,7 @@ tri_upper_cache_lookup(const TriUpperCache *cache, uint64 hash,
             out->root = cache->entries[mid].root;
             out->inline_data = cache->entries[mid].inline_data;
             out->inline_bytes = cache->entries[mid].inline_bytes;
+            out->owns_inline = false;   /* cache owns the copy, not the ref */
             return true;
         }
         else if (h < hash)

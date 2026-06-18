@@ -18,6 +18,16 @@
 #include "pg_tre/page.h"
 
 /*
+ * Maximum PgTreRun records that fit on one catalog page after the
+ * header.  Used by the catalog writer (run_catalog.c) and the Hanoi
+ * level-merge (pending.c).
+ */
+#define RUN_CATALOG_CAP \
+    ((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
+      - MAXALIGN(sizeof(PageTreOpaqueData)) \
+      - MAXALIGN(sizeof(PgTreRunCatalogHeader))) / sizeof(PgTreRun))
+
+/*
  * Iterator over the live runs of an index, newest run_id first.
  * Opaque to callers; constructed by pg_tre_run_catalog_open.
  */

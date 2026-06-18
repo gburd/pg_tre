@@ -11,6 +11,24 @@ standard `PageHeaderData` at offset 0 and end with a
 
 ## Format version history
 
+- **v8 (2.0.0-dev)**: Posting-page coalescing.  Adds a new page kind
+  `PG_TRE_PAGE_POSTING_COALESCED` that packs the postings of multiple
+  trigrams onto one page, addressed by a slot index carried in the
+  upper-tree leaf entry's `inline_bytes` field (high bit
+  `PG_TRE_COALESCED_FLAG`).  Purely ADDITIVE: no existing page kind
+  changes layout, `PG_TRE_FORMAT_VERSION_MIN` stays 6, and a v6/v7
+  index never sets the coalesced flag, so it reads unchanged with NO
+  REINDEX.  The new page kind appears only in indexes built or
+  rebuilt at v8.  See `doc/specs/posting-page-coalescing.md`.
+- **v7 (2.0.0-dev)**: Run/level catalog (Phase B1).  Adds the
+  `PG_TRE_PAGE_RUN_CATALOG` page kind and meta-page run fields.
+  Additive: a v6 index reads as one implicit run, no REINDEX.
+- **v6 (1.6.0)**: Sparsemap 4.0.0 wire format (64-bit chunk offsets).
+  BREAKING -- v<6 indexes require REINDEX (the old 32-bit format is
+  not backward-readable and silently lost data on large heaps).
+- **v5 (Phase 8)**: Multi-leaf range tier (`PgTreRangeHeader` +
+  `right_link` chain).  Only RANGE pages differ from v4; readers
+  handle v<5 range pages for back-compat.
 - **v4 (1.4.0-dev)**: Identical byte layout to v3; the bump exists
   to land the in-place format-upgrade infrastructure (see below).
   No reader change between v3 and v4 beyond accepting both at

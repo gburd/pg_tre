@@ -41,6 +41,19 @@
  *            inline upper entries, range blooms) is format-
  *            incompatible with v<6.
  *
+ *   v8     - introduced in 2.0.0-dev (posting-page coalescing).  Adds a
+ *            new page kind PG_TRE_PAGE_POSTING_COALESCED that packs the
+ *            postings of multiple trigrams onto one page, addressed by
+ *            a slot index carried in the upper-tree leaf entry's
+ *            inline_bytes field (high bit PG_TRE_COALESCED_FLAG).  The
+ *            bump is purely ADDITIVE: no existing page kind changes
+ *            layout, a v6/v7 index never sets the coalesced flag and is
+ *            read unchanged, and MIN stays 6 so no REINDEX is needed.
+ *            The LATEST bump exists so a v7 binary refuses to open a v8
+ *            index it cannot fully read (it would reject the unknown
+ *            COALESCED page kind) rather than mis-resolving a slot.  See
+ *            doc/specs/posting-page-coalescing.md.
+ *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
  * BREAKING CHANGE: indexes built with v5 or earlier (pg_tre < 1.6)
  *   must be REINDEXed -- the sparsemap 4.0.0 wire format is not
@@ -50,14 +63,15 @@
  *
  * Reader policy: any version in [PG_TRE_FORMAT_VERSION_MIN,
  * PG_TRE_FORMAT_VERSION_LATEST] is readable on the page-decode side.
- * As of 2.0.0 LATEST == 7, MIN == 6: v7 adds the run/level catalog
- * (Phase B1) but is purely additive -- a v6 index is read as a
- * single implicit run with no catalog page, so v6 indexes work
- * unchanged under v7 code with NO REINDEX.  (Contrast the v5->v6
+ * As of 2.0.0 LATEST == 8, MIN == 6: v7 adds the run/level catalog
+ * (Phase B1) and v8 adds posting-page coalescing -- both purely
+ * additive.  A v6 index is read as a single implicit run with no
+ * catalog page and no coalesced pages, so v6/v7 indexes work
+ * unchanged under v8 code with NO REINDEX.  (Contrast the v5->v6
  * sparsemap break, which required REINDEX.)  See
  * doc/specs/phaseB1-run-catalog.md and doc/onpage_format.md.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 7
+#define PG_TRE_FORMAT_VERSION_LATEST 8
 #define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the
@@ -84,6 +98,7 @@ extern bool pg_tre_fastupdate;
 extern bool pg_tre_tuple_bloom_enable;
 extern bool pg_tre_flush_to_run;
 extern bool pg_tre_crack_on_read;
+extern bool pg_tre_coalesce_enable;
 extern int  pg_tre_tier3_max_candidates;
 extern int  pg_tre_build_max_entries_mb;
 extern double pg_tre_similarity_threshold;

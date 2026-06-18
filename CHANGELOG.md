@@ -6,6 +6,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased] - 2.0.0-dev
+
+> North star: pg_tre is a REGEX index with edit distance.
+> Posting-page coalescing changes the on-disk layout/size of
+> postings, never what the index matches.  The executor recheck
+> contract is untouched; query results are byte-identical.
+
+On-disk format bump **v7 -> v8, ADDITIVE: NO REINDEX**.  v6/v7
+indexes read unchanged (a coalesced page kind only appears in
+indexes built/rebuilt at v8, and old indexes never set the
+coalesced flag).  `PG_TRE_FORMAT_VERSION_MIN` stays 6.
+
+### Added
+
+- **Posting-page coalescing, Phase 1** (foundational; off by
+  default behind `pg_tre.coalesce_enable`).  See
+  `doc/specs/posting-page-coalescing.md`.
+  - New page kind `PG_TRE_PAGE_POSTING_COALESCED` (tag 9) that packs
+    the postings of multiple medium-cardinality trigrams onto one
+    page with an indirection table (`PgTreCoalescedHeader` +
+    `PgTreCoalescedSlot`), addressed by a slot index carried in the
+    upper-tree leaf entry's `inline_bytes` field
+    (`PG_TRE_COALESCED_FLAG`).
+  - Coalesced-page writer (`src/pages/coalesced.c`,
+    `pg_tre_coalesced_writer_begin/_add/_writer_finish`) and reader
+    (`pg_tre_coalesced_resolve_slot`).  WAL-logged as a full-page
+    image under `XLOG_PTRE_POSTING_INSERT` following the validated
+    run-catalog writer pattern (`REGBUF_FORCE_IMAGE`, one critical
+    section, no `REGBUF_WILL_INIT`).
+  - The build path packs medium-bucket postings
+    (`PG_TRE_INLINE_POSTING_MAX` < serialized sparsemap <=
+    `PG_TRE_COALESCE_MAX`) onto coalesced pages when
+    `pg_tre.coalesce_enable` is on; the read path resolves a
+    coalesced slot to an inline blob at the single upper-tree lookup
+    chokepoint, so every downstream consumer (materialize / scan /
+    cardinality / lookup) is unchanged.
+  - Phase 1 limitation: a coalesced posting drops its per-tuple
+    payload (blooms/positions).  Lossy-safe -- recheck is
+    authoritative -- and only forgoes the tier-3/positional
+    PRE-filter for coalesced trigrams.
+- Format version bump v7 -> v8; `pg_tre_upgrade_index` accepts v7
+  and stamps v8 (no-op rewrite, byte-identical non-coalesced pages).
+- `test/sql/coalesce.sql`: coalesce-on results == seq-scan,
+  coalesce-on index size <= coalesce-off, all pages at format v8.
+
+### Deferred (not in this increment)
+
+- Phase 2: build-side bin packing (first-fit-decreasing) and
+  flipping `pg_tre.coalesce_enable` on by default with a size
+  regression.
+- Phase 3: write-path migration of a coalesced trigram that grows
+  past its slot to a dedicated posting tree.
+- Phase 4: VACUUM tombstone + page-rewrite reclaim for coalesced
+  pages, and coalesced-page payload support.
+
+---
+
 ## [1.12.0] - 2026-06-05 - accurate selectivity (Phase A / A3)
 
 > North star: pg_tre is a REGEX index with edit distance.  A3

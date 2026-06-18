@@ -45,6 +45,7 @@
 #include "utils/snapmgr.h"
 
 #include "pg_tre/buffer.h"
+#include "pg_tre/coalesced.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
@@ -587,11 +588,32 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                             const uint8 **inline_data_out,
                             Size *inline_bytes_out)
 {
+    bool        coalesced;
+    BlockNumber cblk;
+    uint16      cslot;
+
+    return pg_tre_posting_build_finish_ex(b, inline_data_out, inline_bytes_out,
+                                          NULL, &coalesced, &cblk, &cslot);
+}
+
+BlockNumber
+pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
+                               const uint8 **inline_data_out,
+                               Size *inline_bytes_out,
+                               struct PgTreCoalescedWriter *cw,
+                               bool *coalesced_out,
+                               BlockNumber *cblk_out,
+                               uint16 *cslot_out)
+{
     const uint8 *bytes;
     uint8      *copy;
     uint8      *payload_bytes = NULL;
     Size        payload_sz = 0;
     Size        sz = 0;
+
+    *coalesced_out = false;
+    *cblk_out = InvalidBlockNumber;
+    *cslot_out = 0;
 
     /*
      * Phase 4.1: convert the collected uint64 array of TIDs to a canonical
@@ -696,6 +718,33 @@ pg_tre_posting_build_finish(PgTrePostingBuilder *b,
     {
         Size total = sz + payload_sz;
         Size budget = posting_leaf_budget();
+
+        /*
+         * Coalescing (v2.0): a medium-bucket posting packs onto a
+         * shared coalesced page instead of a dedicated single leaf.
+         * Phase 1 drops the payload for coalesced postings (lossy-safe;
+         * recheck is authoritative).  Only the sparsemap (sz) gates
+         * eligibility, since that is what a coalesced slot stores.
+         */
+        if (cw != NULL
+            && sz > PG_TRE_INLINE_POSTING_MAX
+            && sz <= PG_TRE_COALESCE_MAX)
+        {
+            BlockNumber cblk;
+            uint16      cslot;
+
+            pg_tre_coalesced_add(cw, b->trigram_hash, bytes, sz,
+                                 NULL, 0, &cblk, &cslot);
+            pfree(copy);
+            if (payload_bytes)
+                pfree(payload_bytes);
+            *inline_data_out  = NULL;
+            *inline_bytes_out = 0;
+            *coalesced_out = true;
+            *cblk_out = cblk;
+            *cslot_out = cslot;
+            return InvalidBlockNumber;
+        }
 
         /* Single-leaf case: everything fits in one page */
         if (total <= budget)

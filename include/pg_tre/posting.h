@@ -110,6 +110,33 @@ extern BlockNumber pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                                                const uint8 **inline_data_out,
                                                Size *inline_bytes_out);
 
+/*
+ * Coalescing-aware finish (v2.0).  Identical to
+ * pg_tre_posting_build_finish, but when `cw` is non-NULL and the
+ * serialized posting falls in the medium bucket
+ * (PG_TRE_INLINE_POSTING_MAX < size <= PG_TRE_COALESCE_MAX), the
+ * sparsemap is packed into a shared coalesced page via `cw` instead of
+ * getting a dedicated single-leaf posting tree.  In that case the
+ * function returns InvalidBlockNumber, sets *inline_data_out = NULL,
+ * *inline_bytes_out = 0, sets *coalesced_out = true, and writes the
+ * coalesced page block + slot to *cblk_out / *cslot_out.  For all other
+ * size buckets (and when cw is NULL) it behaves exactly like
+ * pg_tre_posting_build_finish and sets *coalesced_out = false.
+ *
+ * Phase 1 limitation: a coalesced posting drops its per-tuple payload
+ * (blooms / positions).  This is lossy-safe -- the executor rechecks
+ * every row -- and only forgoes the tier-3 / positional PRE-filter for
+ * coalesced trigrams.  Coalescing is off by default (pg_tre.coalesce_enable).
+ */
+struct PgTreCoalescedWriter;
+extern BlockNumber pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
+                                                  const uint8 **inline_data_out,
+                                                  Size *inline_bytes_out,
+                                                  struct PgTreCoalescedWriter *cw,
+                                                  bool *coalesced_out,
+                                                  BlockNumber *cblk_out,
+                                                  uint16 *cslot_out);
+
 extern void pg_tre_posting_build_free(PgTrePostingBuilder *b);
 
 /*
@@ -202,6 +229,9 @@ typedef struct PgTreUpperRef
     BlockNumber  root;            /* InvalidBlockNumber if inline */
     const uint8 *inline_data;     /* NULL if not inline */
     Size         inline_bytes;
+    bool         owns_inline;     /* true => inline_data is a palloc'd copy
+                                   * (coalesced slot) owned by this ref;
+                                   * pg_tre_upper_release pfrees it */
 } PgTreUpperRef;
 
 extern bool pg_tre_upper_lookup(Relation index, uint64 trigram_hash,

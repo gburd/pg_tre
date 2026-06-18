@@ -31,6 +31,7 @@
 #include "utils/rel.h"
 
 #include "pg_tre/buffer.h"
+#include "pg_tre/coalesced.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
@@ -208,6 +209,12 @@ upper_flush_leaf(UpperBulkState *state)
 
 /*
  * Add one entry to the current leaf page.  Flushes if the page is full.
+ *
+ * inline_bytes encodes the storage class (see PgTreUpperLeafEntry in
+ * page.h).  For a coalesced entry the PG_TRE_COALESCED_FLAG bit is set
+ * and the value is a (flag | slot) marker, NOT a blob length: it is
+ * stored verbatim in the entry but contributes no inline bytes to the
+ * leaf, and inline_data is NULL.
  */
 static void
 upper_add_leaf_entry(UpperBulkState *state, uint64 hash, BlockNumber root,
@@ -216,6 +223,8 @@ upper_add_leaf_entry(UpperBulkState *state, uint64 hash, BlockNumber root,
     PgTreUpperLeafEntry *ent;
     Size total_used;
     Size page_budget;
+    bool is_coalesced = (((uint32) inline_bytes) & PG_TRE_COALESCED_FLAG) != 0;
+    Size blob_bytes = is_coalesced ? 0 : inline_bytes;
 
     /*
      * Page budget: full page minus header and opaque trailer, leaving a
@@ -228,7 +237,7 @@ upper_add_leaf_entry(UpperBulkState *state, uint64 hash, BlockNumber root,
                 - 64;   /* safety margin */
 
     total_used = (state->leaf_n_entries + 1) * sizeof(PgTreUpperLeafEntry)
-               + state->leaf_inline_used + inline_bytes;
+               + state->leaf_inline_used + blob_bytes;
 
     /* Check if we need to flush the current leaf. */
     if (state->leaf_n_entries >= UPPER_LEAF_MAX_ENTRIES ||
@@ -237,29 +246,30 @@ upper_add_leaf_entry(UpperBulkState *state, uint64 hash, BlockNumber root,
         upper_flush_leaf(state);
     }
 
-    /* Append the entry. */
+    /* Append the entry.  inline_bytes is stored verbatim so the
+     * coalesced (flag | slot) marker round-trips into the entry. */
     ent = &state->leaf_entries[state->leaf_n_entries++];
     ent->trigram_hash = hash;
     ent->posting_root = root;
     ent->inline_bytes = (uint32) inline_bytes;
 
-    if (inline_bytes > 0)
+    if (blob_bytes > 0)
     {
         /* Copy inline blob to the inline data buffer. */
-        if (state->leaf_inline_used + inline_bytes > state->leaf_inline_alloced)
+        if (state->leaf_inline_used + blob_bytes > state->leaf_inline_alloced)
         {
             state->leaf_inline_alloced *= 2;
             state->leaf_inline_data = (uint8 *)
                 repalloc(state->leaf_inline_data, state->leaf_inline_alloced);
         }
         memcpy(state->leaf_inline_data + state->leaf_inline_used,
-               inline_data, inline_bytes);
+               inline_data, blob_bytes);
         /*
          * Store the offset in a temporary way; we'll fix it during flush.
          * For simplicity in Phase 2, just store as offset from inline_data
          * base.
          */
-        state->leaf_inline_used += inline_bytes;
+        state->leaf_inline_used += blob_bytes;
     }
 }
 
@@ -451,6 +461,7 @@ pg_tre_upper_lookup_root(Relation index, BlockNumber root_upper,
         out->root = InvalidBlockNumber;
         out->inline_data = NULL;
         out->inline_bytes = 0;
+        out->owns_inline = false;
         return false;
     }
 
@@ -500,6 +511,7 @@ pg_tre_upper_lookup_root(Relation index, BlockNumber root_upper,
         if (child_blk == InvalidBlockNumber)
         {
             out->upper_buf = InvalidBuffer;
+            out->owns_inline = false;
             return false;
         }
         blk = child_blk;
@@ -534,15 +546,52 @@ pg_tre_upper_lookup_root(Relation index, BlockNumber root_upper,
             Size inline_offset = 0;
             for (i = 0; i < n_entries; i++)
             {
+                uint32 ib = entries[i].inline_bytes;
+
                 if (entries[i].trigram_hash == trigram_hash)
                 {
                     out->upper_buf = buf;
                     out->root = entries[i].posting_root;
-                    if (entries[i].inline_bytes > 0)
+                    out->owns_inline = false;
+
+                    if (ib & PG_TRE_COALESCED_FLAG)
+                    {
+                        /*
+                         * Coalesced posting (format v8): posting_root
+                         * is a PG_TRE_PAGE_POSTING_COALESCED block and
+                         * the low bits are the slot index.  Resolve the
+                         * slot into a palloc'd copy and present it as an
+                         * ordinary inline blob so every downstream
+                         * consumer (materialize / scan / cardinality /
+                         * lookup) is unchanged.  We can release the
+                         * upper-tree leaf buffer immediately since the
+                         * resolved bytes are an owned copy.
+                         */
+                        uint16 slot_idx = (uint16)
+                            (ib & PG_TRE_COALESCED_SLOT_MASK);
+                        BlockNumber cblk = entries[i].posting_root;
+                        Size        sm_len = 0;
+                        uint8      *blob;
+
+                        UnlockReleaseBuffer(buf);
+                        out->upper_buf = InvalidBuffer;
+
+                        blob = pg_tre_coalesced_resolve_slot(index, cblk,
+                                                             slot_idx,
+                                                             trigram_hash,
+                                                             &sm_len);
+                        out->root = InvalidBlockNumber;
+                        out->inline_data = blob;     /* NULL if tombstoned */
+                        out->inline_bytes = sm_len;
+                        out->owns_inline = (blob != NULL);
+                        return true;
+                    }
+
+                    if (ib > 0)
                     {
                         out->inline_data = ((const uint8 *) &entries[n_entries])
                                          + inline_offset;
-                        out->inline_bytes = entries[i].inline_bytes;
+                        out->inline_bytes = ib;
                     }
                     else
                     {
@@ -551,13 +600,18 @@ pg_tre_upper_lookup_root(Relation index, BlockNumber root_upper,
                     }
                     return true;
                 }
-                inline_offset += entries[i].inline_bytes;
+
+                /* Only true inline blobs occupy bytes after the entry
+                 * array; coalesced entries store nothing inline. */
+                if (!(ib & PG_TRE_COALESCED_FLAG))
+                    inline_offset += ib;
             }
         }
 
         /* Not found. */
         UnlockReleaseBuffer(buf);
         out->upper_buf = InvalidBuffer;
+        out->owns_inline = false;
         return false;
     }
 }
@@ -567,4 +621,10 @@ pg_tre_upper_release(PgTreUpperRef *ref)
 {
     if (BufferIsValid(ref->upper_buf))
         UnlockReleaseBuffer(ref->upper_buf);
+    if (ref->owns_inline && ref->inline_data != NULL)
+    {
+        pfree((void *) ref->inline_data);
+        ref->inline_data = NULL;
+        ref->owns_inline = false;
+    }
 }

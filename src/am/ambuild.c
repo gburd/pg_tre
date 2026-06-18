@@ -52,6 +52,7 @@
 
 #include "pg_tre/amapi.h"
 #include "pg_tre/bloom.h"
+#include "pg_tre/coalesced.h"
 #include "pg_tre/hash.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
@@ -554,6 +555,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     PgTrePostingBuilder *current_builder;
     BlockNumber root_upper;
     UpperIterState iter_state;
+    PgTreCoalescedWriter *coalesce_writer = NULL;
 
     /* Phase 2 real build starts here. */
 
@@ -622,6 +624,15 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     current_hash = 0;
     current_builder = NULL;
+
+    /*
+     * v2.0 posting-page coalescing (off by default).  When enabled, the
+     * medium-bucket postings are packed onto shared coalesced pages
+     * instead of one dedicated leaf each.  The writer batches across
+     * trigrams and is flushed before the upper-tree bulkload.
+     */
+    if (pg_tre_coalesce_enable)
+        coalesce_writer = pg_tre_coalesced_writer_begin(index);
 
     /* Phase 5: accumulate positions per (trigram, TID) pair. */
     {
@@ -723,10 +734,16 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                         }
                         else
                         {
-                            root = pg_tre_posting_build_finish(
+                            bool        coalesced;
+                            BlockNumber cblk;
+                            uint16      cslot;
+
+                            root = pg_tre_posting_build_finish_ex(
                                        current_builder,
                                        &inline_data,
-                                       &inline_bytes);
+                                       &inline_bytes,
+                                       coalesce_writer,
+                                       &coalesced, &cblk, &cslot);
                             pg_tre_posting_build_free(current_builder);
 
                             /* Record the completed posting. */
@@ -738,9 +755,19 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                                              accums_alloced * sizeof(PostingAccum));
                             }
                             accums[n_accums].trigram_hash = current_hash;
-                            accums[n_accums].root = root;
-                            accums[n_accums].inline_data = inline_data;
-                            accums[n_accums].inline_bytes = inline_bytes;
+                            if (coalesced)
+                            {
+                                accums[n_accums].root = cblk;
+                                accums[n_accums].inline_data = NULL;
+                                accums[n_accums].inline_bytes =
+                                    PG_TRE_COALESCED_FLAG | cslot;
+                            }
+                            else
+                            {
+                                accums[n_accums].root = root;
+                                accums[n_accums].inline_data = inline_data;
+                                accums[n_accums].inline_bytes = inline_bytes;
+                            }
                             n_accums++;
                         }
                     }
@@ -849,9 +876,16 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                 }
                 else
                 {
-                    root = pg_tre_posting_build_finish(current_builder,
-                                                       &inline_data,
-                                                       &inline_bytes);
+                    bool        coalesced;
+                    BlockNumber cblk;
+                    uint16      cslot;
+
+                    root = pg_tre_posting_build_finish_ex(current_builder,
+                                                          &inline_data,
+                                                          &inline_bytes,
+                                                          coalesce_writer,
+                                                          &coalesced,
+                                                          &cblk, &cslot);
                     pg_tre_posting_build_free(current_builder);
 
                     if (n_accums >= accums_alloced)
@@ -862,9 +896,19 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                                      accums_alloced * sizeof(PostingAccum));
                     }
                     accums[n_accums].trigram_hash = current_hash;
-                    accums[n_accums].root = root;
-                    accums[n_accums].inline_data = inline_data;
-                    accums[n_accums].inline_bytes = inline_bytes;
+                    if (coalesced)
+                    {
+                        accums[n_accums].root = cblk;
+                        accums[n_accums].inline_data = NULL;
+                        accums[n_accums].inline_bytes =
+                            PG_TRE_COALESCED_FLAG | cslot;
+                    }
+                    else
+                    {
+                        accums[n_accums].root = root;
+                        accums[n_accums].inline_data = inline_data;
+                        accums[n_accums].inline_bytes = inline_bytes;
+                    }
                     n_accums++;
                 }
             }
@@ -883,6 +927,14 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     else
         ereport(NOTICE,
                 (errmsg("pg_tre: built %d posting trees", n_accums)));
+
+    /* Flush the coalesced writer's last partial page so all coalesced
+     * pages exist before the upper-tree bulkload references them. */
+    if (coalesce_writer != NULL)
+    {
+        pg_tre_coalesced_writer_finish(coalesce_writer);
+        coalesce_writer = NULL;
+    }
 
     /* Step 6: bulk-load upper tree from the posting list. */
     iter_state.accums = accums;

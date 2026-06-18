@@ -43,7 +43,8 @@ typedef enum PageTreKind
     PG_TRE_PAGE_POSTING_L = 5,
     PG_TRE_PAGE_RANGE     = 6,
     PG_TRE_PAGE_PENDING   = 7,
-    PG_TRE_PAGE_RUN_CATALOG = 8     /* format v7: run/level catalog (Phase B1) */
+    PG_TRE_PAGE_RUN_CATALOG = 8,    /* format v7: run/level catalog (Phase B1) */
+    PG_TRE_PAGE_POSTING_COALESCED = 9  /* format v8: multi-trigram posting page */
 } PageTreKind;
 
 /*
@@ -210,12 +211,75 @@ typedef struct PgTrePostingDeletedHeader
 
 /* ---- Upper-tree leaf entry ---- */
 
+/*
+ * inline_bytes encodes the posting's storage class additively (format
+ * v8, see doc/specs/posting-page-coalescing.md):
+ *
+ *   inline_bytes == 0                       -> dedicated posting tree
+ *                                              (posting_root is the root).
+ *   0 < inline_bytes < PG_TRE_INLINE_POSTING_MAX
+ *                                           -> inline blob packed after
+ *                                              the leaf entry array.
+ *   inline_bytes & PG_TRE_COALESCED_FLAG    -> coalesced page (v8 only):
+ *                                              posting_root is the
+ *                                              PG_TRE_PAGE_POSTING_COALESCED
+ *                                              block, and the low
+ *                                              PG_TRE_COALESCED_SLOT_MASK
+ *                                              bits are the slot index on
+ *                                              that page.
+ *
+ * A v6/v7 index never sets PG_TRE_COALESCED_FLAG (its inline blobs are
+ * always < PG_TRE_INLINE_POSTING_MAX <= 0x7fffffff), so the struct is
+ * byte-identical to v7 and old indexes read unchanged -- the v7->v8
+ * bump is purely additive (no REINDEX).
+ */
+#define PG_TRE_COALESCED_FLAG       0x80000000u
+#define PG_TRE_COALESCED_SLOT_MASK  0x0000ffffu
+
 typedef struct PgTreUpperLeafEntry
 {
     uint64      trigram_hash;
-    BlockNumber posting_root;           /* posting-tree root, or InvalidBlockNumber for inline */
-    uint32      inline_bytes;           /* nonzero if posting is inlined after this entry */
+    BlockNumber posting_root;           /* posting-tree root, coalesced-page block, or InvalidBlockNumber for inline */
+    uint32      inline_bytes;           /* storage-class encoding (see above) */
 } PgTreUpperLeafEntry;
+
+/* ---- Coalesced posting page (format v8) ----
+ *
+ * Packs the postings of multiple trigrams onto one page, addressed by
+ * a slot index carried in the upper-tree leaf entry.  Layout:
+ *
+ *   [ PageHeaderData                  ]   24 B
+ *   [ PgTreCoalescedHeader            ]    8 B   (content area start)
+ *   [ PgTreCoalescedSlot[n_slots]     ]   16 B each (indirection table)
+ *   [ packed sparsemap/payload blobs  ]   variable, grows up
+ *   [ ... free space ...              ]
+ *   [ PageTreOpaqueData               ]    8 B
+ *
+ * Offsets in the slot are from the start of the page.  pd_lower is set
+ * to free_offset (past the last blob) so the whole written region is
+ * below pd_lower and survives REGBUF_STANDARD hole-stripping in the
+ * full-page-image WAL record.  A slot's trigram_hash is verification-
+ * only: the upper-tree entry is authoritative for slot assignment, but
+ * the stored hash lets a torn/corrupt page be caught rather than
+ * returning a foreign trigram's TIDs.
+ */
+#define PG_TRE_COALESCED_SM_INVALID 0   /* sm_offset == 0 marks a dead slot */
+
+typedef struct PgTreCoalescedHeader
+{
+    uint16      n_slots;        /* indirection-table entries */
+    uint16      free_offset;    /* next free byte, from page start */
+    uint32      _pad0;
+} PgTreCoalescedHeader;
+
+typedef struct PgTreCoalescedSlot
+{
+    uint16      sm_offset;      /* from page start; 0 => INVALID slot */
+    uint16      sm_length;      /* serialized sparsemap bytes */
+    uint16      payload_offset; /* from page start; 0 => no payload */
+    uint16      payload_length; /* payload bytes */
+    uint64      trigram_hash;   /* self-describing verify-on-read */
+} PgTreCoalescedSlot;           /* 16 bytes, 8-aligned */
 
 /* ---- Range summary leaf entry ---- */
 

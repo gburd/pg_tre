@@ -152,13 +152,16 @@ pg_tre_upgrade_page_to_latest(Page page)
         case 4:
         case 5:
         case 6:
+        case 7:
             /*
-             * Non-range pages: byte-identical across v3..v7.  We
+             * Non-range pages: byte-identical across v3..v8.  We
              * just need to flip the per-page version stamp below.
-             * v6 -> v7 (Phase B1 run catalog) is purely additive:
-             * existing pages are unchanged, and the meta page's new
-             * v7 catalog fields are initialized separately (see the
-             * meta-page arm below).
+             * v6 -> v7 (Phase B1 run catalog) and v7 -> v8 (posting-
+             * page coalescing) are both purely additive: existing
+             * pages are unchanged, the new page kinds only appear in
+             * indexes built/rebuilt at the new version, and the meta
+             * page's v7 catalog fields are initialized separately
+             * (see the meta-page arm below).
              */
             break;
         default:
@@ -372,9 +375,9 @@ pg_tre_index_format_status(PG_FUNCTION_ARGS)
     BlockNumber nblocks;
     BlockNumber blkno;
     /*
-     * Counters indexed by version number.  We size for [0, LATEST+1)
-     * which is generous: today LATEST == 4 so 8 slots is plenty.  If
-     * a future LATEST grows past 31 this static cap needs to expand.
+     * Counters indexed by version number.  We size for [0, 32) which is
+     * generous (today LATEST == 8).  If a future LATEST grows past 31
+     * this static cap needs to expand.
      */
     enum { MAX_VERSION_SLOT = 32 };
     uint64 counts[MAX_VERSION_SLOT];

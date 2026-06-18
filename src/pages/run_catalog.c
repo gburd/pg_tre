@@ -30,11 +30,8 @@
 #include "pg_tre/run_catalog.h"
 #include "pg_tre/xlog.h"
 
-/* Max PgTreRun records that fit on one catalog page after the header. */
-#define RUN_CATALOG_CAP \
-    ((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) \
-      - MAXALIGN(sizeof(PageTreOpaqueData)) \
-      - MAXALIGN(sizeof(PgTreRunCatalogHeader))) / sizeof(PgTreRun))
+/* Max PgTreRun records that fit on one catalog page after the header.
+ * Defined in run_catalog.h (also used by pending.c's Hanoi merge). */
 
 
 struct PgTreRunIter

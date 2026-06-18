@@ -41,6 +41,7 @@ bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
 bool pg_tre_flush_to_run           = false; /* Phase B1.3: experimental */
 bool pg_tre_crack_on_read          = false; /* Phase B1.5: experimental */
+bool pg_tre_coalesce_enable        = false; /* v2.0 coalescing: experimental */
 int  pg_tre_tier3_max_candidates   = 50000;
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
@@ -138,6 +139,21 @@ pg_tre_init_guc(void)
         " doc/specs/phaseB1-run-catalog.md B1.5.  Off by default; for the"
         " common single-run index it has no effect.",
         &pg_tre_crack_on_read,
+        false, PGC_USERSET, 0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("pg_tre.coalesce_enable",
+        "v2.0: pack medium-cardinality trigram postings onto shared"
+        " coalesced pages instead of one dedicated page each.",
+        "When on, CREATE INDEX places trigram postings whose serialized"
+        " size is between pg_tre.inline threshold and the coalesce cap"
+        " onto shared PG_TRE_PAGE_POSTING_COALESCED pages, shrinking the"
+        " index's page count.  Results are byte-identical (the executor"
+        " rechecks every row); only on-disk size changes.  Format v8"
+        " (additive: v6/v7 indexes read unchanged, no REINDEX)."
+        " Experimental and off by default until the build-side bin"
+        " packing and size regression land (see"
+        " doc/specs/posting-page-coalescing.md).",
+        &pg_tre_coalesce_enable,
         false, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.tier3_max_candidates",
