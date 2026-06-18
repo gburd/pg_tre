@@ -122,16 +122,23 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
      */
     {
         PgTreMetaPageData vmeta;
-        uint32            cap, backstop;
 
+        /* Incrementally bound catalog growth one level at a time. */
         (void) pg_tre_hanoi_merge(info->index);
 
+        /*
+         * Convergence to single-run: if the index is quiescent (the
+         * pending list is empty -- no in-flight ingest) and runs
+         * remain in the catalog, fold them into the base run so a
+         * settled index returns to the single-structure layout and
+         * scan cost goes back to baseline.  Under active churn the
+         * pending list is non-empty, so we leave the Hanoi-leveled
+         * runs in place and only pay the bounded per-level merge.
+         * No-op for the default single-run (flush_to_run off) case.
+         */
         pg_tre_meta_read(info->index, &vmeta);
-        cap = (vmeta.max_levels > 0) ? vmeta.max_levels : 7;
-        /* Backstop: total runs far above the Hanoi total capacity
-         * (~2^max_levels) means leveling fell behind -- collapse. */
-        backstop = (cap < 20) ? (1u << cap) : (1u << 20);
-        if (pg_tre_run_count(info->index) > backstop)
+        if (vmeta.pending_head == InvalidBlockNumber &&
+            pg_tre_run_count(info->index) > 1)
             (void) pg_tre_collapse_runs(info->index);
     }
 
