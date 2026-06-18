@@ -10,7 +10,6 @@ SET client_min_messages = warning;
 SET
 CREATE EXTENSION IF NOT EXISTS pg_tre;
 CREATE EXTENSION
-
 CREATE FUNCTION pa_uses_index(q text)
 RETURNS boolean LANGUAGE plpgsql AS $$
 DECLARE r record; node text;
@@ -21,7 +20,6 @@ BEGIN
   RETURN node ILIKE '%Index%' OR node ILIKE '%Bitmap%';
 END $$;
 CREATE FUNCTION
-
 CREATE TABLE planner_auto_small (id int, body text);
 CREATE TABLE
 INSERT INTO planner_auto_small
@@ -37,7 +35,6 @@ CREATE INDEX idx_auto_small ON planner_auto_small USING tre (body);
 CREATE INDEX
 ANALYZE planner_auto_small;
 ANALYZE
-
 -- Forced index scan is usable for selective patterns; results correct.
 SET enable_seqscan = off;
 SET
@@ -59,7 +56,6 @@ SELECT CASE WHEN pa_uses_index($$SELECT * FROM planner_auto_small WHERE body %~~
 
 SET enable_seqscan = on;
 SET
-
 CREATE TABLE planner_auto_medium (id int, body text);
 CREATE TABLE
 INSERT INTO planner_auto_medium
@@ -75,7 +71,6 @@ CREATE INDEX idx_auto_medium ON planner_auto_medium USING tre (body);
 CREATE INDEX
 ANALYZE planner_auto_medium;
 ANALYZE
-
 SET enable_seqscan = off;
 SET
 SELECT CASE WHEN pa_uses_index($$SELECT * FROM planner_auto_medium WHERE body %~~ tre_pattern('findme', 0)$$)
@@ -88,7 +83,6 @@ SELECT CASE WHEN pa_uses_index($$SELECT * FROM planner_auto_medium WHERE body %~
 
 SET enable_seqscan = on;
 SET
-
 DROP FUNCTION pa_uses_index(text);
 DROP FUNCTION
 DROP TABLE planner_auto_small;
