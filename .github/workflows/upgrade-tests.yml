@@ -25,9 +25,14 @@ jobs:
       fail-fast: false
       matrix:
         pg_version: ['18']
-        # Add the previous release here whenever you cut a new one.
-        # See RELEASING.md.
-        old_version: ['1.0.0', '1.1.0', '1.1.1', '1.12.0']
+        # Only versions whose on-disk format the current binary can still
+        # read are upgrade-testable without a REINDEX.  The sparsemap
+        # v5->v6 wire break (pg_tre 1.6.0) means 1.0.x-1.5.x indexes
+        # require REINDEX after upgrade -- they are intentionally NOT in
+        # this matrix (their .sql upgrade path still works; only on-disk
+        # index read needs a rebuild).  1.12.0 is v6/v7 -> reads as v8
+        # with no REINDEX, exercising the current additive-format path.
+        old_version: ['1.6.0', '1.12.0']
         # When a release breaks on-disk format compatibility, list
         # the (old_version, pg_version) pairs to skip here.
         exclude: []
@@ -59,26 +64,26 @@ jobs:
 
       - name: Download old release v${{ matrix.old_version }}
         run: |
-          # Codeberg auto-generates a tarball from the tag.
-          DOWNLOAD_URL="https://codeberg.org/gregburd/pg_tre/archive/v${{ matrix.old_version }}.tar.gz"
-          echo "Downloading from: $DOWNLOAD_URL"
-          curl -fsSL -o pg_tre-old.tar.gz "$DOWNLOAD_URL" || {
-              echo "::error::Failed to download v${{ matrix.old_version }}"
+          # Clone the old tag WITH submodules at their pinned revs.  The
+          # Codeberg source tarball does not carry submodule contents, so
+          # a recursive clone is the only way to get the exact TRE/Lime
+          # revs the old version built against.
+          git clone --quiet --recurse-submodules --depth 1 \
+              --branch "v${{ matrix.old_version }}" \
+              https://codeberg.org/gregburd/pg_tre.git \
+              "pg_tre-${{ matrix.old_version }}" || {
+              echo "::error::Failed to clone v${{ matrix.old_version }}"
               exit 1
           }
-          mkdir -p pg_tre-${{ matrix.old_version }}
-          tar -xzf pg_tre-old.tar.gz -C pg_tre-${{ matrix.old_version }} \
-              --strip-components=1
-          ls -la pg_tre-${{ matrix.old_version }}
+          ls -la "pg_tre-${{ matrix.old_version }}"
 
       - name: Build and install old version v${{ matrix.old_version }}
         run: |
           cd pg_tre-${{ matrix.old_version }}
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
-          # Initialize submodules if the tarball doesn't include them.
           if [ ! -f vendor/tre/configure.ac ]; then
-              echo "Tarball missing TRE submodule; aborting."
+              echo "::error::TRE submodule missing after recursive clone"
               exit 1
           fi
           make
