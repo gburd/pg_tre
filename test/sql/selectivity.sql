@@ -16,7 +16,9 @@ SELECT md5(g::text)
   || (CASE WHEN g % 100 = 0 THEN ' rare_tok'   ELSE '' END)   -- 1%
   || (CASE WHEN g = 1       THEN ' unique_zzz' ELSE '' END)   -- one row
 FROM generate_series(1, 10000) g;
+SET client_min_messages = warning;
 CREATE INDEX sel_idx ON sel_t USING tre (body);
+RESET client_min_messages;
 ANALYZE sel_t;
 
 -- Use a helper to capture the estimated row count and assert ranges.
