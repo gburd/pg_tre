@@ -29,7 +29,7 @@ set -euo pipefail
 
 PG_CONFIG="" ; PG_BIN_OVERRIDE="" ; SRC="" ; CORPUS="" ; WORK=""
 OLD_VERSION="1.12.0" ; RUNS=10
-MAKE="make"
+MAKE="make" ; TRE_BOOTSTRAP=""
 REPO_URL="https://codeberg.org/gregburd/pg_tre.git"
 
 while [ $# -gt 0 ]; do
@@ -44,6 +44,7 @@ while [ $# -gt 0 ]; do
         --runs)        RUNS="$2"; shift 2 ;;
         --repo-url)    REPO_URL="$2"; shift 2 ;;
         --extra-path)  PATH="$2:$PATH"; export PATH; shift 2 ;;
+        --tre-bootstrap) TRE_BOOTSTRAP="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -81,6 +82,28 @@ emit ""
 build_and_stage() {  # label dir
     local label="$1" dir="$2"
     local stage="$WORK/stage-$label"
+    # If a pre-bootstrapped TRE tree was supplied (--tre-bootstrap), overlay
+    # its portable autotools artifacts (configure, ltmain.sh, m4/*.m4, ...)
+    # onto vendor/tre so the build needs only ./configure + make -- no
+    # autopoint/libtoolize at build time.  config.guess detects the host at
+    # configure time, so a tree bootstrapped elsewhere is portable.
+    if [ -n "${TRE_BOOTSTRAP:-}" ] && [ -f "$TRE_BOOTSTRAP" ]; then
+        log "overlaying bootstrapped TRE onto $dir/vendor/tre"
+        tar xzf "$TRE_BOOTSTRAP" -C "$dir/vendor" --strip-components=0 2>/dev/null \
+            || tar xzf "$TRE_BOOTSTRAP" -C "$dir/vendor" 2>/dev/null || true
+        # Stamp the autotools artifacts in dependency order so the
+        # generated Makefile's self-regeneration rules (Makefile.am ->
+        # Makefile.in -> configure -> Makefile) never fire (which would
+        # invoke automake/autoconf -- absent here).  Oldest first.
+        local T="$dir/vendor/tre"
+        find "$T" -name '*.am'   -exec touch -t 200001010000 {} + 2>/dev/null || true
+        find "$T" -name 'configure.ac' -exec touch -t 200001020000 {} + 2>/dev/null || true
+        find "$T" -name '*.m4'   -exec touch -t 200001030000 {} + 2>/dev/null || true
+        touch -t 200001040000 "$T/aclocal.m4" 2>/dev/null || true
+        find "$T" -name '*.in'   -exec touch -t 200001050000 {} + 2>/dev/null || true
+        touch -t 200001060000 "$T/config.h.in" 2>/dev/null || true
+        touch -t 200001070000 "$T/configure" "$T/utils/ltmain.sh" 2>/dev/null || true
+    fi
     log "building pg_tre ($label) in $dir"
     ( cd "$dir"
       $MAKE -s PG_CONFIG="$PG_CONFIG" clean >/dev/null 2>&1 || true

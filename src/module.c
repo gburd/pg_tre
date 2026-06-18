@@ -119,8 +119,10 @@ pg_tre_init_guc(void)
         " (the default), the historical behavior is used: the pending"
         " list is merged into the single base tree.  Runs accrue and are"
         " bounded by Hanoi leveling + adaptive collapse at VACUUM (B1.4)."
-        " Off by default: on a single-run index it adds multi-run scan"
-        " overhead with no benefit (see bench/RESULTS-v2.0-ab.md).",
+        " Off by default: on a single-run index it adds the multi-run"
+        " scan path with no measured benefit (the crack/flush payoff"
+        " needs multi-run indexes); cost is ~0 on clean hardware (see"
+        " bench/RESULTS-v2.0-ab.md).",
         &pg_tre_flush_to_run,
         false, PGC_USERSET, 0, NULL, NULL, NULL);
 
