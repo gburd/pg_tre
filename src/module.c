@@ -39,9 +39,9 @@ int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
 bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
-bool pg_tre_flush_to_run           = false; /* Phase B1.3: experimental */
-bool pg_tre_crack_on_read          = false; /* Phase B1.5: experimental */
-bool pg_tre_coalesce_enable        = false; /* v2.0 coalescing: experimental */
+bool pg_tre_flush_to_run           = true;  /* Phase B1.3: default-on (v2.0) */
+bool pg_tre_crack_on_read          = true;  /* Phase B1.5: default-on (v2.0) */
+bool pg_tre_coalesce_enable        = true;  /* v2.0 coalescing: default-on */
 int  pg_tre_tier3_max_candidates   = 50000;
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
@@ -117,11 +117,11 @@ pg_tre_init_guc(void)
         " appends it to the run catalog, leaving the base run untouched;"
         " the multi-run scan unions all runs at query time.  When off"
         " (the default), the historical behavior is used: the pending"
-        " list is merged into the single base tree.  Runs accrue without"
-        " bound until Hanoi leveling / adaptive collapse (B1.4) lands, so"
-        " this is experimental and off by default.",
+        " list is merged into the single base tree.  Runs accrue and are"
+        " bounded by Hanoi leveling + adaptive collapse at VACUUM (B1.4);"
+        " on by default since v2.0.",
         &pg_tre_flush_to_run,
-        false, PGC_USERSET, 0, NULL, NULL, NULL);
+        true, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.crack_on_read",
         "Phase B1.5: coalesce a trigram's postings across runs once per"
@@ -136,10 +136,10 @@ pg_tre_init_guc(void)
         " with or without it (the executor still rechecks every row)."
         " The durable run-catalog crack (persisting the coalesced run so"
         " the NEXT scan touches fewer runs) is deferred -- see"
-        " doc/specs/phaseB1-run-catalog.md B1.5.  Off by default; for the"
-        " common single-run index it has no effect.",
+        " doc/specs/phaseB1-run-catalog.md B1.5.  On by default since"
+        " v2.0; for a single-run index it has no effect.",
         &pg_tre_crack_on_read,
-        false, PGC_USERSET, 0, NULL, NULL, NULL);
+        true, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.coalesce_enable",
         "v2.0: pack medium-cardinality trigram postings onto shared"
@@ -149,12 +149,11 @@ pg_tre_init_guc(void)
         " onto shared PG_TRE_PAGE_POSTING_COALESCED pages, shrinking the"
         " index's page count.  Results are byte-identical (the executor"
         " rechecks every row); only on-disk size changes.  Format v8"
-        " (additive: v6/v7 indexes read unchanged, no REINDEX)."
-        " Experimental and off by default until the build-side bin"
-        " packing and size regression land (see"
-        " doc/specs/posting-page-coalescing.md).",
+        " (additive: v6/v7 indexes read unchanged, no REINDEX).  On by"
+        " default since v2.0; maintenance-safe (VACUUM/merge are"
+        " coalesced-aware).  See doc/specs/posting-page-coalescing.md.",
         &pg_tre_coalesce_enable,
-        false, PGC_USERSET, 0, NULL, NULL, NULL);
+        true, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.tier3_max_candidates",
         "Skip per-tuple bloom and positional filters when the candidate"
