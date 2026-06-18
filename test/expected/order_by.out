@@ -81,7 +81,6 @@ SELECT CASE WHEN ob_index_ordered($$
 
 DROP FUNCTION ob_index_ordered(text);
 DROP FUNCTION
-
 -- ----------------------------------------------------------------
 -- 2. Result correctness: rows in ascending distance order.
 --    With k=0 we only see exact-substring matches (dist 0 rows).
