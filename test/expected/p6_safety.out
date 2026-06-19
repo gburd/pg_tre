@@ -23,10 +23,6 @@ INSERT 0 2
 -- Create index with custom reloptions
 CREATE INDEX relopts_idx ON relopts_test USING tre (body)
     WITH (bloom_tuple_bits=64, fastupdate=off, range_size_blocks=256);
-psql:test/sql/p6_safety.sql:25: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:25: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:25: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:25: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 CREATE INDEX
 -- Verify index exists
 \d+ relopts_idx
@@ -39,7 +35,6 @@ Options: bloom_tuple_bits=64, fastupdate=off, range_size_blocks=256
 
 -- Test that index works with custom options
 SELECT id FROM relopts_test WHERE body %~~ tre_pattern('hello', 0) ORDER BY id;
-psql:test/sql/p6_safety.sql:31: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
  id 
 ----
   1
@@ -147,24 +142,14 @@ CREATE TABLE
 -- Valid reloptions
 CREATE INDEX relopts_valid_idx ON relopts_validation_test USING tre (body)
     WITH (bloom_tuple_bits=32);  -- minimum valid value
-psql:test/sql/p6_safety.sql:80: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:80: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:80: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:80: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 CREATE INDEX
 DROP INDEX relopts_valid_idx;
-psql:test/sql/p6_safety.sql:82: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 DROP INDEX
 -- q must be 3 until Phase 8
 CREATE INDEX relopts_q_idx ON relopts_validation_test USING tre (body)
     WITH (q=3);
-psql:test/sql/p6_safety.sql:86: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:86: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:86: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:86: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 CREATE INDEX
 DROP INDEX relopts_q_idx;
-psql:test/sql/p6_safety.sql:88: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 DROP INDEX
 -- Cleanup
 DROP TABLE relopts_validation_test;
@@ -182,18 +167,10 @@ CREATE INDEX
 -- Index 2: custom bloom bits
 CREATE INDEX multi_opts_idx2 ON multi_opts_test USING tre (body)
     WITH (bloom_tuple_bits=256);
-psql:test/sql/p6_safety.sql:105: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:105: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:105: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:105: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 CREATE INDEX
 -- Index 3: fastupdate off
 CREATE INDEX multi_opts_idx3 ON multi_opts_test USING tre (body)
     WITH (fastupdate=false);
-psql:test/sql/p6_safety.sql:109: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:109: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:109: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
-psql:test/sql/p6_safety.sql:109: WARNING:  pg_tre: reloptions requested but not initialized (need shared_preload_libraries)
 CREATE INDEX
 -- All indexes should work; the planner can use one for a selective
 -- pattern.  Version-robust: assert plan-node category via a single
