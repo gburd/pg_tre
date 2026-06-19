@@ -631,6 +631,23 @@ cmp_merge_hash(const void *a, const void *b)
     return 0;
 }
 
+/*
+ * Ascending packed-TID comparator.  pg_tre_pack_tid() is
+ * (block << 16) | offset, so numeric order == heap-TID order; feeding
+ * TIDs to the sparsemap in this order keeps inserts on the ascending
+ * tail-chunk fast path (O(N) total) instead of the random-insert
+ * fall-back (a full chunk walk + memmove per insert -> O(N^2)).
+ */
+static int
+cmp_packed_tid(const void *a, const void *b)
+{
+    uint64 ta = *(const uint64 *) a;
+    uint64 tb = *(const uint64 *) b;
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+}
+
 /* Pre-materialize the "merged posting" for each MergeEntry: union
  * existing posting with new_tids, serialize.  Called once before
  * rebuild iteration starts. */
@@ -666,6 +683,18 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             if (fresh_acc == NULL)
                 ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                     errmsg("pg_tre: merge accumulator allocation failed")));
+            /*
+             * Insert in ascending TID order so the sparsemap's tail-
+             * chunk cursor stays valid (O(N) build).  The pending list
+             * collects TIDs in heap-scan / insertion order, effectively
+             * random per trigram; without this sort each sm_add_grow
+             * falls back to a full chunk walk + memmove, making a flush
+             * O(N^2) -- the dominant cost in the 50 s / 10k-row flush the
+             * field report measured.
+             */
+            if (e->n_tids > 1)
+                qsort(e->tids, (size_t) e->n_tids, sizeof(uint64),
+                      cmp_packed_tid);
             for (k = 0; k < e->n_tids; k++)
             {
                 int retries = 0;
