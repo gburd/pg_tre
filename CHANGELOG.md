@@ -6,6 +6,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.0.1] - 2026-06-19 - field-report fixes (reloptions, parallel build, run accounting)
+
+Bug-fix patch from a v2.0.0 production evaluation.  No on-disk format,
+WAL, or SQL-surface change; `ALTER EXTENSION pg_tre UPDATE TO '2.0.1'`
+is a no-op catalog upgrade (same format v8, no REINDEX).  Query results
+are unchanged.
+
+### Fixed
+
+- **Index reloptions were silently ignored.**  `_PG_init()` never
+  called `pg_tre_init_reloptions()`, so the reloption kind stayed
+  unregistered: every index storage parameter (`fastupdate`,
+  `pending_list_limit`, `q`, `bloom_tuple_bits`, `range_size_blocks`,
+  `tuple_bloom_enable`) was dropped with a `WARNING: pg_tre: reloptions
+  requested but not initialized`, even under
+  `shared_preload_libraries`.  Per-index tuning now works.  New
+  `reloptions` regression test; `p6_safety` expected output updated to
+  drop the obsolete warnings.
+- **`make -j` race.**  The LLVM bitcode (`.bc`) targets did not depend
+  on the vendored TRE `./configure` step, so a parallel build could
+  fail with `tre-config.h: No such file or directory`.  Every object
+  and its bitcode sibling now order-depends on the generated TRE config
+  and the Lime grammar.
+- **`tre_run_catalog_status` accounting.**  Flushed runs reported
+  `n_tuples = 0` because the value was assigned *after* the catalog
+  record was written.  The run's distinct-TID count is now computed
+  (union of the per-trigram TID sets) before the append; the Hanoi
+  merge already sums source-run counts, so promoted runs report
+  correctly too.
+- **Nix flake `pg_config` resolution.**  On current nixpkgs `pg_config`
+  is a split passthru output (`postgresql_18.pg_config`), so the
+  hard-coded `${postgresql}/bin/pg_config` did not exist; the dev shell
+  now resolves it via the split output with a `PATH` fallback.
+
+### Acknowledgements
+
+- The pg.ddx.io / agora operator for a detailed v2.0.0 production
+  evaluation that pinpointed all four issues with exact reproductions.
+
+---
+
 ## [2.0.0] - 2026-06-18 - adaptive-LSM substrate + posting-page coalescing
 
 > North star: pg_tre is a REGEX index with edit distance.  Every
