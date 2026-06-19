@@ -18,6 +18,14 @@
         #   make PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config
         postgresql = pkgs.postgresql_18;
 
+        # On current nixpkgs, pg_config is a split passthru output
+        # (pkgs.postgresql_18.pg_config), NOT $out/bin/pg_config -- the
+        # main output ships only the server/client binaries.  Resolve
+        # the real pg_config robustly: prefer the split output, fall
+        # back to $out/bin for older nixpkgs that still bundle it.
+        pgConfigPkg =
+          if postgresql ? pg_config then postgresql.pg_config else postgresql;
+
         # Toolchain for the PGXS shared library plus the vendored TRE
         # submodule's autotools build.  vendor/tre/configure is already
         # generated, so a plain `make` does not need autopoint; the
@@ -44,14 +52,21 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          inherit nativeBuildInputs buildInputs;
+          nativeBuildInputs = nativeBuildInputs ++ [ pgConfigPkg ];
+          inherit buildInputs;
 
           # Default PG_CONFIG to the flake's PostgreSQL so `make` works
-          # out of the box; still overridable on the command line.
+          # out of the box; still overridable on the command line.  Use
+          # the resolved pg_config package (split output on current
+          # nixpkgs); fall back to a PATH lookup if the layout differs.
           shellHook = ''
-            export PG_CONFIG="${postgresql}/bin/pg_config"
+            if [ -x "${pgConfigPkg}/bin/pg_config" ]; then
+              export PG_CONFIG="${pgConfigPkg}/bin/pg_config"
+            else
+              export PG_CONFIG="$(command -v pg_config || true)"
+            fi
             echo "pg_tre dev shell"
-            echo "  PostgreSQL: $(${postgresql}/bin/pg_config --version)"
+            echo "  PostgreSQL: $("$PG_CONFIG" --version 2>/dev/null)"
             echo "  PG_CONFIG : $PG_CONFIG"
             echo "  build     : make PG_CONFIG=\$PG_CONFIG"
             echo "  override  : make PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config"

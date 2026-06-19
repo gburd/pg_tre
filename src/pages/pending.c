@@ -1282,6 +1282,7 @@ pg_tre_pending_merge(Relation index)
         BlockNumber run_root;
         PgTreRun    run;
         uint64      consumed = 0;
+        uint64      run_n_tuples = 0;
         uint64      lo_hash = rs.sorted[0]->trigram_hash;
         uint64      hi_hash = rs.sorted[k - 1]->trigram_hash;
 
@@ -1293,12 +1294,47 @@ pg_tre_pending_merge(Relation index)
 
         run_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
 
+        /*
+         * Faithful per-run accounting (introspection via
+         * tre_run_catalog_status).  n_trigrams is the distinct-trigram
+         * count in this flush (k).  For n_tuples we count the distinct
+         * heap TIDs the run covers by unioning the per-trigram TID sets
+         * once here -- the merge already holds them in memory, so this
+         * is O(postings) with no extra I/O.  Must be computed BEFORE the
+         * append: the catalog record is written by the append, so a
+         * value set afterward (the old bug) persisted as 0.
+         */
+        {
+            sm_t *tid_union = sm_create(64);
+            int   si;
+            if (tid_union != NULL)
+            {
+                for (si = 0; si < k; si++)
+                {
+                    MergeEntry *e = rs.sorted[si];
+                    int ti;
+                    for (ti = 0; ti < e->n_tids; ti++)
+                    {
+                        int tries = 0;
+                        while (sm_add_grow(&tid_union, e->tids[ti]) == SM_IDX_MAX
+                               && ++tries < 64)
+                            ;   /* grow + retry, like the merge accumulator */
+                    }
+                }
+                run_n_tuples = (uint64) sm_cardinality(tid_union);
+                sm_free(tid_union);
+            }
+            else
+                run_n_tuples = 0;
+        }
+
         memset(&run, 0, sizeof(run));
         run.level = 1;
         run.flags = PG_TRE_RUN_LIVE;
         run.root_upper = run_root;
         run.root_range = InvalidBlockNumber;   /* runs have no range tier yet */
         run.n_trigrams = (uint64) k;
+        run.n_tuples = run_n_tuples;
         run.min_trigram_hash = lo_hash;
         run.max_trigram_hash = hi_hash;
         (void) pg_tre_run_catalog_append(index, &run);
@@ -1308,7 +1344,6 @@ pg_tre_pending_merge(Relation index)
         finalize_merge(index, meta.root_upper, meta.root_range,
                        meta.n_trigrams, meta.n_tuples_indexed,
                        wm_tail, wm_tail_n, &consumed);
-        run.n_tuples = consumed / 5;          /* ~5 trigrams/row estimate */
         n_merged = consumed;
 
         MemoryContextSwitchTo(old);

@@ -469,6 +469,16 @@ _PG_init(void)
     pg_tre_init_guc();
 
     /*
+     * Register the index reloption kind so per-index storage params
+     * (fastupdate, pending_list_limit, q, ...) are recognized.  Must
+     * happen at load time; without it pg_tre_relopt_kind stays 0 and
+     * every reloption is silently ignored (with a WARNING from
+     * amoptions).  Reloptions work for on-demand CREATE EXTENSION too,
+     * so this is NOT gated on shared_preload_libraries.
+     */
+    pg_tre_init_reloptions();
+
+    /*
      * Custom resource managers must be registered during preload.
      * When pg_tre is loaded on demand (CREATE EXTENSION without
      * shared_preload_libraries), skip the rmgr registration: the

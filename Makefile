@@ -45,7 +45,7 @@ DATA         = sql/pg_tre--2.0.0.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum testregex
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum reloptions testregex
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -251,6 +251,20 @@ $(shlib): $(TRE_LIB)
 # Query path depends on generated grammar.
 src/query/tokens.o src/query/extract.o: $(GRAMMAR_H)
 src/query/tre_grammar.o: $(GRAMMAR_C) $(GRAMMAR_H)
+
+# Generated prerequisites for EVERY object and its LLVM bitcode sibling.
+# Many sources transitively include TRE headers (tre-config.h) and the
+# generated grammar header; listing only a few objects above let `make
+# -j` race a compile ahead of TRE's ./configure or the Lime codegen
+# ("tre-config.h: No such file or directory").  Order-only (|) so a
+# stamp rebuild doesn't force a full recompile.  $(OBJS) and
+# $(with_llvm) come from the PGXS include above, so these rules see
+# the full object list.
+GEN_PREREQS = $(TRE_CONFIG_H) $(GRAMMAR_H) $(GRAMMAR_C)
+$(OBJS): | $(GEN_PREREQS)
+ifeq ($(with_llvm),yes)
+$(OBJS:.o=.bc): | $(GEN_PREREQS)
+endif
 
 # ------------------------------------------------------------------
 # Convenience targets
