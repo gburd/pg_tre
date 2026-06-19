@@ -46,7 +46,7 @@ DATA         = sql/pg_tre--2.0.1.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum reloptions testregex
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density reloptions testregex
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -96,6 +96,7 @@ OBJS = \
     src/pages/pending.o \
     src/pages/range.o \
     src/pages/run_catalog.o \
+    src/pages/free_log.o \
     src/wal/xlog.o \
     src/query/tre_grammar.o \
     src/query/tokens.o \

@@ -37,6 +37,7 @@
 #define XLOG_PTRE_PAGE_FORMAT_UPGRADE 0xC0
 #define XLOG_PTRE_POSTING_UNLINK     0xD0
 #define XLOG_PTRE_POSTING_RECYCLE    0xE0
+#define XLOG_PTRE_FREE_LOG           0xF0  /* v9: deferred page-free log (FPI) */
 
 #define XLOG_PTRE_OPMASK             0xF0
 

@@ -33,6 +33,7 @@
 #include "utils/rel.h"
 
 #include "pg_tre/amapi.h"
+#include "pg_tre/free_log.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/pending.h"
 #include "pg_tre/posting.h"
@@ -147,6 +148,25 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
      */
     recycled = pg_tre_posting_recycle_deleted(info->index, info->heaprel,
                                               &pending);
+
+    /*
+     * Drain the deferred page-free log (format v9): reclaim pages a
+     * prior VACUUM's Hanoi merge / collapse logged as belonging to a
+     * dropped run, now that their deletion XID has aged past the global
+     * visibility horizon (no scan could still be traversing the dropped
+     * run).  This is what bounds on-disk size across insert+VACUUM
+     * cycles: without it, merges shrink the run COUNT but leak the
+     * dropped runs' BYTES until REINDEX.  Pages still within the horizon
+     * stay logged and are added to pages_deleted (reclaimable later).
+     */
+    {
+        BlockNumber freelog_pending = 0;
+        BlockNumber freelog_recycled =
+            pg_tre_free_log_drain(info->index, info->heaprel,
+                                  &freelog_pending);
+        recycled += freelog_recycled;
+        pending += freelog_pending;
+    }
 
     /*
      * Report index-size statistics.  num_pages is the physical page

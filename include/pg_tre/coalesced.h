@@ -22,15 +22,36 @@
 #include "pg_tre/page.h"
 
 /*
- * Maximum serialized sparsemap (+ payload) size that is eligible for a
- * coalesced page.  Postings at or below PG_TRE_INLINE_POSTING_MAX go
- * inline in the upper leaf; postings above PG_TRE_COALESCE_MAX get a
- * dedicated posting tree.  The medium bucket in between is coalesced.
+ * Maximum serialized sparsemap size that is eligible for a coalesced
+ * page.  Postings at or below PG_TRE_INLINE_POSTING_MAX go inline in the
+ * upper leaf; postings above the cap get a dedicated posting tree.  The
+ * medium bucket in between is coalesced.
  *
- * Cap chosen so a coalesced page packs at least ~2-3 slots (a page that
- * fits only one slot is no denser than today's dedicated leaf).
+ * The cap is the largest blob for which AT LEAST TWO slots still fit on
+ * one page:
+ *
+ *     2 * (sizeof(slot) + MAXALIGN(cap)) <= pg_tre_coalesced_budget()
+ *
+ * A page that fits only one slot is no denser than today's dedicated
+ * leaf (and worse, because a coalesced slot drops its per-tuple payload
+ * -- the tier-3 pre-filter -- which a dedicated leaf keeps).  So the cap
+ * is pinned at the >=2-slots boundary: below it coalescing strictly wins
+ * on page count; above it a dedicated leaf is the right call.
+ *
+ * History: 2.0 shipped a fixed 3072, which only ever packed ~2 slots and
+ * left the entire (3072, single-leaf-budget] band -- the bulk of
+ * medium/high-cardinality trigrams on real corpora -- in dedicated
+ * one-page-each leaves (the 60.9 KB/row density blocker).  Widening to
+ * the >=2-slots boundary lets the existing coalesced writer absorb that
+ * whole band: postings in (2048, ~4056] now share pages 2-3 to a page
+ * instead of one each.  Additive: still gated by pg_tre.coalesce_enable,
+ * still format v8, no on-disk struct change.  See
+ * doc/specs/posting-page-coalescing.md and
+ * .agent/notes/blocker1-density-brief.md.
+ *
+ * Defined as an inline (pg_tre_coalesce_max) just below
+ * pg_tre_coalesced_budget(), which it depends on.
  */
-#define PG_TRE_COALESCE_MAX 3072
 
 /*
  * Sentinel for pg_tre_coalesced_resolve_slot's trigram_hash argument:
@@ -50,6 +71,29 @@ pg_tre_coalesced_budget(void)
          - MAXALIGN(sizeof(PgTreCoalescedHeader))
          - MAXALIGN(sizeof(PageTreOpaqueData));
 }
+
+/*
+ * Largest serialized sparsemap eligible for coalescing: the biggest
+ * sm_len for which AT LEAST TWO slots fit on one coalesced page.  Each
+ * coalesced slot costs sizeof(PgTreCoalescedSlot) + MAXALIGN(sm_len)
+ * (the coalesced path drops per-tuple payload, so only the sparsemap
+ * counts).  Requiring two-per-page guarantees coalescing strictly beats
+ * a dedicated single-page leaf; above this size a dedicated leaf is the
+ * right call (it keeps the tier-3 payload and uses the same one page).
+ * See the long-form rationale and history above pg_tre_coalesced_budget.
+ */
+static inline Size
+pg_tre_coalesce_max(void)
+{
+    Size half = pg_tre_coalesced_budget() / 2;
+    Size per_slot = half - sizeof(PgTreCoalescedSlot);
+    /* Round down to a MAXALIGN boundary so MAXALIGN(cap) == cap <= per_slot,
+     * i.e. 2 * (sizeof(slot) + MAXALIGN(cap)) <= budget holds exactly. */
+    return per_slot & ~((Size) (MAXIMUM_ALIGNOF - 1));
+}
+
+/* Back-compat name used by the build-path eligibility gate. */
+#define PG_TRE_COALESCE_MAX (pg_tre_coalesce_max())
 
 /*
  * Builder: accumulate (trigram_hash, sparsemap, payload) slots and emit

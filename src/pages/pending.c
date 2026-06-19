@@ -38,6 +38,7 @@
 
 #include "pg_tre/buffer.h"
 #include "pg_tre/hash.h"
+#include "pg_tre/free_log.h"
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/pending.h"
@@ -1295,37 +1296,27 @@ pg_tre_pending_merge(Relation index)
         run_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
 
         /*
-         * Faithful per-run accounting (introspection via
+         * Faithful-enough per-run accounting (introspection via
          * tre_run_catalog_status).  n_trigrams is the distinct-trigram
-         * count in this flush (k).  For n_tuples we count the distinct
-         * heap TIDs the run covers by unioning the per-trigram TID sets
-         * once here -- the merge already holds them in memory, so this
-         * is O(postings) with no extra I/O.  Must be computed BEFORE the
-         * append: the catalog record is written by the append, so a
-         * value set afterward (the old bug) persisted as 0.
+         * count in this flush (k).  n_tuples is the distinct heap-TID
+         * count the run covers; computing it exactly here meant building
+         * a second full sparsemap over EVERY (trigram, TID) pair --
+         * millions of sm_add_grow calls per flush, a large slice of the
+         * 50 s/flush cost the field report measured.  A heap TID recurs
+         * across ~5 trigrams, so estimate distinct TIDs as
+         * (sum of per-trigram cardinalities) / 5.  This is a cosmetic
+         * stat (planner selectivity / introspection); the estimate is
+         * the same approximation the non-run merge path already uses for
+         * n_tuples_indexed, and never affects correctness or atomicity.
          */
         {
-            sm_t *tid_union = sm_create(64);
-            int   si;
-            if (tid_union != NULL)
-            {
-                for (si = 0; si < k; si++)
-                {
-                    MergeEntry *e = rs.sorted[si];
-                    int ti;
-                    for (ti = 0; ti < e->n_tids; ti++)
-                    {
-                        int tries = 0;
-                        while (sm_add_grow(&tid_union, e->tids[ti]) == SM_IDX_MAX
-                               && ++tries < 64)
-                            ;   /* grow + retry, like the merge accumulator */
-                    }
-                }
-                run_n_tuples = (uint64) sm_cardinality(tid_union);
-                sm_free(tid_union);
-            }
-            else
-                run_n_tuples = 0;
+            uint64 total_postings = 0;
+            int    si;
+            for (si = 0; si < k; si++)
+                total_postings += (uint64) rs.sorted[si]->n_tids;
+            run_n_tuples = total_postings / 5;
+            if (run_n_tuples == 0 && total_postings > 0)
+                run_n_tuples = 1;
         }
 
         memset(&run, 0, sizeof(run));
@@ -1500,6 +1491,9 @@ pg_tre_collapse_runs(Relation index)
     uint32            n_runs;
     int               i, k;
     BlockNumber       new_root;
+    BlockNumber      *dropped_pages = NULL;
+    int               n_dropped = 0;
+    int               dropped_cap = 0;
 
     n_runs = pg_tre_run_count(index);
     if (n_runs <= 1)
@@ -1518,10 +1512,39 @@ pg_tre_collapse_runs(Relation index)
     mc.mcxt       = cxt;
     mc.pending_only = true;   /* postings come from the runs themselves */
 
-    /* Fold every live run's contents into the merge accumulator. */
+    /* Fold every live run's contents into the merge accumulator, and
+     * collect each run's pages (in the OUTER context) for deferred free:
+     * after the reset below, ALL old runs -- base included -- become
+     * unreachable, replaced by the freshly bulkloaded new_root. */
     it = pg_tre_run_catalog_open(index);
     while (pg_tre_run_catalog_next(it, &run))
+    {
         collapse_fold_run(index, run.root_upper, &mc, cxt);
+        {
+            int          rn = 0;
+            BlockNumber *rp;
+            MemoryContext o2 = MemoryContextSwitchTo(old);
+            rp = pg_tre_run_collect_pages(index, run.root_upper, &rn);
+            if (rn > 0)
+            {
+                if (n_dropped + rn > dropped_cap)
+                {
+                    int nc = (dropped_cap == 0)
+                                ? (n_dropped + rn) : dropped_cap * 2;
+                    if (nc < n_dropped + rn)
+                        nc = n_dropped + rn;
+                    dropped_pages = (dropped_pages == NULL)
+                        ? palloc(nc * sizeof(BlockNumber))
+                        : repalloc(dropped_pages, nc * sizeof(BlockNumber));
+                    dropped_cap = nc;
+                }
+                memcpy(dropped_pages + n_dropped, rp, rn * sizeof(BlockNumber));
+                n_dropped += rn;
+                pfree(rp);
+            }
+            MemoryContextSwitchTo(o2);
+        }
+    }
     pg_tre_run_catalog_close(it);
 
     /* Materialize the per-trigram unioned postings (no existing-union;
@@ -1551,6 +1574,13 @@ pg_tre_collapse_runs(Relation index)
 
     MemoryContextSwitchTo(old);
     MemoryContextDelete(cxt);
+
+    /* Defer-free the old runs' pages now that they are unreachable. */
+    if (n_dropped > 0)
+    {
+        pg_tre_free_log_append(index, dropped_pages, n_dropped);
+        pfree(dropped_pages);
+    }
     return n_runs;
 }
 
@@ -1575,6 +1605,35 @@ pg_tre_collapse_runs(Relation index)
  * concurrent catalog writers (the index's ShareUpdateExclusive).
  */
 #define PG_TRE_MAX_CATALOG_RUNS ((int) RUN_CATALOG_CAP)
+
+/*
+ * True if `root` is referenced by any run in runs[0..n_runs) at a
+ * different level than `dropped_level`, or equals the base run's root
+ * `base_root`.  A run whose root is shared this way must NOT have its
+ * pages defer-freed when it is dropped: the surviving run (or the base)
+ * still reaches those exact pages.  This guards the case where runs
+ * alias the base structure -- e.g. tre_debug_append_run registers runs
+ * sharing meta.root_upper -- so a Hanoi merge of those runs never frees
+ * the live base tree.  (Production flush-to-run builds a distinct fresh
+ * upper tree per run, so its roots never alias and every dropped run is
+ * freed.)
+ */
+static bool
+root_is_shared(BlockNumber root, BlockNumber base_root,
+               const PgTreRun *runs, int n_runs, uint32 dropped_level)
+{
+    int i;
+
+    if (!BlockNumberIsValid(root))
+        return true;            /* nothing to free anyway */
+    if (root == base_root)
+        return true;
+    for (i = 0; i < n_runs; i++)
+        if (runs[i].root_upper == root &&
+            (uint32) runs[i].level != dropped_level)
+            return true;
+    return false;
+}
 
 uint32
 pg_tre_hanoi_merge(Relation index)
@@ -1639,6 +1698,9 @@ pg_tre_hanoi_merge(Relation index)
             uint64        lo = UINT64_MAX, hi = 0, ntup = 0;
             BlockNumber   new_root;
             uint64        new_id;
+            BlockNumber  *dropped_pages = NULL;
+            int           n_dropped = 0;
+            int           dropped_cap = 0;
 
             cxt = AllocSetContextCreate(CurrentMemoryContext,
                        "pg_tre hanoi merge", ALLOCSET_DEFAULT_SIZES);
@@ -1659,6 +1721,46 @@ pg_tre_hanoi_merge(Relation index)
                     if (runs[i].min_trigram_hash < lo) lo = runs[i].min_trigram_hash;
                     if (runs[i].max_trigram_hash > hi) hi = runs[i].max_trigram_hash;
                     ntup += runs[i].n_tuples;
+
+                    /*
+                     * Collect this dropped run's pages (in the OUTER
+                     * context so they survive the cxt delete below) for
+                     * deferred free.  Skip runs whose root is shared by a
+                     * surviving run or the base (root_is_shared) -- those
+                     * pages are still live.  Done while the run is still
+                     * in the catalog and fully traversable; the actual
+                     * free is XID-gated in a later VACUUM via the free
+                     * log.
+                     */
+                    if (!root_is_shared(runs[i].root_upper, meta.root_upper,
+                                        runs, n_runs, target_level))
+                    {
+                        int          rn = 0;
+                        BlockNumber *rp;
+                        MemoryContext o2 = MemoryContextSwitchTo(old);
+                        rp = pg_tre_run_collect_pages(index,
+                                                      runs[i].root_upper, &rn);
+                        if (rn > 0)
+                        {
+                            if (n_dropped + rn > dropped_cap)
+                            {
+                                int nc = (dropped_cap == 0)
+                                            ? (n_dropped + rn) : dropped_cap * 2;
+                                if (nc < n_dropped + rn)
+                                    nc = n_dropped + rn;
+                                dropped_pages = (dropped_pages == NULL)
+                                    ? palloc(nc * sizeof(BlockNumber))
+                                    : repalloc(dropped_pages,
+                                               nc * sizeof(BlockNumber));
+                                dropped_cap = nc;
+                            }
+                            memcpy(dropped_pages + n_dropped, rp,
+                                   rn * sizeof(BlockNumber));
+                            n_dropped += rn;
+                            pfree(rp);
+                        }
+                        MemoryContextSwitchTo(o2);
+                    }
                 }
                 else
                 {
@@ -1708,6 +1810,20 @@ pg_tre_hanoi_merge(Relation index)
 
             MemoryContextSwitchTo(old);
             MemoryContextDelete(cxt);
+
+            /*
+             * The level-L runs are now out of the catalog.  Record their
+             * pages for XID-gated deferred free (dropped_pages lives in
+             * `old`, which survives the cxt delete above).  Append after
+             * the rewrite: a crash in between only leaks the pages (a
+             * later full reclaim / REINDEX recovers them), never frees a
+             * page a scan still follows.
+             */
+            if (n_dropped > 0)
+            {
+                pg_tre_free_log_append(index, dropped_pages, n_dropped);
+                pfree(dropped_pages);
+            }
         }
         passes++;
     }

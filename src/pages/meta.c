@@ -67,6 +67,13 @@ pg_tre_meta_init(Page page)
     meta->max_levels         = 7;
 
     /*
+     * Blocker 2 deferred page-free log: a fresh index has no logged
+     * pages.  Stamp explicitly so the on-disk page is self-describing.
+     */
+    meta->free_log_head      = InvalidBlockNumber;
+    meta->_pad_free_log      = 0;
+
+    /*
      * Place the lower/upper pointers past the meta struct so PageAddItem
      * (which we don't use on this page, but which PageInit expects to be
      * valid) remains self-consistent.
@@ -118,6 +125,17 @@ pg_tre_meta_read(Relation index, PgTreMetaPageData *out)
         out->max_levels = 7;
     if (out->next_run_id == 0)
         out->next_run_id = 1;
+
+    /*
+     * Blocker 2 free log.  An index built before this feature left this
+     * slot zero in the former reserved[] tail; 0 is a valid block
+     * number, so we cannot distinguish "head is block 0" from "unset".
+     * Block 0 is always the meta page and can never be a free-log page,
+     * so a zero here unambiguously means "no free log" ->
+     * InvalidBlockNumber.
+     */
+    if (out->free_log_head == 0)
+        out->free_log_head = InvalidBlockNumber;
 
     UnlockReleaseBuffer(buf);
 }

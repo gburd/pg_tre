@@ -44,7 +44,8 @@ typedef enum PageTreKind
     PG_TRE_PAGE_RANGE     = 6,
     PG_TRE_PAGE_PENDING   = 7,
     PG_TRE_PAGE_RUN_CATALOG = 8,    /* format v7: run/level catalog (Phase B1) */
-    PG_TRE_PAGE_POSTING_COALESCED = 9  /* format v8: multi-trigram posting page */
+    PG_TRE_PAGE_POSTING_COALESCED = 9, /* format v8: multi-trigram posting page */
+    PG_TRE_PAGE_FREE_LOG = 10       /* Blocker 2: deferred page-free log (additive) */
 } PageTreKind;
 
 /*
@@ -141,8 +142,21 @@ typedef struct PgTreMetaPageData
     uint32      n_runs;
     uint32      max_levels;
 
+    /*
+     * Blocker 2: deferred page-free log head.  A merge that drops a run
+     * records the run's now-unreachable pages here for XID-gated reclaim
+     * (see include/pg_tre/free_log.h).  Carved from the former
+     * reserved[] tail; zero on any index built before this feature,
+     * normalized to InvalidBlockNumber by pg_tre_meta_read -> "no free
+     * log", behaving exactly as before.  Additive: does NOT bump the
+     * on-disk format version (it is a new page KIND + meta field, not a
+     * new decode of an existing page).
+     */
+    BlockNumber free_log_head;
+    uint32      _pad_free_log;
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[22];
+    uint32      reserved[20];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;
@@ -246,29 +260,36 @@ typedef struct PgTreUpperLeafEntry
 /* ---- Coalesced posting page (format v8) ----
  *
  * Packs the postings of multiple trigrams onto one page, addressed by
- * a slot index carried in the upper-tree leaf entry.  Layout:
+ * a slot index carried in the upper-tree leaf entry.  Two-ended layout
+ * (heap-page style, see src/pages/coalesced.c):
  *
  *   [ PageHeaderData                  ]   24 B
  *   [ PgTreCoalescedHeader            ]    8 B   (content area start)
- *   [ PgTreCoalescedSlot[n_slots]     ]   16 B each (indirection table)
- *   [ packed sparsemap/payload blobs  ]   variable, grows up
- *   [ ... free space ...              ]
+ *   [ PgTreCoalescedSlot[n_slots]     ]   16 B each (table grows UP)
+ *   [ ... free hole ...               ]
+ *   [ packed sparsemap/payload blobs  ]   variable, grow DOWN
  *   [ PageTreOpaqueData               ]    8 B
  *
- * Offsets in the slot are from the start of the page.  pd_lower is set
- * to free_offset (past the last blob) so the whole written region is
- * below pd_lower and survives REGBUF_STANDARD hole-stripping in the
- * full-page-image WAL record.  A slot's trigram_hash is verification-
- * only: the upper-tree entry is authoritative for slot assignment, but
- * the stored hash lets a torn/corrupt page be caught rather than
- * returning a foreign trigram's TIDs.
+ * Offsets in the slot are absolute (from the start of the page), so the
+ * read path is independent of the growth direction.  pd_lower is set
+ * past the indirection table and pd_upper to free_offset (the lowest
+ * blob start); the only stripped region under REGBUF_STANDARD is the
+ * hole between them, so both the table and the blobs survive the
+ * full-page-image WAL record.  Growing the table and the blobs from
+ * opposite ends makes a table/blob collision impossible (the
+ * single-ended pre-2.0.2 writer placed slot 0's blob where slot 1's
+ * table entry would land, clobbering it -- fixed by this layout).  A
+ * slot's trigram_hash is verification-only: the upper-tree entry is
+ * authoritative for slot assignment, but the stored hash lets a
+ * torn/corrupt page be caught rather than returning a foreign
+ * trigram's TIDs.
  */
 #define PG_TRE_COALESCED_SM_INVALID 0   /* sm_offset == 0 marks a dead slot */
 
 typedef struct PgTreCoalescedHeader
 {
     uint16      n_slots;        /* indirection-table entries */
-    uint16      free_offset;    /* next free byte, from page start */
+    uint16      free_offset;    /* low edge of blob region (== pd_upper) */
     uint32      _pad0;
 } PgTreCoalescedHeader;
 
@@ -331,6 +352,27 @@ typedef struct PgTreRunCatalogHeader
     uint32      n_entries;          /* PgTreRun records on this page */
     uint32      _pad0;
 } PgTreRunCatalogHeader;
+
+/* ---- Deferred page-free log (Blocker 2; additive, no format bump) ----
+ *
+ * A chain of pages, each an array of (block, deletion-XID) records of
+ * pages awaiting XID-gated reclaim (a dropped run's upper/posting/
+ * coalesced pages -- see include/pg_tre/free_log.h).  meta.free_log_head
+ * points at the head; pages chain via right_link.  Drained by VACUUM.
+ */
+typedef struct PgTreFreeLogHeader
+{
+    BlockNumber right_link;         /* next free-log page, or Invalid */
+    uint32      n_entries;          /* PgTreFreeLogEntry records here */
+    uint32      _pad0;
+} PgTreFreeLogHeader;              /* 12 bytes (16 MAXALIGNed), like the run catalog header */
+
+typedef struct PgTreFreeLogEntry
+{
+    BlockNumber block;              /* block awaiting reclaim */
+    uint32      _pad0;
+    uint64      del_xid_value;      /* FullTransactionId.value at free time */
+} PgTreFreeLogEntry;                /* 16 bytes, 8-aligned */
 
 /* ---- Range summary page header (format v5+) ----
  *

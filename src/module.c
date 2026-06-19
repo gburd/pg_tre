@@ -153,10 +153,15 @@ pg_tre_init_guc(void)
         " index's page count.  Results are byte-identical (the executor"
         " rechecks every row); only on-disk size changes.  Format v8"
         " (additive: v6/v7 indexes read unchanged, no REINDEX).  Off by"
-        " default: maintenance-safe (VACUUM/merge are coalesced-aware)"
-        " but gave no measurable size win on tested corpora, and adds"
-        " slot-resolution overhead on read.  See"
-        " doc/specs/posting-page-coalescing.md and bench results.",
+        " default: maintenance-safe (VACUUM/merge are coalesced-aware)."
+        " The coalesce cap is the >=2-slots-per-page boundary (~4056 B),"
+        " so the whole medium band packs 2-3 postings per page instead of"
+        " one dedicated 8 KB leaf each -- a measured 1.2x-1.6x index-size"
+        " reduction on corpora with a medium-cardinality trigram tail."
+        " Adds slot-resolution overhead on read and drops the per-tuple"
+        " tier-3 pre-filter for coalesced trigrams (recheck still"
+        " authoritative).  See doc/specs/posting-page-coalescing.md and"
+        " .agent/notes/blocker1-density-brief.md.",
         &pg_tre_coalesce_enable,
         false, PGC_USERSET, 0, NULL, NULL, NULL);
 

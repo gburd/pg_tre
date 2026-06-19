@@ -187,6 +187,23 @@ pg_tre_upgrade_page_to_latest(Page page)
             meta->max_levels = 7;
     }
 
+    /*
+     * Blocker 2 free log: an index built before this feature left
+     * free_log_head zero in the former reserved[] tail.  Block 0 is
+     * always the meta page, so zero unambiguously means "no free log";
+     * stamp InvalidBlockNumber so the upgraded page is self-describing
+     * (matches pg_tre_meta_init).  This is additive and does not change
+     * the page's format_version.
+     */
+    if (opq->page_kind == (uint16) PG_TRE_PAGE_META)
+    {
+        PgTreMetaPage meta = PgTreMetaPageGet(page);
+
+        if (meta->free_log_head == 0)
+            meta->free_log_head = InvalidBlockNumber;
+        meta->_pad_free_log = 0;
+    }
+
     opq->format_version = PG_TRE_FORMAT_VERSION_LATEST;
     return true;
 }

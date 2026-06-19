@@ -81,12 +81,21 @@ pg_tre_coalesced_writer_begin(Relation index)
 /*
  * Initialize a freshly-extended coalesced page for filling.
  *
- * Layout grows monotonically: the indirection table appends forward
- * from just past the header, and each blob is placed at-or-after the
- * current table end.  free_offset tracks the high-water mark of
- * everything written.  Because every slot offset is absolute and each
- * new blob is placed past both free_offset and the (grown) table end,
- * appending a slot can never overwrite an existing blob.
+ * Two-ended layout (heap-page style): the indirection table grows UP
+ * from just past the header, and blobs grow DOWN from the end of the
+ * usable content area (just before the opaque trailer).  The free hole
+ * lies between them.  free_offset tracks the low edge of the blob
+ * region (== the lowest blob start written so far).  Growing the table
+ * and the blobs from opposite ends makes a table/blob collision
+ * impossible: a new table entry only ever extends pd_lower upward, and
+ * a new blob only ever extends the blob region downward; the per-add
+ * guard rolls to a fresh page before the two regions would meet.
+ *
+ * (The pre-2.0.2 writer grew both from the low end, placing slot 0's
+ * blob exactly where slot 1's table entry would later be written --
+ * the table entry then clobbered the head of slot 0's blob.  That bug
+ * was latent while pages rarely held >1 slot; it surfaced once the
+ * coalesce band widened to pack 2-3 slots per page.)
  */
 static void
 open_page(PgTreCoalescedWriter *w)
@@ -95,17 +104,21 @@ open_page(PgTreCoalescedWriter *w)
     w->page = BufferGetPage(w->buf);
     w->hdr = (PgTreCoalescedHeader *) PageGetContents(w->page);
     w->hdr->n_slots = 0;
-    w->hdr->free_offset = (uint16)
-        (MAXALIGN(SizeOfPageHeaderData) + MAXALIGN(sizeof(PgTreCoalescedHeader)));
+    /* free_offset = low edge of the (initially empty) blob region: the
+     * top of the usable content area, i.e. just below the opaque
+     * trailer.  Blobs are placed by subtracting from this. */
+    w->hdr->free_offset = (uint16) (BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData)));
     w->hdr->_pad0 = 0;
     w->slots = (PgTreCoalescedSlot *)
         (((char *) PageGetContents(w->page)) + MAXALIGN(sizeof(PgTreCoalescedHeader)));
 }
 
 /*
- * Finalize the open page: set pd_lower to free_offset (so the entire
- * written region is below pd_lower and survives FPI hole-stripping),
- * WAL-log it, and release.
+ * Finalize the open page: set pd_lower past the indirection table and
+ * pd_upper to the low edge of the blob region (free_offset).  The hole
+ * between pd_lower and pd_upper is the only stripped region under
+ * REGBUF_STANDARD; the table (below pd_lower) and the blobs (at/above
+ * pd_upper) both survive FPI hole-stripping.  WAL-log and release.
  */
 static void
 flush_page(PgTreCoalescedWriter *w)
@@ -117,7 +130,11 @@ flush_page(PgTreCoalescedWriter *w)
      * exclusive from pg_tre_extend); do the dirty + WAL atomically. */
     START_CRIT_SECTION();
 
-    ((PageHeader) w->page)->pd_lower = w->hdr->free_offset;
+    ((PageHeader) w->page)->pd_lower =
+        (uint16) (MAXALIGN(SizeOfPageHeaderData)
+                  + MAXALIGN(sizeof(PgTreCoalescedHeader))
+                  + (Size) w->hdr->n_slots * sizeof(PgTreCoalescedSlot));
+    ((PageHeader) w->page)->pd_upper = w->hdr->free_offset;
 
     MarkBufferDirty(w->buf);
 
@@ -172,58 +189,60 @@ pg_tre_coalesced_add(PgTreCoalescedWriter *w,
         open_page(w);
 
     /*
-     * Compute where this slot's blobs would actually land on the
-     * current page and roll to a fresh page if they (or the table
-     * entry) would not fit.  The placement mirrors the write below
-     * exactly so the guard cannot under-count: blobs go past whichever
-     * is higher, the current free_offset or the end of the table after
-     * appending one more row.
+     * Two-ended placement.  The blob region grows DOWN from free_offset
+     * (the current low edge of the blobs, initialized to the top of the
+     * usable content area).  The indirection table grows UP; after this
+     * append it ends at table_end.  Roll to a fresh page if the new
+     * blob's bottom would drop below the table's (post-append) top, or
+     * if the slot-count cap is hit.
      */
     {
-        Size usable_end = (Size) (BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData)));
-        Size table_end = ((char *) &w->slots[w->hdr->n_slots + 1])
-                       - (char *) w->page;
-        Size place = MAXALIGN(Max((Size) w->hdr->free_offset, table_end));
-        Size end = place + sm_len;
+        Size content_start = MAXALIGN(SizeOfPageHeaderData)
+                           + MAXALIGN(sizeof(PgTreCoalescedHeader));
+        Size align = (Size) (MAXIMUM_ALIGNOF - 1);
+        Size table_end = content_start
+                       + (Size) (w->hdr->n_slots + 1) * sizeof(PgTreCoalescedSlot);
+        Size top = (Size) w->hdr->free_offset;
+        Size sm_lo;
+        Size blob_lo;
 
+        /* sparsemap occupies [sm_lo, sm_lo + sm_len), MAXALIGN'd down. */
+        sm_lo = (top - sm_len) & ~align;
+        blob_lo = sm_lo;
         if (payload_len > 0)
-            end = MAXALIGN(end) + payload_len;
+            blob_lo = (sm_lo - payload_len) & ~align;
 
-        if (end > usable_end || w->hdr->n_slots >= COALESCED_MAX_SLOTS)
+        /* Underflow guard: if sm_len/payload_len exceed top the
+         * subtraction wraps; detect via blob_lo < content_start or a
+         * wrap that puts blob_lo above top. */
+        if (blob_lo < table_end
+            || blob_lo > top
+            || w->hdr->n_slots >= COALESCED_MAX_SLOTS)
         {
             flush_page(w);
             open_page(w);
+
+            /* Recompute on the fresh (empty) page. */
+            table_end = content_start + (Size) 1 * sizeof(PgTreCoalescedSlot);
+            top = (Size) w->hdr->free_offset;
+            sm_lo = (top - sm_len) & ~align;
+            blob_lo = sm_lo;
+            if (payload_len > 0)
+                blob_lo = (sm_lo - payload_len) & ~align;
         }
-    }
 
-    /*
-     * Append the table entry at slots[n_slots], then place the blobs
-     * past whichever is higher: the current free_offset or the end of
-     * the table after this append.  Placing past the grown table end
-     * guarantees the next slot's table row (a lower address) never
-     * lands on this blob.
-     */
-    slot = &w->slots[w->hdr->n_slots];
-
-    {
-        Size table_end = ((char *) &w->slots[w->hdr->n_slots + 1])
-                       - (char *) w->page;
-        Size place = Max((Size) w->hdr->free_offset, table_end);
-
-        sm_at = MAXALIGN(place);
+        /* Write the blobs at the carved positions. */
+        sm_at = sm_lo;
         memcpy((char *) w->page + sm_at, sm_data, sm_len);
-
         if (payload_len > 0 && payload_data != NULL)
         {
-            payload_at = MAXALIGN(sm_at + sm_len);
+            payload_at = blob_lo;
             memcpy((char *) w->page + payload_at, payload_data, payload_len);
-            w->hdr->free_offset = (uint16) (payload_at + payload_len);
         }
-        else
-        {
-            w->hdr->free_offset = (uint16) (sm_at + sm_len);
-        }
+        w->hdr->free_offset = (uint16) blob_lo;
     }
+
+    slot = &w->slots[w->hdr->n_slots];
 
     slot->sm_offset      = (uint16) sm_at;
     slot->sm_length      = (uint16) sm_len;

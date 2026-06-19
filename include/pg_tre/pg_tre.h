@@ -70,6 +70,16 @@
  * unchanged under v8 code with NO REINDEX.  (Contrast the v5->v6
  * sparsemap break, which required REINDEX.)  See
  * doc/specs/phaseB1-run-catalog.md and doc/onpage_format.md.
+ *
+ * The deferred page-free log (meta.free_log_head + the
+ * PG_TRE_PAGE_FREE_LOG page kind, added for Blocker 2) is ALSO purely
+ * additive but does NOT bump LATEST: it introduces a new page KIND and
+ * a meta field carved from the former reserved[] tail, not a new
+ * decode format of any existing page, and is detected entirely by
+ * free_log_head != InvalidBlockNumber (zero on a pre-free-log index).
+ * A from-scratch build still reports format v8.  A coordinated future
+ * release can fold this into a v9 LATEST bump once the format-version
+ * regression assertions are reconciled.
  */
 #define PG_TRE_FORMAT_VERSION_LATEST 8
 #define PG_TRE_FORMAT_VERSION_MIN    6

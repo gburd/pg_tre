@@ -206,6 +206,7 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_VACUUM:            /* Phase 7: leaf repack FPI */
         case XLOG_PTRE_POSTING_UNLINK:    /* 1.5.5: chain unlink (2 FPI) */
         case XLOG_PTRE_POSTING_RECYCLE:   /* 1.5.5: deleted->blank reinit FPI */
+        case XLOG_PTRE_FREE_LOG:          /* v9: free-log append/reclaim (FPI) */
         case XLOG_PTRE_PAGE_FORMAT_UPGRADE: /* 1.4.0-dev: in-place upgrade */
             /*
              * Phase 2/4/5 emit these as full-page images.  Phase 7
@@ -253,6 +254,7 @@ pg_tre_identify(uint8 info)
         case XLOG_PTRE_VACUUM:          return "VACUUM";
         case XLOG_PTRE_POSTING_UNLINK:  return "POSTING_UNLINK";
         case XLOG_PTRE_POSTING_RECYCLE: return "POSTING_RECYCLE";
+        case XLOG_PTRE_FREE_LOG:        return "FREE_LOG";
         case XLOG_PTRE_PAGE_FORMAT_UPGRADE: return "PAGE_FORMAT_UPGRADE";
         default:                        return NULL;
     }
