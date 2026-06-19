@@ -171,6 +171,7 @@
 #define sm_add                      SM__P(sm_add)
 #define sm_add_grow                 SM__P(sm_add_grow)
 #define sm_add_many                 SM__P(sm_add_many)
+#define sm_add_many_grow            SM__P(sm_add_many_grow)
 #define sm_add_range                SM__P(sm_add_range)
 #define sm_and                      SM__P(sm_and)
 #define sm_andnot                   SM__P(sm_andnot)
@@ -1056,17 +1057,37 @@ double sm_jaccard_index(const sm_t *a, const sm_t *b);
 
 /** @brief Add N indices from an array.
  *
- * Equivalent to a loop over `sm_add(map, arr[i])` but slightly more
- * efficient when `arr` is already sorted (no formal contract that it
- * must be -- unsorted input still works, just slower).
+ * Equivalent to a loop over `sm_add(map, arr[i])`, but sorts a private
+ * copy of `arr` ascending first, so the cost is O(n log n + n)
+ * regardless of caller order.  (A raw unsorted loop is O(n^2): the
+ * map's tail-chunk cursor only accelerates ascending inserts, so
+ * random-order inserts each do a full chunk walk + byte-shift.)  The
+ * caller's array is const and untouched.
  *
  * @param[in,out] map  Destination.
- * @param[in]     arr  Array of indices.
+ * @param[in]     arr  Array of indices (any order).
  * @param[in]     n    Length of `arr`.
- * @returns true if every add succeeded; false if any add returned
- *          SPARSEMAP_IDX_MAX (capacity exhausted).
+ * @returns true if every add succeeded; false if a scratch allocation
+ *          failed or any add returned SPARSEMAP_IDX_MAX (capacity
+ *          exhausted -- use sm_add_many_grow to grow instead).
  */
 bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
+
+/** @brief Add N indices, growing the buffer as needed.
+ *
+ * Like sm_add_many but takes `sm_t **` and uses sm_add_grow, so the
+ * buffer is realloc'd geometrically on ENOSPC instead of failing.
+ * Sorts a private copy of `arr` ascending first (same O(n log n + n)
+ * rationale).  This is the bulk-build entry point for callers that
+ * accumulate an unbounded TID stream.
+ *
+ * @param[in,out] map  Destination (may be realloc'd; *map is updated).
+ * @param[in]     arr  Array of indices (any order).
+ * @param[in]     n    Length of `arr`.
+ * @returns true on success; false if a scratch allocation failed or
+ *          sm_add_grow exhausted its grow retries.
+ */
+bool sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n);
 
 /** @brief Materialize all set bits as a uint64_t array.
  *

@@ -631,23 +631,6 @@ cmp_merge_hash(const void *a, const void *b)
     return 0;
 }
 
-/*
- * Ascending packed-TID comparator.  pg_tre_pack_tid() is
- * (block << 16) | offset, so numeric order == heap-TID order; feeding
- * TIDs to the sparsemap in this order keeps inserts on the ascending
- * tail-chunk fast path (O(N) total) instead of the random-insert
- * fall-back (a full chunk walk + memmove per insert -> O(N^2)).
- */
-static int
-cmp_packed_tid(const void *a, const void *b)
-{
-    uint64 ta = *(const uint64 *) a;
-    uint64 tb = *(const uint64 *) b;
-    if (ta < tb) return -1;
-    if (ta > tb) return 1;
-    return 0;
-}
-
 /* Pre-materialize the "merged posting" for each MergeEntry: union
  * existing posting with new_tids, serialize.  Called once before
  * rebuild iteration starts. */
@@ -661,7 +644,6 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
         PgTreUpperRef ref;
         sm_t *existing;
         sm_t *merged;
-        int k;
         size_t sz;
         uint8 *out_buf;
         sm_t *fresh;
@@ -671,11 +653,14 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
 
         /*
          * Convert our collected uint64 TID array to a malloc-backed
-         * sparsemap.  We start with a generous initial capacity
-         * (16 B/TID + 1 KiB overhead) and use sm_add_grow() so the
-         * buffer doubles geometrically on ENOSPC — sparse / scattered
-         * TID streams can incur a fresh chunk header per TID, blowing
-         * past any static estimate.
+         * sparsemap via the bulk insert, which sorts internally so the
+         * map's tail-chunk cursor stays on its O(N) fast path.  (Without
+         * sorting, inserting the pending list's heap-scan-ordered TIDs
+         * one at a time is O(N^2): each sm_add falls back to a full
+         * chunk walk + byte-shift -- the dominant cost in the 50 s /
+         * 10k-row flush the field report measured.)  Initial capacity is
+         * generous (16 B/TID + 1 KiB); sm_add_many_grow doubles the
+         * buffer geometrically on ENOSPC.
          */
         {
             size_t cap = (size_t) e->n_tids * 16 + 1024;
@@ -683,32 +668,16 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             if (fresh_acc == NULL)
                 ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                     errmsg("pg_tre: merge accumulator allocation failed")));
-            /*
-             * Insert in ascending TID order so the sparsemap's tail-
-             * chunk cursor stays valid (O(N) build).  The pending list
-             * collects TIDs in heap-scan / insertion order, effectively
-             * random per trigram; without this sort each sm_add_grow
-             * falls back to a full chunk walk + memmove, making a flush
-             * O(N^2) -- the dominant cost in the 50 s / 10k-row flush the
-             * field report measured.
-             */
-            if (e->n_tids > 1)
-                qsort(e->tids, (size_t) e->n_tids, sizeof(uint64),
-                      cmp_packed_tid);
-            for (k = 0; k < e->n_tids; k++)
+            if (e->n_tids > 0 &&
+                !sm_add_many_grow(&fresh_acc,
+                                  (const uint64_t *) e->tids,
+                                  (size_t) e->n_tids))
             {
-                int retries = 0;
-                while (sm_add_grow(&fresh_acc, e->tids[k]) == SM_IDX_MAX)
-                {
-                    if (++retries > 16)
-                    {
-                        size_t final_cap = sm_get_capacity(fresh_acc);
-                        sm_free(fresh_acc);
-                        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                            errmsg("pg_tre: merge accumulator sm_add_grow exhausted retries (k=%d, n_tids=%d, cap=%zu)",
-                                   k, e->n_tids, final_cap)));
-                    }
-                }
+                size_t final_cap = sm_get_capacity(fresh_acc);
+                sm_free(fresh_acc);
+                ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                    errmsg("pg_tre: merge accumulator bulk insert failed (n_tids=%d, cap=%zu)",
+                           e->n_tids, final_cap)));
             }
             merged = fresh_acc;
         }

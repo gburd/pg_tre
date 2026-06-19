@@ -5806,17 +5806,90 @@ sm_jaccard_index(const sm_t *a, const sm_t *b)
 	return (union_ == 0 ? 0.0 : (double)intersect / (double)union_);
 }
 
+/* Ascending uint64_t comparator for the bulk-insert sort below. */
+static int
+__sm_cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a;
+	uint64_t y = *(const uint64_t *)b;
+	return ((x > y) - (x < y));
+}
+
 bool
 sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 {
+	uint64_t *sorted;
+	bool ok = true;
+
 	if (map == NULL || (arr == NULL && n > 0))
 		return (false);
+	if (n == 0)
+		return (true);
+	if (n == 1)
+		return (sm_add(map, arr[0]) != SM_IDX_MAX);
+
+	/*
+	 * Sort a private copy ascending before inserting.  The map's
+	 * tail-chunk cursor only makes ascending inserts O(N) total; for
+	 * unsorted input each sm_add falls back to a full chunk walk plus a
+	 * byte-shift, making the loop O(N^2).  Sorting first guarantees O(N
+	 * log N + N) regardless of caller order.  The caller's array is
+	 * const and left untouched.  Allocate the scratch through the map's
+	 * allocator (libc by default).
+	 */
+	sorted = (uint64_t *) __sm_alloc(&map->m_allocator, n * sizeof(uint64_t));
+	if (sorted == NULL)
+		return (false);
+	memcpy(sorted, arr, n * sizeof(uint64_t));
+	qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
 	for (size_t i = 0; i < n; i++) {
-		if (sm_add(map, arr[i]) == SM_IDX_MAX) {
-			return (false);
+		if (sm_add(map, sorted[i]) == SM_IDX_MAX) {
+			ok = false;
+			break;
 		}
 	}
-	return (true);
+	__sm_free(&map->m_allocator, sorted);
+	return (ok);
+}
+
+/*
+ * Growing bulk insert: like sm_add_many but takes sm_t** and uses
+ * sm_add_grow, so the buffer is realloc'd geometrically on ENOSPC
+ * instead of failing.  Sorts a private copy first (same O(N) rationale
+ * as sm_add_many).  Returns true on success; false only if a scratch
+ * allocation fails or sm_add_grow exhausts its grow retries.
+ */
+bool
+sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
+{
+	uint64_t *sorted;
+	bool ok = true;
+
+	if (map == NULL || *map == NULL || (arr == NULL && n > 0))
+		return (false);
+	if (n == 0)
+		return (true);
+
+	sorted = (uint64_t *) __sm_alloc(&(*map)->m_allocator,
+	                                 n * sizeof(uint64_t));
+	if (sorted == NULL)
+		return (false);
+	memcpy(sorted, arr, n * sizeof(uint64_t));
+	if (n > 1)
+		qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
+	for (size_t i = 0; i < n; i++) {
+		int retries = 0;
+		while (sm_add_grow(map, sorted[i]) == SM_IDX_MAX) {
+			if (++retries > 16) {
+				ok = false;
+				break;
+			}
+		}
+		if (!ok)
+			break;
+	}
+	__sm_free(&(*map)->m_allocator, sorted);
+	return (ok);
 }
 
 void
