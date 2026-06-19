@@ -6,6 +6,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.0.2] - 2026-06-19 - density, compaction reclaim, and the O(N^2) flush fix
+
+Bug-fix / performance patch addressing the two blockers from the v2.0.0
+production field report.  No on-disk format, WAL, or SQL-surface change;
+`ALTER EXTENSION pg_tre UPDATE TO '2.0.2'` is a no-op catalog upgrade
+(format stays v8, no REINDEX).  All three v2.0 LSM/coalescing GUCs remain
+default-off; default behavior is byte-identical to 2.0.1.
+
+### Fixed
+
+- **Flush/merge was O(N^2) (the 50 s / 10k-row flush).**
+  `materialize_merged_postings` built each trigram's sparsemap by
+  inserting TIDs in pending-list / heap-scan order -- effectively random
+  per trigram.  The sparsemap's tail-chunk cursor only accelerates
+  *ascending* inserts; random inserts fall back to a full chunk walk +
+  byte-shift each, making the build quadratic.  Fixed at the library
+  level: `sm_add_many` now sorts a private copy ascending, and a new
+  `sm_add_many_grow` is the growable bulk-build entry point the merge
+  path uses.  Microbench: 78x-623x faster, the gap growing with N (the
+  O(N^2) -> O(N) signature).  Results identical (a sparsemap is a set).
+- **Latent coalesced-page data corruption (false negatives).** Widening
+  the coalesce band (below) exposed a v2.0 bug: the single-ended
+  coalesced-page writer placed slot 0's blob where slot 1's table entry
+  would land, clobbering it, so a coalesced trigram could return 0 rows.
+  Rewrote the writer to a two-ended (heap-page-style) layout; the reader
+  is offset-driven so pages stay self-describing and v8-compatible.
+- **VACUUM compaction grew the index instead of bounding it.** Hanoi
+  merge / collapse bounded the run *count* but orphaned the dropped
+  runs' pages, which leaked until REINDEX.  Added a crash-safe,
+  XID-gated deferred page-free log (`PG_TRE_PAGE_FREE_LOG`,
+  `meta.free_log_head` carved from `reserved[]` -- meta size unchanged):
+  a merge records dropped pages there after the catalog swap;
+  `amvacuumcleanup` drains entries whose XID has aged past all scans.
+
+### Changed
+
+- **Coalescing engages broadly now (denser index).** The coalesce band
+  was a narrow fixed `(2048, 3072]`; most medium/high-cardinality
+  trigram postings fell through to one dedicated 8 KB leaf each (the
+  ~26x size gap vs pg_trgm the report measured).  The cap is now derived
+  (`pg_tre_coalesce_max()`, ~4056 B = the ">=2 slots fit a page"
+  boundary), so those postings pack 2-3 per coalesced page: 18-40%
+  smaller index (corpus-dependent), still behind `pg_tre.coalesce_enable`.
+
+### Notes
+
+- The O(N^2) fix lives in the vendored sparsemap (`sm_add_many` /
+  `sm_add_many_grow`); it was made in the canonical sparsemap library
+  too, which tracks a TODO to port it to the Rust sparsemap.
+- Throughput beyond the O(N^2) fix (e.g. the structural Hanoi-merge cost
+  on very large run counts) remains future work; the quadratic build was
+  the dominant per-flush cost and is now linear.
+
+### Acknowledgements
+
+- The pg.ddx.io / agora operator, whose v2.0.0 evaluation pinpointed
+  both the density and compaction blockers with exact reproductions.
+
+---
+
 ## [2.0.1] - 2026-06-19 - field-report fixes (reloptions, parallel build, run accounting)
 
 Bug-fix patch from a v2.0.0 production evaluation.  No on-disk format,
