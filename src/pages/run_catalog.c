@@ -644,3 +644,117 @@ tre_coalesced_page_count(PG_FUNCTION_ARGS)
     relation_close(index, AccessShareLock);
     PG_RETURN_INT64(count);
 }
+
+
+/*
+ * tre_page_kind_histogram(idx regclass)
+ *   RETURNS TABLE(page_kind text, n_pages bigint,
+ *                 used_bytes bigint, used_pct numeric)
+ *
+ * Diagnostic: walk every block of the index and tally page counts by
+ * kind, plus total used bytes per kind (pd_lower, i.e. header + written
+ * content).  Read-only, AccessShareLock, no format dependency.  Tells an
+ * operator (or a regression) WHICH page kind dominates an index's size
+ * and whether those pages are full or mostly empty -- the fast way to
+ * localize a density blowup to a specific allocator.  "new/empty" counts
+ * pages the relation was extended to but never initialized.
+ */
+PG_FUNCTION_INFO_V1(tre_page_kind_histogram);
+Datum
+tre_page_kind_histogram(PG_FUNCTION_ARGS)
+{
+    Oid                 relid = PG_GETARG_OID(0);
+    ReturnSetInfo      *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Relation            index;
+    BlockNumber         nblocks;
+    BlockNumber         blk;
+    TupleDesc           tupdesc;
+    Tuplestorestate    *tupstore;
+    MemoryContext       per_query_ctx;
+    MemoryContext       oldcontext;
+
+    /* kind ids 0..10 plus a "new/empty" bucket at index 11. */
+#define PKH_NKINDS 12
+    int64   pages[PKH_NKINDS];
+    int64   used[PKH_NKINDS];
+    int     i;
+    static const char *kind_name[PKH_NKINDS] = {
+        "invalid", "meta", "upper", "upper_leaf", "posting",
+        "posting_leaf", "range", "pending", "run_catalog",
+        "posting_coalesced", "free_log", "new_or_empty"
+    };
+
+    if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("set-valued function called in context that "
+                        "cannot accept a set")));
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        elog(ERROR, "return type must be a row type");
+
+    per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+    oldcontext = MemoryContextSwitchTo(per_query_ctx);
+    tupstore = tuplestore_begin_heap(true, false, work_mem);
+    rsinfo->returnMode = SFRM_Materialize;
+    rsinfo->setResult = tupstore;
+    rsinfo->setDesc = tupdesc;
+    MemoryContextSwitchTo(oldcontext);
+
+    for (i = 0; i < PKH_NKINDS; i++)
+    {
+        pages[i] = 0;
+        used[i] = 0;
+    }
+
+    index = relation_open(relid, AccessShareLock);
+    nblocks = RelationGetNumberOfBlocks(index);
+
+    for (blk = 0; blk < nblocks; blk++)
+    {
+        Buffer  buf = ReadBuffer(index, blk);
+        Page    page;
+        int     slot;
+
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+
+        if (PageIsNew(page))
+        {
+            slot = PKH_NKINDS - 1;   /* new_or_empty */
+        }
+        else
+        {
+            uint16 kind = PageTreGetOpaque(page)->page_kind;
+            slot = (kind < PKH_NKINDS - 1) ? (int) kind : 0;
+            used[slot] += (int64) ((PageHeader) page)->pd_lower;
+        }
+        pages[slot]++;
+        UnlockReleaseBuffer(buf);
+    }
+
+    relation_close(index, AccessShareLock);
+
+    for (i = 0; i < PKH_NKINDS; i++)
+    {
+        Datum   values[4];
+        bool    nulls[4] = {false, false, false, false};
+        char    buf[32];
+        int64   cap = pages[i] * (int64) BLCKSZ;
+
+        if (pages[i] == 0)
+            continue;
+
+        values[0] = CStringGetTextDatum(kind_name[i]);
+        values[1] = Int64GetDatum(pages[i]);
+        values[2] = Int64GetDatum(used[i]);
+        snprintf(buf, sizeof(buf), "%.1f",
+                 cap > 0 ? (100.0 * (double) used[i] / (double) cap) : 0.0);
+        values[3] = DirectFunctionCall3(numeric_in, CStringGetDatum(buf),
+                                        ObjectIdGetDatum(InvalidOid),
+                                        Int32GetDatum(-1));
+        tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+    }
+#undef PKH_NKINDS
+
+    return (Datum) 0;
+}
