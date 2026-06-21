@@ -1,4 +1,4 @@
--- pg_tre 2.0.2 -- native index AM for approximate regex matching.
+-- pg_tre 2.0.3-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -235,7 +235,7 @@ ALTER OPERATOR FAMILY tre_text_ops USING tre ADD
     OPERATOR 2 <@> (text, tre_pattern) FOR ORDER BY integer_ops;
 
 -- ---------------------------------------------------------------
--- 2.0.2 (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
+-- 2.0.3-dev (Phase A / A1): LIKE / ILIKE / ~ / ~* / = acceleration.
 -- Bind the built-in text pattern operators so the planner uses a
 -- pg_tre index for col LIKE '%foo%', col ~ 'fo+o', col = 'foo'.
 -- Each lowers to the trigram engine at k=0; the executor rechecks
@@ -312,7 +312,7 @@ COMMENT ON FUNCTION tre_run_catalog_status(regclass) IS
     'index reports a single implicit run rooted at the index roots.';
 
 -- ---------------------------------------------------------------
--- 2.0.2: pg_trgm-compatible trigram-set similarity (Phase A / A2).
+-- 2.0.3-dev: pg_trgm-compatible trigram-set similarity (Phase A / A2).
 -- Cheap, stateless Jaccard similarity over pg_trgm's trigram model;
 -- distinct from edit-distance tre_similarity / <@>.
 -- ---------------------------------------------------------------
@@ -340,7 +340,7 @@ CREATE OPERATOR <-> (
 );
 
 -- ---------------------------------------------------------------
--- 2.0.2 (Phase A / A2 remainder): word_similarity operators.
+-- 2.0.3-dev (Phase A / A2 remainder): word_similarity operators.
 -- pg_trgm-compatible asymmetric word-boundary similarity:
 --   word_similarity(a,b)        = best Jaccard of a vs any extent of b
 --   strict_word_similarity(a,b) = same, extents pinned to word bounds
@@ -432,3 +432,16 @@ CREATE FUNCTION tre_coalesced_page_count(regclass)
 COMMENT ON FUNCTION tre_coalesced_page_count(regclass) IS
     'Count PG_TRE_PAGE_POSTING_COALESCED pages (format v8) in the index. '
     'Zero unless pg_tre.coalesce_enable was on at build time.';
+
+CREATE FUNCTION tre_page_kind_histogram(regclass)
+    RETURNS TABLE(page_kind text, n_pages bigint,
+                  used_bytes bigint, used_pct numeric)
+    AS 'MODULE_PATHNAME', 'tre_page_kind_histogram'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE
+    ROWS 12;
+
+COMMENT ON FUNCTION tre_page_kind_histogram(regclass) IS
+    'Per-page-kind tally (count, used bytes, fill %%) over every block of '
+    'the index.  Read-only diagnostic for localizing where an index''s '
+    'size lives -- which page kind dominates and whether those pages are '
+    'full or mostly empty.';
