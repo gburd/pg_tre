@@ -38,7 +38,7 @@ int  pg_tre_max_nfa_states         = 10000;
 int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
-bool pg_tre_tuple_bloom_enable     = true;  /* re-enabled in 1.2.3 */
+bool pg_tre_tuple_bloom_enable     = false; /* lossy positional pre-filter; off for density (2.0.3) */
 bool pg_tre_flush_to_run           = false; /* Phase B1.3: gated (see bench) */
 bool pg_tre_crack_on_read          = false; /* Phase B1.5: gated (see bench) */
 bool pg_tre_coalesce_enable        = false; /* v2.0 coalescing: gated (see bench) */
@@ -104,10 +104,18 @@ pg_tre_init_guc(void)
         true, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.tuple_bloom_enable",
-        "Enable per-tuple bloom filters in posting leaves (Phase 5).",
-        NULL,
+        "Store the per-tuple positional payload (positions + bloom) in"
+        " posting leaves for the tier-3.1 positional pre-filter.",
+        "This payload is a LOSSY pre-filter only -- the executor recheck is"
+        " authoritative, so disabling it never changes query results, only"
+        " how many candidates are pre-filtered before recheck.  It costs"
+        " ~22 bytes per (trigram,TID) UNCOMPRESSED, which on a large/high-"
+        " cardinality corpus dominates the index (it was ~58%% of one"
+        " 30k-row field-report index).  OFF by default for density;"
+        " PGC_USERSET so it can be toggled per session before CREATE INDEX."
+        " Was PGC_SIGHUP (uncontrollable per build) and ON before 2.0.3.",
         &pg_tre_tuple_bloom_enable,
-        true, PGC_SIGHUP, 0, NULL, NULL, NULL);
+        false, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.flush_to_run",
         "Phase B1.3: flush the pending list into a new LSM run instead"

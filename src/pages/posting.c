@@ -773,58 +773,87 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             BlockNumber leftmost_blk = InvalidBlockNumber;
             Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
 
-            /* Estimate bytes per TID: ~8 for sparsemap RLE (conservative),
-             * plus payload overhead if present. */
-            Size bytes_per_tid = 8;  /* sparsemap average */
+            /*
+             * Per-TID payload cost (positions + bloom), if any.  With no
+             * payload, leaves are packed purely by SERIALIZED sparsemap
+             * size (below); with payload we also cap the TID count by
+             * this estimate so the payload region cannot overflow the
+             * page.
+             */
+            Size payload_bytes_per_tid = 0;
             if (b->with_payload && b->payload_count > 0)
             {
-                /* payload: 2 bytes (n_positions) + 4*n_positions + bloom_bytes */
                 Size avg_positions = 2;  /* conservative estimate */
-                bytes_per_tid += 2 + avg_positions * 4 + bloom_bytes;
+                payload_bytes_per_tid = 2 + avg_positions * 4 + bloom_bytes;
             }
 
             /* Process TIDs right-to-left, building leaves from the end. */
             while (tid_idx < n_tids)
             {
-                /* Estimate how many TIDs fit in this leaf */
-                int tids_in_leaf = (int)(target_leaf_size / bytes_per_tid);
-                if (tids_in_leaf < 1)
-                    tids_in_leaf = 1;
-                if (tid_idx + tids_in_leaf > n_tids)
-                    tids_in_leaf = n_tids - tid_idx;
-
-                /* Build sparsemap for this slice; grow geometrically on
-                 * ENOSPC (sparse-TID inputs blow past the 16 B/TID
-                 * estimate).  See pg_tre_posting_build_finish for the
-                 * full rationale. */
-                size_t cap = (size_t)tids_in_leaf * 16 + 1024;
+                /*
+                 * Greedily pack TIDs into this leaf until the SERIALIZED
+                 * sparsemap approaches target_leaf_size, instead of
+                 * stopping at a fixed TID count.  The old heuristic
+                 * (tids_in_leaf = target / 8 bytes-per-TID) catastrophic-
+                 * ally under-filled leaves for well-compressing postings:
+                 * a dense trigram's TIDs RLE-compress to <1 B/TID, so
+                 * 710 TIDs occupied ~190 B of an 8 KB page (~2-6% full)
+                 * and a high-cardinality trigram sprawled across dozens
+                 * of near-empty leaves -- the ~50x density blowup past
+                 * ~10k rows in the v2.0.2 field report.  We now add TIDs
+                 * to the live slice map and stop when its real serialized
+                 * size crosses target_leaf_size (checked every
+                 * CHECK_STRIDE adds to amortize sm_get_size).  When
+                 * payload is present a TID ceiling bounds the payload
+                 * region too.  b->tids is ascending (tuplesort order), so
+                 * the slice is contiguous and RLE-friendly.
+                 */
+                int tids_in_leaf = 0;
+                int avail = n_tids - tid_idx;
+                int tid_ceiling = avail;
+                const int CHECK_STRIDE = 64;
+                size_t cap = (size_t) avail * 4 + 1024;
                 sm_t *slice_smap = sm_create(cap);
                 uint8 *slice_bytes;
                 Size slice_sz;
-                int k;
+
+                if (payload_bytes_per_tid > 0)
+                {
+                    int by_payload = (int) (target_leaf_size
+                                            / payload_bytes_per_tid);
+                    if (by_payload < 1)
+                        by_payload = 1;
+                    if (by_payload < tid_ceiling)
+                        tid_ceiling = by_payload;
+                }
 
                 if (slice_smap == NULL)
                     ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                         errmsg("pg_tre: failed to allocate slice sparsemap")));
 
-                for (k = 0; k < tids_in_leaf; k++)
+                while (tids_in_leaf < tid_ceiling)
                 {
                     int retries = 0;
-                    /* Cancellable; same rationale as the build_finish
-                     * loop above. */
                     CHECK_FOR_INTERRUPTS();
-                    while (sm_add_grow(&slice_smap, b->tids[tid_idx + k]) == SM_IDX_MAX)
+                    while (sm_add_grow(&slice_smap,
+                                       b->tids[tid_idx + tids_in_leaf]) == SM_IDX_MAX)
                     {
                         if (++retries > 16)
                         {
                             size_t final_cap = sm_get_capacity(slice_smap);
                             sm_free(slice_smap);
                             ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                                errmsg("pg_tre: multi-leaf slice sm_add_grow exhausted retries (k=%d, tids_in_leaf=%d, cap=%zu)",
-                                       k, tids_in_leaf, final_cap)));
+                                errmsg("pg_tre: multi-leaf slice sm_add_grow exhausted retries (tids_in_leaf=%d, cap=%zu)",
+                                       tids_in_leaf, final_cap)));
                         }
                     }
+                    tids_in_leaf++;
+                    if ((tids_in_leaf % CHECK_STRIDE) == 0
+                        && sm_get_size(slice_smap) >= target_leaf_size)
+                        break;
                 }
+                if (tids_in_leaf < 1)
+                    tids_in_leaf = 1;
 
                 slice_sz = sm_get_size(slice_smap);
                 slice_bytes = (uint8 *) palloc(slice_sz + 16);
