@@ -6,6 +6,69 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.0.3] - 2026-06-21 - density blowup root-caused: per-tuple payload now controllable
+
+Bug-fix patch for the v2.0.2 retest's >10k-row density blowup.  No on-disk
+format, WAL, or SQL-surface-removing change (one diagnostic function added);
+`ALTER EXTENSION pg_tre UPDATE TO '2.0.3'` is a no-op-for-data catalog
+upgrade (format stays v8, no REINDEX).
+
+### Root cause
+
+The ~50x density blowup on a few-trigram / high-cardinality corpus was the
+per-tuple **positional payload** (positions + optional bloom) stored in
+posting leaves: ~22 bytes per (trigram, TID), **uncompressed**.  On the
+field-report 30k-row corpus it was 13.3 MB of a 22.9 MB index (58%).  It is
+a **lossy tier-3.1 pre-filter** -- the executor recheck is authoritative, so
+it never affects query results -- yet it was ON by default and gated by a
+`PGC_SIGHUP` GUC, so it could not be disabled per build.  The "bimodal"
+10k-vs-30k jump is just this payload crossing from inline into multi-leaf
+storage.  (Localized with the new `tre_page_kind_histogram()` + a per-leaf
+payload tally on a real PG18 build.)
+
+### Changed
+
+- **`pg_tre.tuple_bloom_enable` is now `PGC_USERSET`** (was `PGC_SIGHUP`),
+  so it can be toggled per session before `CREATE INDEX`.  An operator who
+  does not need the positional pre-filter can now build a dense index:
+
+      SET pg_tre.tuple_bloom_enable = off;
+      CREATE INDEX ... USING tre (col);
+
+  Verified on PG18: the field-report 30k corpus drops **22.9 MB -> 573 KB**
+  (763 -> 19 bytes/row, ~40x; denser than the pg_trgm GIN's ~2,315 B/row),
+  10k vs 30k bytes/row stays bounded, and index results equal seq-scan.
+  Default stays **on** for compatibility.
+- **Multi-leaf posting partition packs by serialized size.**  Leaves were
+  filled by a fixed `tids = target / 8-bytes-per-TID` estimate, which
+  under-filled well-compressing postings (a dense trigram's TIDs compress
+  to <1 B/TID, leaving leaves ~2-6% full).  Now each leaf is packed until
+  its real serialized sparsemap reaches the target.
+
+### Added
+
+- `tre_page_kind_histogram(regclass)`: read-only per-page-kind tally
+  (count + used bytes + fill %) to localize where an index's size lives.
+- `density_scaling` regression: builds a fixed-alphabet corpus at 10k and
+  30k with the payload off and asserts bytes/row stays bounded.
+
+### Known limitation
+
+- VACUUM of an index built with `tuple_bloom_enable = off` can hit
+  `inline vacuum repack overflow` (an inline posting's sparsemap, rebuilt
+  after dead-TID removal, can exceed its original slot when it had no
+  payload slack).  Until the next increment migrates such a posting
+  out-of-line instead of erroring, prefer building dense indexes that are
+  not heavily updated, or keep the payload on for update-heavy indexes.
+  Default builds (payload on) are unaffected.
+
+### Acknowledgements
+
+- The pg.ddx.io / agora operator, whose v2.0.2 retest pinpointed the
+  >10k-row blowup with a precise, reproducible repro.
+
+---
+
 ## [2.0.2] - 2026-06-19 - density, compaction reclaim, and the O(N^2) flush fix
 
 Bug-fix / performance patch addressing the two blockers from the v2.0.0
