@@ -33,7 +33,7 @@ jobs:
         # index read needs a rebuild).  1.12.0 is v6/v7 -> reads as v8
         # with no REINDEX, exercising the current additive-format path.
         # 2.0.0 -> 2.0.1 is a no-op-SQL bug-fix upgrade (same format v8).
-        old_version: ['1.6.0', '1.12.0', '2.0.1', '2.0.2']
+        old_version: ['1.6.0', '1.12.0', '2.0.2', '2.0.3']
         # When a release breaks on-disk format compatibility, list
         # the (old_version, pg_version) pairs to skip here.
         exclude: []

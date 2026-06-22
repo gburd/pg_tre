@@ -6,6 +6,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.0.4] - 2026-06-22 - fix vacuum repack overflow (clears the 2.0.3 limitation)
+
+Bug-fix patch.  No on-disk format, WAL, or SQL change; `ALTER EXTENSION
+pg_tre UPDATE TO '2.0.4'` is a no-op-for-data catalog upgrade (no REINDEX).
+
+### Fixed
+
+- **VACUUM no longer errors with "inline vacuum repack overflow" /
+  "vacuum repack overflow on block N".**  Removing a dead TID from the
+  interior of an RLE run can split it in two, so a sparsemap with *fewer*
+  members can serialize a few bytes *larger* than the original.  Both the
+  inline (upper-leaf) and dedicated-leaf vacuum repack paths asserted
+  "repacked <= original" and aborted VACUUM on violation, leaving the index
+  unusable.  This was the 2.0.3 known limitation: it is hit most easily by
+  indexes built with the per-tuple payload off
+  (`pg_tre.tuple_bloom_enable = off`), which removed the slack that masked
+  it, but it was latent for payload-on indexes too.
+
+  Fix: on overflow, leave the posting unchanged (keep the original blob /
+  skip the in-place leaf rewrite) instead of erroring.  Correctness-safe --
+  the executor recheck is authoritative, so a retained now-dead TID is only
+  a candidate that recheck filters (a superset, never a missed match); the
+  dead TIDs are reclaimed on a later VACUUM or by REINDEX.  The overflow
+  check runs before any page mutation, so the bail-out leaves a consistent
+  page.  So a dense, update-heavy index (built with the payload off for
+  size) is now safe to VACUUM.
+
+- Verified on PG18: build with `tuple_bloom_enable = off` + coalescing,
+  then DELETE + VACUUM twice -- no error; index results equal seq-scan
+  across both cycles.  New `vacuum_repack` regression locks this in.
+
+---
+
 ## [2.0.3] - 2026-06-21 - density blowup root-caused: per-tuple payload now controllable
 
 Bug-fix patch for the v2.0.2 retest's >10k-row density blowup.  No on-disk
