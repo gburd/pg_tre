@@ -1833,10 +1833,35 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
 
         if (new_sm_size + new_payload_used > in_bytes)
         {
+            /*
+             * The repacked posting is LARGER than the original inline
+             * blob, even though we only removed TIDs.  This is possible:
+             * dropping a TID from the interior of an RLE run splits it
+             * into two runs, so a sparsemap with fewer members can
+             * serialize a few bytes longer.  It cannot exceed the inline
+             * slot, so instead of erroring (which aborts VACUUM and
+             * leaves the index unusable -- the "inline vacuum repack
+             * overflow" bug), fall back to KEEPING THE ORIGINAL BLOB
+             * verbatim and report nothing removed for this posting.
+             *
+             * Correctness-safe: the executor recheck is authoritative,
+             * so retaining a now-dead TID in the posting only makes it a
+             * candidate that recheck filters -- a superset, never a
+             * missed match.  The dead TIDs are reclaimed on a later
+             * VACUUM (if removal then shrinks the blob) or by REINDEX.
+             * Guarantees out_len <= in_bytes, so the caller's in-place
+             * repack of the leaf never overflows.
+             */
             sm_free(fresh);
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("pg_tre: inline vacuum repack overflow")));
+            memcpy(out_buf, in, in_bytes);
+            *out_len = in_bytes;
+            if (out_remaining)
+                *out_remaining = (uint64) (keep_n + (int) removed);
+            if (keep_tids)
+                pfree(keep_tids);
+            if (new_payload)
+                pfree(new_payload);
+            return 0;   /* report no removal: the blob is unchanged */
         }
 
         memcpy(out_buf, sm_get_data(fresh), new_sm_size);
@@ -2192,11 +2217,29 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
             new_max = 0;
         }
 
-        /* The repacked content must never exceed the original budget. */
+        /*
+         * The repacked content must never exceed the page budget.  As
+         * with the inline path, removing interior TIDs can split an RLE
+         * run and make the survivor sparsemap a few bytes larger, so
+         * even "only removed" content can grow.  This is checked BEFORE
+         * any page mutation, so on (the rare, full-page-budget)
+         * overflow we leave the leaf UNTOUCHED rather than abort VACUUM
+         * (the "vacuum repack overflow" bug).  The dead TIDs stay in the
+         * leaf and are filtered by the authoritative executor recheck (a
+         * superset, never a missed match); they are reclaimed on a later
+         * VACUUM or by REINDEX.
+         */
         if (new_sm_size + new_payload_used > posting_leaf_budget())
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("pg_tre: vacuum repack overflow on block %u", blkno)));
+        {
+            pfree(new_sm_bytes);
+            if (keep_tids)
+                pfree(keep_tids);
+            if (new_payload)
+                pfree(new_payload);
+            if (out_remaining)
+                *out_remaining = (uint64) (keep_n + (int) removed);
+            return 0;   /* leaf unchanged; dead TIDs deferred to recheck */
+        }
 
         /* Header: preserve right_link; refresh min/max/sizes/counts. */
         hdr->min_tid         = new_min;
