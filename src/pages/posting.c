@@ -1684,16 +1684,26 @@ typedef struct PgTreVacUpperInternalEntry
  * split the payload off after sm_open_copy).  Payload entries are in
  * sparsemap rank order, identical to an on-disk leaf.
  *
- * Writes the repacked blob into out_buf (which must be at least
- * in_bytes large -- output never exceeds input) and returns its length
- * via *out_len.  Returns the number of TIDs removed; *out_remaining
+ * Writes the repacked blob into out_buf (capacity out_cap bytes).  When
+ * the result still fits the original inline slot (<= in_bytes), writes it
+ * there, sets *needs_migration = false, and returns its length via
+ * *out_len.  When the repacked survivors would be LARGER than in_bytes
+ * (an interior RLE-run split can grow a smaller posting), it instead
+ * serializes the survivor blob into out_buf (which must be >= the
+ * posting-leaf budget) and sets *needs_migration = true plus the
+ * survivor (min_tid, max_tid, n_tids) so the caller can migrate the
+ * posting out-of-line to a dedicated leaf; *out_len is the migrated
+ * blob length.  Returns the number of TIDs removed; *out_remaining
  * receives the surviving count.
  */
 static uint64
 repack_inline_posting(const uint8 *in, Size in_bytes,
-                      uint8 *out_buf, Size *out_len,
+                      uint8 *out_buf, Size out_cap, Size *out_len,
                       IndexBulkDeleteCallback callback, void *callback_state,
-                      uint64 *out_remaining)
+                      uint64 *out_remaining,
+                      bool *needs_migration,
+                      uint64 *mig_min_tid, uint64 *mig_max_tid,
+                      uint64 *mig_n_tids)
 {
     Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
     sm_t *smap;
@@ -1711,6 +1721,9 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
 
     uint8  *new_payload = NULL;
     Size    new_payload_used = 0;
+
+    if (needs_migration)
+        *needs_migration = false;
 
     /* Open a copy so we can read members; sm_get_size() on the copy
      * yields the true serialized sparsemap prefix length. */
@@ -1834,34 +1847,58 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
         if (new_sm_size + new_payload_used > in_bytes)
         {
             /*
-             * The repacked posting is LARGER than the original inline
-             * blob, even though we only removed TIDs.  This is possible:
-             * dropping a TID from the interior of an RLE run splits it
-             * into two runs, so a sparsemap with fewer members can
-             * serialize a few bytes longer.  It cannot exceed the inline
-             * slot, so instead of erroring (which aborts VACUUM and
-             * leaves the index unusable -- the "inline vacuum repack
-             * overflow" bug), fall back to KEEPING THE ORIGINAL BLOB
-             * verbatim and report nothing removed for this posting.
+             * The repacked survivors are LARGER than the original inline
+             * slot, even though we only removed TIDs: dropping a TID from
+             * the interior of an RLE run splits it, so a sparsemap with
+             * fewer members can serialize a few bytes longer.  Rather
+             * than keep the bloated original inline (which never shrinks
+             * -- the split is deterministic, so dead TIDs would be stuck
+             * until REINDEX), MIGRATE the posting out-of-line: hand the
+             * survivor blob back to the caller, which writes it to a
+             * dedicated posting leaf (full page budget) and repoints the
+             * upper-tree entry.  This actually removes the dead TIDs.
              *
-             * Correctness-safe: the executor recheck is authoritative,
-             * so retaining a now-dead TID in the posting only makes it a
-             * candidate that recheck filters -- a superset, never a
-             * missed match.  The dead TIDs are reclaimed on a later
-             * VACUUM (if removal then shrinks the blob) or by REINDEX.
-             * Guarantees out_len <= in_bytes, so the caller's in-place
-             * repack of the leaf never overflows.
+             * out_buf is sized by the caller to the posting-leaf budget,
+             * so the (modest) growth fits; guard anyway.
              */
-            sm_free(fresh);
-            memcpy(out_buf, in, in_bytes);
-            *out_len = in_bytes;
+            if (new_sm_size + new_payload_used > out_cap)
+            {
+                /* Should not happen: a posting that fit an inline slot
+                 * cannot exceed a full leaf after only removals.  Be
+                 * safe -- keep the original inline, remove nothing. */
+                sm_free(fresh);
+                memcpy(out_buf, in, in_bytes);
+                *out_len = in_bytes;
+                if (out_remaining)
+                    *out_remaining = (uint64) (keep_n + (int) removed);
+                if (keep_tids)
+                    pfree(keep_tids);
+                if (new_payload)
+                    pfree(new_payload);
+                return 0;
+            }
+            memcpy(out_buf, sm_get_data(fresh), new_sm_size);
+            if (new_payload_used > 0)
+                memcpy(out_buf + new_sm_size, new_payload, new_payload_used);
+            *out_len = new_sm_size + new_payload_used;
+            if (needs_migration)
+                *needs_migration = true;
+            /* Survivors were appended in ascending sm_next_member order,
+             * so keep_tids is sorted: min = first, max = last. */
+            if (mig_min_tid)
+                *mig_min_tid = (keep_n > 0) ? keep_tids[0] : 0;
+            if (mig_max_tid)
+                *mig_max_tid = (keep_n > 0) ? keep_tids[keep_n - 1] : 0;
+            if (mig_n_tids)
+                *mig_n_tids = (uint64) keep_n;
             if (out_remaining)
-                *out_remaining = (uint64) (keep_n + (int) removed);
+                *out_remaining = (uint64) keep_n;
+            sm_free(fresh);
             if (keep_tids)
                 pfree(keep_tids);
             if (new_payload)
                 pfree(new_payload);
-            return 0;   /* report no removal: the blob is unchanged */
+            return removed;
         }
 
         memcpy(out_buf, sm_get_data(fresh), new_sm_size);
@@ -1958,15 +1995,20 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
                             blkno)));
     }
 
-    /* Repack each blob into a fresh contiguous region (<= old size). */
+    /* Repack each blob into a fresh contiguous region (<= old size for
+     * the inline-fit case; a migrated entry contributes 0 inline bytes). */
     new_region = (uint8 *) palloc(old_region_used);
     {
         Size    in_off = 0;
+        Size    leaf_budget = posting_leaf_budget();
+        uint8  *scratch = (uint8 *) palloc(leaf_budget);
         for (i = 0; i < n_entries; i++)
         {
             Size    blob_in = entries[i].inline_bytes;
             Size    blob_out = 0;
             uint64  blob_remaining = 0;
+            bool    needs_migration = false;
+            uint64  mig_min = 0, mig_max = 0, mig_n = 0;
 
             /* Coalesced marker: no inline blob to repack; leave the
              * entry (and its flag|slot inline_bytes) untouched. */
@@ -1976,15 +2018,60 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
                 continue;
 
             removed += repack_inline_posting(inline_region + in_off, blob_in,
-                                             new_region + new_region_used,
+                                             scratch, leaf_budget,
                                              &blob_out, callback,
-                                             callback_state, &blob_remaining);
+                                             callback_state, &blob_remaining,
+                                             &needs_migration,
+                                             &mig_min, &mig_max, &mig_n);
+            if (needs_migration)
+            {
+                /*
+                 * Survivors don't fit the inline slot after the RLE
+                 * split.  Migrate the posting out-of-line: write the
+                 * survivor blob to a dedicated posting leaf (full page
+                 * budget) and repoint this entry (posting_root = new
+                 * leaf, inline_bytes = 0).  The blob contributes 0 bytes
+                 * to the inline region now.  The new leaf is WAL'd by
+                 * write_single_leaf; the entry rewrite is WAL'd by the
+                 * XLOG_PTRE_VACUUM FPI below.  A crash between leaves the
+                 * leaf orphaned (harmless leak) and the entry still
+                 * inline (correct), so re-vacuum migrates again.
+                 *
+                 * The migrated posting drops the per-tuple payload (the
+                 * scratch blob is sparsemap + whatever payload survived;
+                 * write_single_leaf stores both).  Split the blob the
+                 * same way the reader does: sparsemap prefix is
+                 * self-describing via sm_open_copy.
+                 */
+                Size sm_only;
+                {
+                    sm_t *probe = sm_open_copy(scratch, blob_out, 64);
+                    sm_only = (probe != NULL) ? sm_get_size(probe) : blob_out;
+                    if (probe != NULL)
+                        sm_free(probe);
+                }
+                BlockNumber mig_blk = write_single_leaf(
+                    index, entries[i].trigram_hash,
+                    scratch, sm_only,
+                    (blob_out > sm_only) ? scratch + sm_only : NULL,
+                    (blob_out > sm_only) ? blob_out - sm_only : 0,
+                    mig_min, mig_max, mig_n,
+                    InvalidBlockNumber);
+                entries[i].posting_root = mig_blk;
+                entries[i].inline_bytes = 0;
+                in_off += blob_in;
+                if (out_remaining)
+                    *out_remaining += blob_remaining;
+                continue;   /* nothing copied into new_region for this entry */
+            }
+            memcpy(new_region + new_region_used, scratch, blob_out);
             entries[i].inline_bytes = (uint32) blob_out;
             new_region_used += blob_out;
             in_off += blob_in;
             if (out_remaining)
                 *out_remaining += blob_remaining;
         }
+        pfree(scratch);
     }
 
     /* Nothing actually removed: drop the rebuilt copy, leave page as-is. */
