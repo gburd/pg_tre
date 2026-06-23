@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.1.0] - 2026-06-22 - Phase 3: inline postings migrate out-of-line on vacuum
+
+Minor release: a posting whose inline slot can no longer hold it after a
+dead-TID removal now MIGRATES to a dedicated posting leaf, instead of
+keeping the stale blob (2.0.4) or erroring (pre-2.0.4).  No on-disk
+format, WAL, or SQL change; `ALTER EXTENSION pg_tre UPDATE TO '2.1.0'` is
+a no-op-for-data catalog upgrade (no REINDEX).
+
+### Changed
+
+- **VACUUM repack now self-heals via out-of-line migration.**  Removing a
+  TID from the interior of an RLE run can split it, so a sparsemap with
+  fewer members can serialize a few bytes *larger* than the original.
+  2.0.4 made that safe by keeping the original inline blob (removing
+  nothing) -- correct, but the posting never shrank (the split is
+  deterministic), so its dead TIDs were stuck until REINDEX.  2.1.0
+  instead writes the survivors to a dedicated posting leaf (full 8 KB
+  budget, so the growth fits) and repoints the upper-tree entry out-of-
+  line (`posting_root` = leaf, `inline_bytes` = 0).  The dead TIDs are
+  genuinely reclaimed; no REINDEX dependency.
+
+  This is the inline analogue of the coalesced -> dedicated migration the
+  merge path already performs, and a migrated entry is the ordinary
+  out-of-line posting that every reader / vacuum / merge path already
+  handles -- hence no format change.  Crash-safe: the new leaf is WAL'd
+  (full-page image) before the upper-leaf entry-rewrite image; a crash
+  between leaves the leaf orphaned (a harmless leak, reclaimed like any
+  deferred-recycle page) and the entry still inline (correct), so a
+  re-VACUUM migrates again.
+
+  Verified on PG18: build with `tuple_bloom_enable = off`, churn with
+  interior deletes to force the overflow, VACUUM -> the affected postings
+  migrate to dedicated leaves (0 -> 21 in the test corpus), index results
+  equal seq-scan across repeated churn+VACUUM cycles (no longer stuck).
+  This fully closes the 2.0.4 known limitation: a dense, update-heavy
+  index (built payload-off for size) reclaims dead TIDs on VACUUM.
+
+### Notes
+
+- Only the rare overflow postings migrate; each then occupies a dedicated
+  leaf, a bounded size trade for correct, self-healing reclaim.
+
+---
+
 ## [2.0.4] - 2026-06-22 - fix vacuum repack overflow (clears the 2.0.3 limitation)
 
 Bug-fix patch.  No on-disk format, WAL, or SQL change; `ALTER EXTENSION
