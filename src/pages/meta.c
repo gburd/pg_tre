@@ -40,9 +40,9 @@ pg_tre_meta_init(Page page)
     meta->min_page_format_version = PG_TRE_FORMAT_VERSION_LATEST;
     meta->q                  = 3;
     meta->tri_encoding       = 0;                /* byte trigrams for now */
-    meta->bloom_range_m_bits = (uint32) pg_tre_bloom_tuple_bits * 16;
+    meta->bloom_range_m_bits = (uint32) PG_TRE_BLOOM_TUPLE_BITS * 16;
     meta->bloom_range_k      = 7;
-    meta->bloom_tuple_m_bits = (uint16) pg_tre_bloom_tuple_bits;
+    meta->bloom_tuple_m_bits = (uint16) PG_TRE_BLOOM_TUPLE_BITS;
     meta->bloom_tuple_k      = 5;
 
     meta->root_upper         = InvalidBlockNumber;

@@ -81,13 +81,11 @@ server. When deploying:
     Compilation remains additionally bounded by the 64 KiB hard
     pattern-length ceiling and by `pg_tre.max_nfa_states`. Do
     not raise the timeout for untrusted callers.
-- Tier-3 per-tuple bloom and the positional filter are
-  controlled by `pg_tre.tuple_bloom_enable` (default **on**
-  since 1.2.3). The chain-rank lookup defect that motivated
-  disabling them in the 1.1.x line was fixed in 1.2.3 (it was
-  a bloom-header reconstruction bug, not a posting-tree bug;
-  see `CHANGELOG.md`). Recheck remains authoritative for
-  correctness; the filters are CPU optimizations.
+- The per-tuple positional bloom and positional filter (tier-3.1)
+  were removed in 3.0.0.  They were lossy CPU pre-filters only; the
+  executor recheck remains authoritative for correctness, so their
+  removal does not change query results.  The range bloom (tier-1
+  heap-block skip) is retained.
 
 ## Disclosure Acknowledgements
 

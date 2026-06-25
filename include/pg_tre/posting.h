@@ -13,11 +13,13 @@
  * PG_TRE_INLINE_POSTING_MAX TIDs are stored inline in the upper-tree
  * leaf entry to avoid one level of indirection for rare trigrams.
  *
- * Payload:  leaf pages optionally carry, parallel to the sparsemap, a
- * per-TID payload region with (position_list, tuple_bloom_128).  The
- * payload is keyed by sm_rank so lookups are O(log N) in the
- * container hierarchy of sparsemap.  Payload is optional per index
- * (reloption); Phase 5 enables it by default for text opclasses.
+ * Payload (legacy, 3.0.0): pre-3.0 leaves could carry, parallel to the
+ * sparsemap, a per-TID payload region with (position_list,
+ * tuple_bloom_128) feeding a lossy positional pre-filter.  That WRITE
+ * path was removed in 3.0.0 -- new leaves are payload-free
+ * (payload_bytes == 0).  OLD payload-bearing leaves are still READ
+ * tolerantly (vacuum repack walks them correctly) but the payload is
+ * never consulted; the executor recheck is authoritative.
  */
 
 #ifndef PG_TRE_POSTING_H
@@ -68,9 +70,9 @@
 /* ---- Writer side (owned by Agent A -- Phase 1/2) ---- */
 
 /*
- * Opaque builder state.  Accumulates (TID, payload) pairs for a single
- * trigram in memory; flushed to one or more posting-tree leaves when
- * the in-memory sparsemap serialization approaches the leaf budget.
+ * Opaque builder state.  Accumulates TIDs for a single trigram in
+ * memory; flushed to one or more posting-tree leaves when the in-memory
+ * sparsemap serialization approaches the leaf budget.
  */
 typedef struct PgTrePostingBuilder PgTrePostingBuilder;
 
@@ -91,7 +93,10 @@ extern PgTrePostingBuilder *pg_tre_posting_build_begin_sized(Relation index,
                                                              bool with_payload,
                                                              size_t expected_bytes);
 
-/* Append one (TID, position, tuple-bloom-bits) triple. */
+/* Append one TID.  The positions / n_positions / tuple_bloom_bits
+ * arguments are accepted for ABI compatibility but ignored: the
+ * per-tuple payload write path was removed in 3.0.0 (new leaves are
+ * payload-free).  Pass NULL / 0. */
 extern void pg_tre_posting_build_add(PgTrePostingBuilder *b,
                                      ItemPointer tid,
                                      const uint32 *positions,
@@ -123,10 +128,7 @@ extern BlockNumber pg_tre_posting_build_finish(PgTrePostingBuilder *b,
  * size buckets (and when cw is NULL) it behaves exactly like
  * pg_tre_posting_build_finish and sets *coalesced_out = false.
  *
- * Phase 1 limitation: a coalesced posting drops its per-tuple payload
- * (blooms / positions).  This is lossy-safe -- the executor rechecks
- * every row -- and only forgoes the tier-3 / positional PRE-filter for
- * coalesced trigrams.  Coalescing is off by default (pg_tre.coalesce_enable).
+ * Coalescing is off by default (pg_tre.coalesce_enable).
  */
 struct PgTreCoalescedWriter;
 extern BlockNumber pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
@@ -188,28 +190,6 @@ extern sm_t *pg_tre_posting_materialize(Relation index,
 
 extern void pg_tre_posting_scan_end(PgTrePostingScan *s);
 
-/* ---- Payload lookup (Phase 5 READ side integration point) ---- */
-
-/*
- * Look up the per-tuple bloom filter for a given TID.  Returns true if
- * the TID is present in the posting and bloom data is available, false
- * otherwise.  The bloom is copied into *out_bloom (caller must allocate
- * sufficient space: pg_tre_bloom_size_bytes(pg_tre_bloom_tuple_bits)).
- *
- * out_page_format_version (optional) receives the per-page format_version
- * of the posting leaf the bloom was read from; used by the multi-version
- * bloom decoder dispatch.  Pass NULL to ignore.
- */
-extern bool pg_tre_posting_lookup_tuple_bloom(
-    Relation index,
-    BlockNumber root,
-    const uint8 *inline_data,
-    Size inline_bytes,
-    uint64 packed_tid,
-    uint8 *out_bloom,
-    Size out_bloom_sz,
-    uint32 *out_page_format_version);
-
 /* ---- Upper-tree lookup (both sides) ---- */
 
 /*
@@ -254,52 +234,13 @@ extern uint64 pg_tre_posting_cardinality(Relation index, BlockNumber root,
                                          const uint8 *inline_data,
                                          Size inline_bytes, uint64 cap);
 
-/* ---- Phase 5 payload APIs ---- */
-
-/*
- * Look up the per-tuple bloom filter for a given TID in a posting tree.
- * Returns true if the TID is present in the posting and has an associated
- * bloom, false otherwise.  Copies the bloom bits into out_bloom (caller
- * must provide a buffer of at least out_bloom_sz bytes).
- *
- * Phase 5 WRITE has implemented this function.
- */
-typedef struct PgTreBloom PgTreBloom;  /* forward decl from bloom.h */
-
-extern bool pg_tre_posting_lookup_tuple_bloom(Relation index,
-                                              BlockNumber root,
-                                              const uint8 *inline_data,
-                                              Size inline_bytes,
-                                              uint64 packed_tid,
-                                              uint8 *out_bloom,
-                                              Size out_bloom_sz,
-                                              uint32 *out_page_format_version);
-
-/*
- * Look up the list of positions where a trigram appears in a given TID.
- * Returns the number of positions found (0 if TID not present).  On
- * success *out_positions is set to a buffer palloc'd in
- * CurrentMemoryContext owned by the caller (freed on context reset or
- * via pfree).  Each call allocates a fresh buffer, so results do not
- * alias across calls (issue H4: the prior implementation returned a
- * pointer into a process-global static array).
- *
- * Phase 5 READ requires; Phase 5 WRITE implements.
- */
-extern int pg_tre_posting_lookup_positions(Relation index,
-                                           BlockNumber root,
-                                           const uint8 *inline_data,
-                                           Size inline_bytes,
-                                           uint64 packed_tid,
-                                           const uint32 **out_positions);
-
 /* ---- Bulk delete (VACUUM, issue C2) ---- */
 
 /*
  * Walk every posting tree reachable from the upper tree and strip the
  * heap TIDs that `callback` reports dead, repacking each affected leaf
  * in place and WAL-logging the change (XLOG_PTRE_VACUUM full-page
- * image).  Surviving TIDs and their payload entries are preserved.
+ * image).  Surviving TIDs are preserved.
  *
  * Emptied non-head leaves are unlinked from their right-link chain and
  * marked deleted (XLOG_PTRE_POSTING_UNLINK); they are physically

@@ -22,7 +22,7 @@ INSERT INTO relopts_test VALUES (1, 'hello world'), (2, 'goodbye world');
 
 -- Create index with custom reloptions
 CREATE INDEX relopts_idx ON relopts_test USING tre (body)
-    WITH (bloom_tuple_bits=64, fastupdate=off, range_size_blocks=256);
+    WITH (fastupdate=off, range_size_blocks=256);
 
 -- Verify index exists
 \d+ relopts_idx
@@ -62,9 +62,7 @@ SHOW pg_tre.max_nfa_states;
 
 SHOW pg_tre.pending_list_limit;
 SHOW pg_tre.range_size_blocks;
-SHOW pg_tre.bloom_tuple_bits;
 SHOW pg_tre.fastupdate;
-SHOW pg_tre.tuple_bloom_enable;
 SHOW pg_tre.max_extraction_fanout;
 SHOW pg_tre.compile_timeout_ms;
 SHOW pg_tre.match_timeout_ms;
@@ -77,7 +75,7 @@ CREATE TABLE relopts_validation_test (id int, body text);
 
 -- Valid reloptions
 CREATE INDEX relopts_valid_idx ON relopts_validation_test USING tre (body)
-    WITH (bloom_tuple_bits=32);  -- minimum valid value
+    WITH (range_size_blocks=64);  -- valid value
 
 DROP INDEX relopts_valid_idx;
 
@@ -100,9 +98,9 @@ INSERT INTO multi_opts_test SELECT i, 'text' || i FROM generate_series(1, 100) i
 -- Index 1: default options
 CREATE INDEX multi_opts_idx1 ON multi_opts_test USING tre (body);
 
--- Index 2: custom bloom bits
+-- Index 2: custom range size
 CREATE INDEX multi_opts_idx2 ON multi_opts_test USING tre (body)
-    WITH (bloom_tuple_bits=256);
+    WITH (range_size_blocks=256);
 
 -- Index 3: fastupdate off
 CREATE INDEX multi_opts_idx3 ON multi_opts_test USING tre (body)

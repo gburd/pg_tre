@@ -249,15 +249,16 @@ posting_leaf_deleted_xid(Page page)
     return fxid;
 }
 
-/* Per-TID payload entry (positions + bloom). */
-typedef struct PayloadEntry
-{
-    uint64  tid;                /* packed TID */
-    uint32 *positions;          /* palloc'd array of position offsets */
-    int     n_positions;
-    uint8  *bloom_bits;         /* palloc'd bloom filter bits */
-} PayloadEntry;
-
+/*
+ * Per-TID payload entry (positions + bloom).
+ *
+ * 3.0.0: the per-tuple positional bloom/payload WRITE path is removed,
+ * so this is no longer used by the builder; new posting leaves are
+ * emitted payload-free (payload_bytes == 0).  The READ side (the
+ * vacuum repack paths below) still understands OLD payload-bearing
+ * leaves by walking the on-disk byte stream directly, without this
+ * struct.
+ */
 struct PgTrePostingBuilder
 {
     Relation        index;
@@ -277,11 +278,6 @@ struct PgTrePostingBuilder
     int             tids_alloced;
     uint64          min_tid;
     uint64          max_tid;
-
-    /* Payload tracking (Phase 5). */
-    PayloadEntry   *payload;        /* palloc'd array */
-    int             payload_count;
-    int             payload_alloced;
 };
 
 PgTrePostingBuilder *
@@ -312,27 +308,13 @@ pg_tre_posting_build_begin_sized(Relation index, uint64 trigram_hash,
     b = (PgTrePostingBuilder *) palloc0(sizeof(*b));
     b->index        = index;
     b->trigram_hash = trigram_hash;
-    b->with_payload = with_payload;
+    b->with_payload = with_payload;   /* accepted for ABI; never produces payload */
     b->min_tid      = UINT64_MAX;
     b->max_tid      = 0;
     b->n_tids       = 0;
 
     b->tids         = (uint64 *) palloc(initial_cap * sizeof(uint64));
     b->tids_alloced = initial_cap;
-
-    /* Initialize payload array if enabled (Phase 5). */
-    if (with_payload)
-    {
-        b->payload_alloced = 256;
-        b->payload = (PayloadEntry *) palloc0(b->payload_alloced * sizeof(PayloadEntry));
-        b->payload_count = 0;
-    }
-    else
-    {
-        b->payload = NULL;
-        b->payload_count = 0;
-        b->payload_alloced = 0;
-    }
 
     return b;
 }
@@ -343,6 +325,15 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
                          const uint8 *tuple_bloom_bits)
 {
     uint64 packed = pg_tre_pack_tid(tid);
+
+    /*
+     * 3.0.0: the per-tuple positional bloom/payload path is removed.
+     * positions / tuple_bloom_bits are accepted for ABI compatibility
+     * but never stored -- new posting leaves carry no payload region.
+     */
+    (void) positions;
+    (void) n_positions;
+    (void) tuple_bloom_bits;
 
     /* Grow the uint64 array if needed (palloc-based, proven reliable). */
     if (b->n_tids >= b->tids_alloced)
@@ -356,68 +347,6 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
                       (Size) b->tids_alloced * sizeof(uint64));
     }
     b->tids[b->n_tids] = packed;
-
-    /* Phase 5: capture per-TID payload (positions + bloom). */
-    if (b->with_payload)
-    {
-        PayloadEntry *pe;
-        Size bloom_bytes;
-
-        /* Grow payload array if needed. */
-        if (b->payload_count >= b->payload_alloced)
-        {
-            if (b->payload_alloced > INT_MAX / 2)
-                ereport(ERROR,
-                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                         errmsg("pg_tre: posting builder payload array too large")));
-            b->payload_alloced *= 2;
-            b->payload = (PayloadEntry *) repalloc(b->payload,
-                            (Size) b->payload_alloced * sizeof(PayloadEntry));
-        }
-
-        pe = &b->payload[b->payload_count++];
-        pe->tid = packed;
-
-        /*
-         * The on-disk payload encodes n_positions as a uint16 (see
-         * serialize_payload / the scan-side walk in
-         * pg_tre_posting_lookup_positions).  Clamp here so a pathological
-         * tuple cannot silently truncate the count on write-back and
-         * desynchronize the payload walk on read.  Positions beyond the
-         * cap are dropped; correctness is preserved because the executor
-         * rechecks every emitted row, and the positional filter only
-         * ever needs one in-range hit.
-         */
-        if (n_positions < 0)
-            n_positions = 0;
-        if (n_positions > UINT16_MAX)
-            n_positions = UINT16_MAX;
-        pe->n_positions = n_positions;
-
-        /* Copy positions array. */
-        if (n_positions > 0 && positions != NULL)
-        {
-            pe->positions = (uint32 *) palloc(n_positions * sizeof(uint32));
-            memcpy(pe->positions, positions, n_positions * sizeof(uint32));
-        }
-        else
-        {
-            pe->positions = NULL;
-        }
-
-        /* Copy bloom bits. */
-        bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-        if (tuple_bloom_bits != NULL)
-        {
-            pe->bloom_bits = (uint8 *) palloc(bloom_bytes);
-            memcpy(pe->bloom_bits, tuple_bloom_bits, bloom_bytes);
-        }
-        else
-        {
-            /* No bloom provided: allocate zeroed bloom. */
-            pe->bloom_bits = (uint8 *) palloc0(bloom_bytes);
-        }
-    }
 
     if (packed < b->min_tid) b->min_tid = packed;
     if (packed > b->max_tid) b->max_tid = packed;
@@ -517,72 +446,6 @@ write_single_leaf(Relation index, uint64 trigram_hash,
     return blkno;
 }
 
-/*
- * Serialize the payload array into a compact byte stream.
- * Format for each TID (in sparsemap order):
- *   - uint16 n_positions (variable-byte encoded as 1 or 2 bytes)
- *   - uint8  position_deltas[n_positions] (delta-coded from 0)
- *   - uint8  bloom_bits[(pg_tre_bloom_tuple_bits + 7) / 8]
- *
- * Phase 5: for simplicity, use fixed-width encoding: 2 bytes for n_positions,
- * 4 bytes per position (no delta coding yet), bloom_bits follow.
- *
- * Returns palloc'd buffer; caller must pfree.
- */
-static uint8 *
-serialize_payload(PayloadEntry *payload, int payload_count, Size *out_size)
-{
-    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    Size estimate = 0;
-    uint8 *buf, *ptr;
-    int i;
-
-    /* Estimate size: for each entry, 2 bytes for n_positions,
-     * 4 bytes per position, and bloom_bytes for bloom. */
-    for (i = 0; i < payload_count; i++)
-    {
-        estimate += 2;  /* n_positions */
-        estimate += (Size) payload[i].n_positions * sizeof(uint32);
-        estimate += bloom_bytes;
-    }
-
-    buf = (uint8 *) palloc0(estimate);
-    ptr = buf;
-
-    for (i = 0; i < payload_count; i++)
-    {
-        PayloadEntry *pe = &payload[i];
-        uint16 n = (uint16) pe->n_positions;
-
-        /* Write n_positions as uint16. */
-        memcpy(ptr, &n, sizeof(uint16));
-        ptr += sizeof(uint16);
-
-        /* Write positions as uint32 array (no delta coding for Phase 5). */
-        if (n > 0 && pe->positions != NULL)
-        {
-            memcpy(ptr, pe->positions, n * sizeof(uint32));
-            ptr += n * sizeof(uint32);
-        }
-
-        /* Write bloom bits. */
-        if (pe->bloom_bits != NULL)
-        {
-            memcpy(ptr, pe->bloom_bits, bloom_bytes);
-        }
-        else
-        {
-            /* Zero bloom if missing. */
-            memset(ptr, 0, bloom_bytes);
-        }
-        ptr += bloom_bytes;
-    }
-
-    *out_size = ptr - buf;
-    Assert(*out_size <= estimate);
-    return buf;
-}
-
 BlockNumber
 pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                             const uint8 **inline_data_out,
@@ -607,9 +470,13 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
 {
     const uint8 *bytes;
     uint8      *copy;
-    uint8      *payload_bytes = NULL;
-    Size        payload_sz = 0;
     Size        sz = 0;
+
+    /*
+     * 3.0.0: new builds emit posting leaves with NO payload region.
+     * OLD payload-bearing leaves are still READ tolerantly (see the
+     * vacuum repack paths and pg_tre_posting_materialize).
+     */
 
     *coalesced_out = false;
     *cblk_out = InvalidBlockNumber;
@@ -684,47 +551,23 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
         bytes = copy;
     }
 
-    /* Phase 5: serialize payload if present. */
-    if (b->with_payload && b->payload_count > 0)
+    /* Inline case: sparsemap fits in PG_TRE_INLINE_POSTING_MAX. */
+    if (sz <= PG_TRE_INLINE_POSTING_MAX)
     {
-        payload_bytes = serialize_payload(b->payload, b->payload_count,
-                                         &payload_sz);
-    }
-
-    /* Inline case: sparsemap + payload must fit in PG_TRE_INLINE_POSTING_MAX. */
-    if (sz + payload_sz <= PG_TRE_INLINE_POSTING_MAX)
-    {
-        if (payload_sz > 0)
-        {
-            /* Concatenate sparsemap + payload into a single inline blob. */
-            uint8 *combined = (uint8 *) palloc(sz + payload_sz);
-            memcpy(combined, bytes, sz);
-            memcpy(combined + sz, payload_bytes, payload_sz);
-            pfree(copy);
-            if (payload_bytes)
-                pfree(payload_bytes);
-            *inline_data_out  = combined;
-            *inline_bytes_out = sz + payload_sz;
-        }
-        else
-        {
-            *inline_data_out  = bytes;      /* palloc'd; outlives builder */
-            *inline_bytes_out = sz;
-        }
+        *inline_data_out  = bytes;      /* palloc'd; outlives builder */
+        *inline_bytes_out = sz;
         return InvalidBlockNumber;
     }
 
-    /* On-disk case: write sparsemap and payload to leaf page(s). */
+    /* On-disk case: write the sparsemap to leaf page(s). */
     {
-        Size total = sz + payload_sz;
         Size budget = posting_leaf_budget();
 
         /*
          * Coalescing (v2.0): a medium-bucket posting packs onto a
          * shared coalesced page instead of a dedicated single leaf.
-         * Phase 1 drops the payload for coalesced postings (lossy-safe;
-         * recheck is authoritative).  Only the sparsemap (sz) gates
-         * eligibility, since that is what a coalesced slot stores.
+         * Only the sparsemap (sz) gates eligibility, since that is what
+         * a coalesced slot stores.
          */
         if (cw != NULL
             && sz > PG_TRE_INLINE_POSTING_MAX
@@ -736,8 +579,6 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             pg_tre_coalesced_add(cw, b->trigram_hash, bytes, sz,
                                  NULL, 0, &cblk, &cslot);
             pfree(copy);
-            if (payload_bytes)
-                pfree(payload_bytes);
             *inline_data_out  = NULL;
             *inline_bytes_out = 0;
             *coalesced_out = true;
@@ -747,17 +588,15 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
         }
 
         /* Single-leaf case: everything fits in one page */
-        if (total <= budget)
+        if (sz <= budget)
         {
             BlockNumber blk = write_single_leaf(b->index, b->trigram_hash,
                                                 bytes, sz,
-                                                payload_bytes, payload_sz,
+                                                NULL, 0,
                                                 b->min_tid, b->max_tid,
                                                 b->n_tids,
                                                 InvalidBlockNumber);
             pfree(copy);
-            if (payload_bytes)
-                pfree(payload_bytes);
             *inline_data_out  = NULL;
             *inline_bytes_out = 0;
             return blk;
@@ -771,21 +610,6 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             int tid_idx = 0;
             BlockNumber right_link = InvalidBlockNumber;
             BlockNumber leftmost_blk = InvalidBlockNumber;
-            Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-
-            /*
-             * Per-TID payload cost (positions + bloom), if any.  With no
-             * payload, leaves are packed purely by SERIALIZED sparsemap
-             * size (below); with payload we also cap the TID count by
-             * this estimate so the payload region cannot overflow the
-             * page.
-             */
-            Size payload_bytes_per_tid = 0;
-            if (b->with_payload && b->payload_count > 0)
-            {
-                Size avg_positions = 2;  /* conservative estimate */
-                payload_bytes_per_tid = 2 + avg_positions * 4 + bloom_bytes;
-            }
 
             /* Process TIDs right-to-left, building leaves from the end. */
             while (tid_idx < n_tids)
@@ -803,10 +627,9 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                  * ~10k rows in the v2.0.2 field report.  We now add TIDs
                  * to the live slice map and stop when its real serialized
                  * size crosses target_leaf_size (checked every
-                 * CHECK_STRIDE adds to amortize sm_get_size).  When
-                 * payload is present a TID ceiling bounds the payload
-                 * region too.  b->tids is ascending (tuplesort order), so
-                 * the slice is contiguous and RLE-friendly.
+                 * CHECK_STRIDE adds to amortize sm_get_size).  b->tids is
+                 * ascending (tuplesort order), so the slice is contiguous
+                 * and RLE-friendly.
                  */
                 int tids_in_leaf = 0;
                 int avail = n_tids - tid_idx;
@@ -816,16 +639,6 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 sm_t *slice_smap = sm_create(cap);
                 uint8 *slice_bytes;
                 Size slice_sz;
-
-                if (payload_bytes_per_tid > 0)
-                {
-                    int by_payload = (int) (target_leaf_size
-                                            / payload_bytes_per_tid);
-                    if (by_payload < 1)
-                        by_payload = 1;
-                    if (by_payload < tid_ceiling)
-                        tid_ceiling = by_payload;
-                }
 
                 if (slice_smap == NULL)
                     ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
@@ -861,19 +674,8 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 memset(slice_bytes + slice_sz, 0, 16);
                 sm_free(slice_smap);
 
-                /* Build payload slice for this range */
-                uint8 *slice_payload = NULL;
-                Size slice_payload_sz = 0;
-                if (b->with_payload && b->payload_count > 0)
-                {
-                    /* Serialize just the payload entries for this TID range */
-                    slice_payload = serialize_payload(b->payload + tid_idx,
-                                                     tids_in_leaf,
-                                                     &slice_payload_sz);
-                }
-
                 /* Verify this leaf fits within budget */
-                if (slice_sz + slice_payload_sz > budget)
+                if (slice_sz > budget)
                 {
                     /* Too big; try with half the TIDs */
                     if (tids_in_leaf <= 1)
@@ -881,8 +683,6 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                                  errmsg("pg_tre: single TID exceeds leaf budget")));
                     pfree(slice_bytes);
-                    if (slice_payload)
-                        pfree(slice_payload);
                     /* Retry with half */
                     tids_in_leaf /= 2;
                     continue;
@@ -894,14 +694,12 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 BlockNumber leaf_blk = write_single_leaf(
                     b->index, b->trigram_hash,
                     slice_bytes, slice_sz,
-                    slice_payload, slice_payload_sz,
+                    NULL, 0,
                     leaf_min_tid, leaf_max_tid,
                     tids_in_leaf,
                     right_link);
 
                 pfree(slice_bytes);
-                if (slice_payload)
-                    pfree(slice_payload);
 
                 /* This leaf becomes the new leftmost */
                 leftmost_blk = leaf_blk;
@@ -911,8 +709,6 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
 
             /* Cleanup original buffers */
             pfree(copy);
-            if (payload_bytes)
-                pfree(payload_bytes);
             *inline_data_out  = NULL;
             *inline_bytes_out = 0;
             return leftmost_blk;
@@ -927,21 +723,6 @@ pg_tre_posting_build_free(PgTrePostingBuilder *b)
         return;
     if (b->tids != NULL)
         pfree(b->tids);
-
-    /* Free payload entries (Phase 5). */
-    if (b->payload != NULL)
-    {
-        int i;
-        for (i = 0; i < b->payload_count; i++)
-        {
-            if (b->payload[i].positions != NULL)
-                pfree(b->payload[i].positions);
-            if (b->payload[i].bloom_bits != NULL)
-                pfree(b->payload[i].bloom_bits);
-        }
-        pfree(b->payload);
-    }
-
     pfree(b);
 }
 
@@ -1254,385 +1035,6 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
     return sm_create(64);
 }
 
-/*
- * Lookup the per-tuple bloom filter for a specific TID.
- *
- * Phase 5 WRITE-side implementation.  READ side will extend this with
- * actual filtering logic.  For now, we just provide the extraction
- * mechanism.
- *
- * Returns true if the TID is present in the posting and bloom data is
- * available; false otherwise.  If true, copies the bloom bits into
- * out_bloom (caller must provide a buffer of at least out_bloom_sz bytes,
- * typically (pg_tre_bloom_tuple_bits + 7) / 8).
- */
-bool
-pg_tre_posting_lookup_tuple_bloom(Relation index,
-                                  BlockNumber root,
-                                  const uint8 *inline_data,
-                                  Size inline_bytes,
-                                  uint64 packed_tid,
-                                  uint8 *out_bloom,
-                                  Size out_bloom_sz,
-                                  uint32 *out_page_format_version)
-{
-    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    sm_t *smap = NULL;
-    size_t rank;
-    const uint8 *payload_base;
-    const uint8 *entry_ptr;
-
-    Assert(out_bloom_sz >= bloom_bytes);
-
-    if (out_page_format_version != NULL)
-        *out_page_format_version = PG_TRE_FORMAT_VERSION_LATEST;
-
-    /* Step 1: determine if TID is present in the sparsemap. */
-    if (inline_data != NULL)
-    {
-        /* Inline case: sparsemap + payload concatenated. */
-        /* Phase 5: assume no payload in inline for now (too complex for
-         * first iteration).  Return false. */
-        return false;
-    }
-
-    if (!BlockNumberIsValid(root))
-        return false;
-
-    /* On-disk case: walk right-link chain to find leaf containing packed_tid. */
-    {
-        BlockNumber cur_blk = root;
-        Buffer buf = InvalidBuffer;
-        Page page;
-        PgTrePostingLeafHeader *hdr;
-        uint8 *sm_bytes;
-        bool found = false;
-
-        /* Walk right-links until we find the leaf with min_tid <= target <= max_tid */
-        while (BlockNumberIsValid(cur_blk))
-        {
-            buf = pg_tre_read(index, cur_blk, PG_TRE_PAGE_POSTING_L,
-                             BUFFER_LOCK_SHARE);
-            page = BufferGetPage(buf);
-            hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
-
-            /* Check if this leaf contains the target TID */
-            if (packed_tid >= hdr->min_tid && packed_tid <= hdr->max_tid)
-            {
-                /* Found the right leaf */
-                break;
-            }
-
-            /* Move to next leaf */
-            BlockNumber next_blk = hdr->right_link;
-            UnlockReleaseBuffer(buf);
-            cur_blk = next_blk;
-
-            if (!BlockNumberIsValid(cur_blk))
-            {
-                /* TID not in any leaf */
-                return false;
-            }
-        }
-
-        if (!BlockNumberIsValid(cur_blk))
-            return false;
-
-        /* Now buf points to the leaf containing packed_tid */
-        if (!posting_leaf_header_valid(hdr))
-        {
-            UnlockReleaseBuffer(buf);
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("pg_tre: corrupt posting leaf at block %u",
-                            cur_blk)));
-        }
-        sm_bytes = (uint8 *) hdr + MAXALIGN(sizeof(*hdr));
-
-        /* Check if we have payload data. */
-        if (hdr->payload_bytes == 0)
-        {
-            UnlockReleaseBuffer(buf);
-            return false;
-        }
-
-        /* Wrap the sparsemap to test membership and compute rank. */
-        smap = sm_wrap(sm_bytes, hdr->sparsemap_bytes);
-        if (smap != NULL)
-            sm_open(smap, sm_bytes, hdr->sparsemap_bytes);
-        if (!sm_contains(smap, packed_tid, NULL))
-        {
-            free(smap);
-            UnlockReleaseBuffer(buf);
-            return false;
-        }
-
-        /* Compute rank: sm_rank(x, y, true) returns the count of set
-         * bits from x to y INCLUSIVE.  So if packed_tid is the Nth TID
-         * (0-indexed), rank will be N+1, and we need to skip N entries.
-         * Hence: skip (rank - 1) entries, not rank entries. */
-        rank = sm_rank(smap, 0, packed_tid, true);
-        free(smap);
-
-        /* Phase 5: payload layout:
-         * Each entry is: uint16 n_positions + uint32 positions[n_positions]
-         * + uint8 bloom[bloom_bytes].
-         * Walk forward 'rank-1' entries to find the target. */
-        payload_base = (const uint8 *) page + hdr->payload_offset;
-        entry_ptr = payload_base;
-        {
-            const uint8 *payload_end = payload_base + hdr->payload_bytes;
-
-            for (size_t i = 0; i + 1 < rank; i++)
-            {
-                uint16 n_pos;
-                Size   step;
-
-                if (entry_ptr + sizeof(uint16) > payload_end)
-                    goto corrupt_payload;
-                memcpy(&n_pos, entry_ptr, sizeof(uint16));
-                step = sizeof(uint16)
-                     + (Size) n_pos * sizeof(uint32)
-                     + bloom_bytes;
-                if (step > (Size) (payload_end - entry_ptr))
-                    goto corrupt_payload;
-                entry_ptr += step;
-            }
-
-            /* Now entry_ptr points at the start of the target entry. */
-            {
-                uint16 n_pos;
-                Size   skip;
-
-                if (entry_ptr + sizeof(uint16) > payload_end)
-                    goto corrupt_payload;
-                memcpy(&n_pos, entry_ptr, sizeof(uint16));
-                skip = sizeof(uint16) + (Size) n_pos * sizeof(uint32);
-                if (skip > (Size) (payload_end - entry_ptr)
-                    || bloom_bytes > (Size) (payload_end - entry_ptr) - skip)
-                    goto corrupt_payload;
-                entry_ptr += skip;
-
-                /* entry_ptr now points at the bloom bits. */
-                memcpy(out_bloom, entry_ptr, bloom_bytes);
-                found = true;
-            }
-        }
-
-        /*
-         * Surface the leaf page's per-page format_version so that the
-         * caller's bloom decoder can dispatch on it (see the format-
-         * version-aware decode helper in src/util/bloom.c).
-         */
-        if (out_page_format_version != NULL)
-            *out_page_format_version = PageTreGetOpaque(page)->format_version;
-
-        UnlockReleaseBuffer(buf);
-        return found;
-
-corrupt_payload:
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_DATA_CORRUPTED),
-                 errmsg("pg_tre: corrupt posting payload at block %u",
-                        cur_blk)));
-        return false;           /* unreachable */
-    }
-}
-
-/*
- * Look up positions where a trigram appears in a TID.
- * Returns the number of positions found (0 if TID not present).
- *
- * On success *out_positions is set to a buffer palloc'd in
- * CurrentMemoryContext holding the returned positions.  Ownership is
- * the caller's: it is freed when the surrounding memory context is
- * reset/deleted, or the caller may pfree it explicitly.  Each call
- * allocates a fresh buffer, so the result of one call is NOT clobbered
- * by a subsequent (possibly re-entrant) call -- unlike the previous
- * implementation, which returned a pointer into a single process-global
- * static array that aliased across re-entrant scans (issue H4).
- *
- * Phase 5.1: Implements position lookup from payload area.
- */
-int
-pg_tre_posting_lookup_positions(Relation index,
-                                BlockNumber root,
-                                const uint8 *inline_data,
-                                Size inline_bytes,
-                                uint64 packed_tid,
-                                const uint32 **out_positions)
-{
-    /*
-     * H4 fix: positions are copied into a buffer palloc'd in
-     * CurrentMemoryContext (allocated lazily once we know we have a
-     * non-empty position list).  No shared static storage, so
-     * concurrent / re-entrant lookups do not alias each other.
-     */
-    uint32 *positions_buf = NULL;
-    Size bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    sm_t *smap = NULL;
-    size_t rank;
-    const uint8 *payload_base;
-    const uint8 *entry_ptr;
-    uint16 n_positions;
-    const uint32 *positions_ptr;
-
-    /* Step 1: determine if TID is present in the sparsemap. */
-    if (inline_data != NULL)
-    {
-        /* Inline case: Phase 5 assumes no payload in inline for now */
-        return 0;
-    }
-
-    if (!BlockNumberIsValid(root))
-        return 0;  /* no posting tree */
-
-    /* Step 2: walk right-link chain to find leaf containing packed_tid */
-    {
-        BlockNumber cur_blk = root;
-        Buffer buf = InvalidBuffer;
-        Page page;
-        PgTrePostingLeafHeader *hdr;
-        Size smap_size;
-
-        /* Walk right-links until we find the leaf with min_tid <= target <= max_tid */
-        while (BlockNumberIsValid(cur_blk))
-        {
-            buf = ReadBuffer(index, cur_blk);
-            LockBuffer(buf, BUFFER_LOCK_SHARE);
-            page = BufferGetPage(buf);
-            hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
-
-            /* Check if this leaf contains the target TID */
-            if (packed_tid >= hdr->min_tid && packed_tid <= hdr->max_tid)
-            {
-                /* Found the right leaf */
-                break;
-            }
-
-            /* Move to next leaf */
-            BlockNumber next_blk = hdr->right_link;
-            UnlockReleaseBuffer(buf);
-            cur_blk = next_blk;
-
-            if (!BlockNumberIsValid(cur_blk))
-            {
-                /* TID not in any leaf */
-                return 0;
-            }
-        }
-
-        if (!BlockNumberIsValid(cur_blk))
-            return 0;
-
-        /* Now buf points to the leaf containing packed_tid */
-        if (!posting_leaf_header_valid(hdr))
-        {
-            UnlockReleaseBuffer(buf);
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("pg_tre: corrupt posting leaf at block %u",
-                            cur_blk)));
-        }
-
-        /* Check if this leaf has payload */
-        if (hdr->payload_offset == 0)
-        {
-            UnlockReleaseBuffer(buf);
-            return 0;  /* no payload */
-        }
-
-        /* Wrap sparsemap.  posting_leaf_header_valid() guarantees
-         * payload_offset >= the (MAXALIGN'd) header end, so this
-         * subtraction cannot underflow. */
-        smap_size = hdr->payload_offset - sizeof(PgTrePostingLeafHeader);
-        smap = sm_wrap((uint8 *) (hdr + 1), smap_size);
-        if (smap != NULL)
-            sm_open(smap, (uint8 *) (hdr + 1), smap_size);
-
-        /* Check if TID is present */
-        if (!sm_contains(smap, packed_tid, NULL))
-        {
-            UnlockReleaseBuffer(buf);
-            return 0;  /* TID not in posting */
-        }
-
-        /* Get rank (entry index) for this TID */
-        rank = sm_rank(smap, 0, packed_tid, true);
-
-        /* Payload starts at payload_offset from page start */
-        payload_base = (const uint8 *) page + hdr->payload_offset;
-
-        /* Walk payload entries to find our rank, bounds-checking every
-         * step against the declared payload region. */
-        entry_ptr = payload_base;
-        {
-            const uint8 *payload_end = payload_base + hdr->payload_bytes;
-            size_t entry_idx;
-            Size   avail;
-
-            /* Same fix as in lookup_tuple_bloom: skip (rank-1) entries */
-            for (entry_idx = 0; entry_idx + 1 < rank; entry_idx++)
-            {
-                uint16 entry_n_positions;
-                Size   step;
-
-                if (entry_ptr + sizeof(uint16) > payload_end)
-                    goto corrupt_positions;
-                memcpy(&entry_n_positions, entry_ptr, sizeof(uint16));
-                step = sizeof(uint16)
-                     + (Size) entry_n_positions * sizeof(uint32)
-                     + bloom_bytes;
-                if (step > (Size) (payload_end - entry_ptr))
-                    goto corrupt_positions;
-                entry_ptr += step;
-            }
-
-            /* Now entry_ptr points at our TID's payload entry */
-            if (entry_ptr + sizeof(uint16) > payload_end)
-                goto corrupt_positions;
-            memcpy(&n_positions, entry_ptr, sizeof(uint16));
-            entry_ptr += sizeof(uint16);
-
-            if (n_positions > 1024)
-                n_positions = 1024;  /* cap at buffer size */
-
-            /* Clamp to what actually remains in the payload region. */
-            avail = (Size) (payload_end - entry_ptr) / sizeof(uint32);
-            if ((Size) n_positions > avail)
-                n_positions = (uint16) avail;
-
-            positions_ptr = (const uint32 *) entry_ptr;
-
-            /*
-             * Copy positions into a per-call buffer palloc'd in
-             * CurrentMemoryContext (H4: no shared static storage).
-             * When n_positions is 0 we still hand back a valid (1-elem)
-             * buffer so *out_positions is never left dangling.
-             */
-            positions_buf = (uint32 *) palloc((n_positions > 0
-                                               ? (Size) n_positions : 1)
-                                              * sizeof(uint32));
-            if (n_positions > 0)
-                memcpy(positions_buf, positions_ptr,
-                       (Size) n_positions * sizeof(uint32));
-            *out_positions = positions_buf;
-
-            UnlockReleaseBuffer(buf);
-            return (int) n_positions;
-        }
-
-corrupt_positions:
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_DATA_CORRUPTED),
-                 errmsg("pg_tre: corrupt posting payload at block %u",
-                        cur_blk)));
-        return 0;               /* unreachable */
-    }
-}
-
 /* ================================================================
  * Bulk delete (VACUUM)
  * ================================================================
@@ -1705,7 +1107,7 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
                       uint64 *mig_min_tid, uint64 *mig_max_tid,
                       uint64 *mig_n_tids)
 {
-    Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+    Size    bloom_bytes = (PG_TRE_BLOOM_TUPLE_BITS + 7) / 8;
     sm_t *smap;
     Size    sm_size;
     bool    has_payload;
@@ -2121,7 +1523,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
         (PgTrePostingLeafHeader *) PageGetContents(page);
     uint8  *sm_bytes;
     sm_t *smap;
-    Size    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
+    Size    bloom_bytes = (PG_TRE_BLOOM_TUPLE_BITS + 7) / 8;
     Size    smap_size;
 
     /* surviving state */

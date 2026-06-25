@@ -10,8 +10,9 @@
  *                 results, emit to TIDBitmap via tbm_add_tuples.
  *   amendscan:    free scan state.
  *
- * Phase 5 extends amgetbitmap with tier-1 range bloom, tier-3 per-tuple
- * bloom, positional filtering, and k>0 via Navarro tiling.
+ * Phase 5 extends amgetbitmap with the tier-1 range bloom and k>0 via
+ * Navarro tiling.  (The per-tuple bloom / positional tier-3 filters were
+ * removed in 3.0.0; the executor recheck is authoritative.)
  */
 
 #include "postgres.h"
@@ -345,22 +346,6 @@ query_wants_trigram(const TrigramQuery *q, uint64 h)
                 return true;
     }
     return false;
-}
-
-/*
- * True if the query reduces to a single trigram (one conjunct with one
- * disjunct).  In that case the candidate set IS the posting list of
- * that trigram, and tier-3 / positional filters cannot prune anything:
- * every candidate's per-tuple bloom contains the trigram by
- * construction (see ambuild.c::find_or_create_tid_bloom), and the only
- * disjunct's position window covers the query's full match span.
- * Skipping tier-3 here turns a multi-minute hang into a millisecond
- * pass-through; correctness is preserved by the executor recheck.
- */
-static bool
-tre_query_is_single_trigram(const TrigramQuery *q)
-{
-    return q->n == 1 && q->conjuncts[0].n == 1;
 }
 
 static PendingOverlayEntry *
@@ -789,9 +774,7 @@ resolve_conjunct_with_overlay(Relation index, const TrigramConjunct *conj,
 /*
  * Scanner callback: reserved for a future fast-path using sm_scan
  * (which emits 64-bit vectors).  Phase 3 walks set bits via
- * sm_contains instead; the callback version becomes useful in
- * Phase 5 when we batch TIDs through tier-3 bloom refinement before
- * emitting.
+ * sm_contains instead.
  */
 #if 0
 typedef struct ScanCbCtx
@@ -810,458 +793,6 @@ sm_scan_cb(uint64 vec[], size_t n, void *aux)
 #endif
 
 /*
- * Per-trigram upper-tree lookup cache.
- *
- * Tier-3 (per-tuple bloom) and Phase 5.1 (positional) filters walk the
- * candidate sparsemap one TID at a time and, inside that loop, used to
- * call pg_tre_upper_lookup() once per (candidate, query-trigram) pair.
- * That probe descends the upper B-tree on every iteration even though
- * the (trigram_hash -> {root, inline_data}) mapping is invariant for
- * the life of the scan.  At C candidates and T query trigrams the
- * inner-loop probe count is C*T; for a 200k-candidate / 18-trigram
- * scan we burn ~3.6M B-tree probes that produce identical results.
- *
- * Lifetime invariant: the cache MUST NOT hold the upper-tree leaf
- * buffer across the scan.  pg_tre_upper_lookup() returns a
- * PgTreUpperRef that owns both a buffer pin AND a SHARE LWLock on
- * the leaf page; holding many SHARE locks across a long scan blocks
- * concurrent writers, risks LWLock-rank assertion failures, and was
- * empirically slower than the un-hoisted code (lock bookkeeping in
- * the per-candidate posting-tree-leaf walks).  Instead the build
- * step copies (root, inline_data, inline_bytes) out of the leaf into
- * cache-owned palloc'd memory and immediately releases the leaf;
- * cache lookups synthesize a PgTreUpperRef with upper_buf =
- * InvalidBuffer.  Consumers (pg_tre_posting_lookup_tuple_bloom,
- * pg_tre_posting_lookup_positions) only read root / inline_data /
- * inline_bytes from the ref and never dereference upper_buf, so the
- * synthetic ref is functionally equivalent.
- */
-typedef struct TriUpperCacheEntry
-{
-    uint64        hash;          /* trigram_hash key */
-    bool          present;       /* true iff pg_tre_upper_lookup found it */
-    BlockNumber   root;           /* posting root, or InvalidBlockNumber */
-    uint8        *inline_data;    /* palloc'd copy in cache cxt, or NULL */
-    Size          inline_bytes;   /* size of inline_data */
-} TriUpperCacheEntry;
-
-typedef struct TriUpperCache
-{
-    int                  n;        /* number of distinct trigrams cached */
-    int                  cap;      /* allocated entries */
-    TriUpperCacheEntry  *entries;  /* palloc'd in caller's MemoryContext */
-} TriUpperCache;
-
-/*
- * Compare two cache entries by hash; used to sort the cache after build
- * so lookups can binary-search instead of linear-scanning.  At T query
- * trigrams the old linear lookup made the C-candidate filter loops
- * O(C*T^2); bsearch makes them O(C*T*log T).
- */
-static int
-tri_upper_entry_cmp(const void *a, const void *b)
-{
-    uint64 x = ((const TriUpperCacheEntry *) a)->hash;
-    uint64 y = ((const TriUpperCacheEntry *) b)->hash;
-    return (x < y) ? -1 : (x > y) ? 1 : 0;
-}
-
-/*
- * Look up a trigram_hash in the cache.  Returns true iff a cache
- * entry exists AND the upper-tree lookup found the trigram (i.e.
- * pg_tre_upper_lookup would have returned true).  When true, *out is
- * filled with a synthetic PgTreUpperRef whose upper_buf is
- * InvalidBuffer and owns_inline is false (the cache owns the inline
- * copy, not the ref); the caller must NOT call pg_tre_upper_release on
- * it (and doing so is a no-op anyway: BufferIsValid is false and
- * owns_inline is false, so neither the unlock nor the pfree fires).
- *
- * Entries are kept sorted by hash (see tri_upper_cache_build), so this
- * is a binary search.
- */
-static inline bool
-tri_upper_cache_lookup(const TriUpperCache *cache, uint64 hash,
-                       PgTreUpperRef *out)
-{
-    int lo, hi;
-
-    if (cache == NULL || cache->n <= 0)
-        return false;
-
-    lo = 0;
-    hi = cache->n - 1;
-    while (lo <= hi)
-    {
-        int           mid = lo + (hi - lo) / 2;
-        uint64        h = cache->entries[mid].hash;
-
-        if (h == hash)
-        {
-            if (!cache->entries[mid].present)
-                return false;
-            out->upper_buf = InvalidBuffer;
-            out->root = cache->entries[mid].root;
-            out->inline_data = cache->entries[mid].inline_data;
-            out->inline_bytes = cache->entries[mid].inline_bytes;
-            out->owns_inline = false;   /* cache owns the copy, not the ref */
-            return true;
-        }
-        else if (h < hash)
-            lo = mid + 1;
-        else
-            hi = mid - 1;
-    }
-    return false;
-}
-
-/*
- * Build the cache: walk every trigram_hash mentioned anywhere in q,
- * dedup by linear scan, and call pg_tre_upper_lookup at most once per
- * distinct hash.  Inline blobs are copied into cxt-owned palloc'd
- * buffers so the upper-tree leaf buffer can be released before this
- * function returns -- the cache holds no buffer pins or LWLocks.
- */
-static void
-tri_upper_cache_build(TriUpperCache *cache, Relation index,
-                      const TrigramQuery *q, MemoryContext cxt)
-{
-    int total;
-    int ci, j, k;
-    MemoryContext old;
-
-    cache->n = 0;
-    cache->cap = 0;
-    cache->entries = NULL;
-
-    if (q == NULL || q->n <= 0)
-        return;
-
-    /* Upper bound on distinct trigrams = sum of disjunct counts. */
-    total = 0;
-    for (ci = 0; ci < q->n; ci++)
-        total += q->conjuncts[ci].n;
-    if (total <= 0)
-        return;
-
-    old = MemoryContextSwitchTo(cxt);
-    cache->entries = (TriUpperCacheEntry *)
-                     palloc(sizeof(TriUpperCacheEntry) * total);
-    cache->cap = total;
-    MemoryContextSwitchTo(old);
-
-    for (ci = 0; ci < q->n; ci++)
-    {
-        const TrigramConjunct *conj = &q->conjuncts[ci];
-        for (j = 0; j < conj->n; j++)
-        {
-            uint64        h = conj->alts[j].trigram_hash;
-            bool          seen = false;
-            PgTreUpperRef tmp;
-            TriUpperCacheEntry *slot;
-
-            for (k = 0; k < cache->n; k++)
-            {
-                if (cache->entries[k].hash == h)
-                {
-                    seen = true;
-                    break;
-                }
-            }
-            if (seen)
-                continue;
-
-            slot = &cache->entries[cache->n];
-            slot->hash = h;
-            slot->present = false;
-            slot->root = InvalidBlockNumber;
-            slot->inline_data = NULL;
-            slot->inline_bytes = 0;
-
-            if (pg_tre_upper_lookup(index, h, &tmp))
-            {
-                slot->present = true;
-                slot->root = tmp.root;
-                slot->inline_bytes = tmp.inline_bytes;
-                if (tmp.inline_bytes > 0 && tmp.inline_data != NULL)
-                {
-                    /*
-                     * Copy the inline blob out of the leaf buffer
-                     * into cache-owned memory so we can release the
-                     * leaf below without invalidating slot->
-                     * inline_data.
-                     */
-                    old = MemoryContextSwitchTo(cxt);
-                    slot->inline_data = (uint8 *) palloc(tmp.inline_bytes);
-                    MemoryContextSwitchTo(old);
-                    memcpy(slot->inline_data, tmp.inline_data,
-                           tmp.inline_bytes);
-                }
-                /*
-                 * Release the leaf buffer + LWLock.  The cache must
-                 * not hold either across the scan.
-                 */
-                pg_tre_upper_release(&tmp);
-            }
-            cache->n++;
-        }
-    }
-
-    /*
-     * Sort entries by hash so tri_upper_cache_lookup() can binary-search.
-     * Build-time dedup above stays a linear scan (it runs O(T) times over
-     * a growing list of <= T distinct entries, off the per-candidate hot
-     * path), but the lookup is called C*T times during filtering.
-     */
-    if (cache->n > 1)
-        qsort(cache->entries, cache->n, sizeof(TriUpperCacheEntry),
-              tri_upper_entry_cmp);
-}
-
-/*
- * Release cache state.  No buffer pins or LWLocks are held by the
- * cache (those were released in tri_upper_cache_build), so this is
- * just a bookkeeping reset.  The palloc'd inline_data copies live in
- * the caller's MemoryContext and are reclaimed when that context
- * resets.
- */
-static void
-tri_upper_cache_release(TriUpperCache *cache)
-{
-    if (cache == NULL)
-        return;
-    cache->n = 0;
-}
-
-/*
- * Tier-3 per-tuple bloom filter: refine a candidate TID sparsemap by
- * checking each TID's per-tuple bloom against all required trigrams.
- * Returns a new sparsemap containing only TIDs that pass the bloom filter.
- *
- * Phase 5 stub: pg_tre_posting_lookup_tuple_bloom is implemented by
- * Phase 5 WRITE, but returns false for TIDs without payload (Phase 4
- * postings).  So this function gracefully degrades to a no-op for indexes
- * built before Phase 5 payload support.
- *
- * The caller must build a TriUpperCache covering every trigram_hash in
- * q and pass it via 'cache'; the inner loop is then a hash-cache
- * lookup instead of a per-(candidate, trigram) upper-tree probe.
- */
-static sm_t *
-apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
-                        sm_t *candidates, MemoryContext cxt,
-                        const TriUpperCache *cache)
-{
-    sm_t *refined;
-    uint64 idx;
-    /*
-     * Bloom scratch buffer.  Layout: [PgTreBloom header][bloom_bytes
-     * of bit array].  The build path serializes only the bit array
-     * into the posting-leaf payload (see
-     * src/pages/posting.c::serialize_payload), so on scan we read
-     * those bytes into the *bit-array region* and reconstruct the
-     * header in place before calling pg_tre_bloom_contains_trigram
-     * - which expects a real PgTreBloom* and reads m_bits/k from
-     * the header.
-     *
-     * 256 bytes covers headers + the largest reasonable
-     * pg_tre.bloom_tuple_bits (1024 bits = 128 bytes) plus the
-     * sizeof(PgTreBloom) header with MAXALIGN padding.
-     *
-     * Pre-1.2.1 this code cast a raw bit array directly to
-     * (PgTreBloom *) and read garbage from the bit data as if it
-     * were the m_bits/k header - the chain-rank "bug" we tracked
-     * for several releases was actually this.  Tier-3 was gated
-     * off via pg_tre.tuple_bloom_enable=false to mask it.
-     */
-    uint8 bloom_buf[256];
-    Size bloom_bytes;
-    int i, j;
-
-    if (candidates == NULL || sm_cardinality(candidates) == 0)
-        return candidates;
-
-    /* Phase 5: per-tuple blooms are (pg_tre_bloom_tuple_bits + 7) / 8 bytes */
-    bloom_bytes = (pg_tre_bloom_tuple_bits + 7) / 8;
-    /*
-     * The bloom scratch is laid out as [header][bit array].  Total
-     * footprint must fit in bloom_buf.  Cap bloom_bytes if it
-     * would overflow the buffer (defensive; the GUC validator
-     * already caps bloom_tuple_bits well below this).
-     */
-    {
-        Size header_bytes = MAXALIGN(sizeof(PgTreBloom));
-        if (header_bytes + bloom_bytes > sizeof(bloom_buf))
-            bloom_bytes = sizeof(bloom_buf) - header_bytes;
-    }
-
-    /*
-     * The refined map is always a subset of the candidates, so it can
-     * never need more capacity than the candidate map.  sm_add_grow()
-     * handles any incremental growth, so size at 1x (matching the
-     * positional filter below) instead of over-allocating 2x+256.
-     */
-    refined = sm_create(sm_get_capacity(candidates));
-    if (refined == NULL)
-        return candidates;  /* OOM; fall back to unrefined */
-
-    /*
-     * Iterate set bits via sm_next_member rather than walking
-     * [sm_minimum, sm_maximum] and calling sm_contains at every
-     * gap.  For a 100K-row 1000-page heap the old walk visited
-     * ~65M empty indexes; this one visits only candidates.
-     */
-    idx = SM_IDX_MAX;
-    while ((idx = sm_next_member(candidates, idx, NULL)) != SM_IDX_MAX)
-    {
-        bool passes = true;
-
-            /* For each conjunct, check if at least one disjunct's trigram
-             * is present in the tuple's bloom.  In CNF mode, ALL conjuncts
-             * must have at least one disjunct present.  In DNF mode, at
-             * least ONE conjunct must have ALL its disjuncts present. */
-
-            if (q->mode == TRIGRAM_QUERY_CNF)
-            {
-                /* CNF: AND across conjuncts */
-                for (i = 0; i < q->n && passes; i++)
-                {
-                    const TrigramConjunct *conj = &q->conjuncts[i];
-                    bool conj_pass = false;
-                    /* Header lives at offset 0; bit array starts at
-                     * MAXALIGN(sizeof(PgTreBloom)).  See the
-                     * bloom_buf comment above. */
-                    PgTreBloom *bloom_view = (PgTreBloom *) bloom_buf;
-                    uint8 *bit_array = bloom_buf + MAXALIGN(sizeof(PgTreBloom));
-
-                    for (j = 0; j < conj->n; j++)
-                    {
-                        uint64 h = conj->alts[j].trigram_hash;
-                        PgTreUpperRef ref;
-                        bool has_bloom = false;
-                        uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
-
-                        if (tri_upper_cache_lookup(cache, h, &ref))
-                        {
-                            has_bloom = pg_tre_posting_lookup_tuple_bloom(
-                                            index, ref.root, ref.inline_data,
-                                            ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes,
-                                            &page_fmt);
-                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
-                        }
-
-                        if (has_bloom)
-                        {
-                            /* Reconstruct the bloom header in a
-                             * format-version-aware manner.  Today
-                             * v3 == v4; the dispatch lives in
-                             * pg_tre_bloom_decode_tuple() so future
-                             * format versions can be added in one
-                             * place.  Build path uses k=5 (see
-                             * find_or_create_tid_bloom). */
-                            if (!pg_tre_bloom_decode_tuple(bloom_view,
-                                                          (uint16) pg_tre_bloom_tuple_bits,
-                                                          5, page_fmt))
-                            {
-                                /* Unknown format -- fall back to
-                                 * recheck rather than reject. */
-                                conj_pass = true;
-                                break;
-                            }
-                            if (pg_tre_bloom_contains_trigram(bloom_view, h))
-                            {
-                                conj_pass = true;
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            /* No bloom data (Phase 4 posting or inline);
-                             * conservatively assume the trigram might be
-                             * present (pass through). */
-                            conj_pass = true;
-                            break;
-                        }
-                    }
-
-                    if (!conj_pass)
-                        passes = false;
-                }
-            }
-            else
-            {
-                /* DNF: OR across conjuncts (tiles); at least one tile
-                 * must have ALL its trigrams present. */
-                passes = false;
-                for (i = 0; i < q->n && !passes; i++)
-                {
-                    const TrigramConjunct *tile = &q->conjuncts[i];
-                    bool tile_pass = true;
-                    PgTreBloom *bloom_view = (PgTreBloom *) bloom_buf;
-                    uint8 *bit_array = bloom_buf + MAXALIGN(sizeof(PgTreBloom));
-
-                    for (j = 0; j < tile->n && tile_pass; j++)
-                    {
-                        uint64 h = tile->alts[j].trigram_hash;
-                        PgTreUpperRef ref;
-                        bool has_bloom = false;
-                        uint32 page_fmt = PG_TRE_FORMAT_VERSION_LATEST;
-
-                        if (tri_upper_cache_lookup(cache, h, &ref))
-                        {
-                            has_bloom = pg_tre_posting_lookup_tuple_bloom(
-                                            index, ref.root, ref.inline_data,
-                                            ref.inline_bytes, idx,
-                                            bit_array, bloom_bytes,
-                                            &page_fmt);
-                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
-                        }
-
-                        if (has_bloom)
-                        {
-                            /* Format-version-aware decode.  See the
-                             * CNF arm above for rationale. */
-                            if (!pg_tre_bloom_decode_tuple(bloom_view,
-                                                          (uint16) pg_tre_bloom_tuple_bits,
-                                                          5, page_fmt))
-                            {
-                                /* Unknown format -- skip this tile. */
-                                continue;
-                            }
-                            if (!pg_tre_bloom_contains_trigram(bloom_view, h))
-                            {
-                                tile_pass = false;
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            /* No bloom; assume pass */
-                        }
-                    }
-
-                    if (tile_pass)
-                        passes = true;
-                }
-            }
-
-            if (passes)
-            {
-                if (sm_add_grow(&refined, idx) == SM_IDX_MAX)
-                {
-                    /* Out of memory; bail to unrefined result. */
-                    sm_free(refined);
-                    return candidates;
-                }
-            }
-    }
-
-    (void) cxt;
-    free(candidates);
-    return refined;
-}
-
-/*
  * Compute the candidate-TID sparsemap for the current scan.
  *
  * Caller must have st->scan_cxt as the current memory context.  The
@@ -1278,19 +809,15 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
      * Maps owned transiently during the build.  Tracked in volatile
      * locals so the PG_CATCH below can free them if any ereport-capable
      * call (pg_tre_posting_materialize, sm_intersection/sm_union/sm_copy,
-     * pg_tre_posting_lookup_positions, sm_add) longjmps out mid-build --
-     * otherwise these malloc-backed maps leak (H3).
+     * sm_add) longjmps out mid-build -- otherwise these malloc-backed
+     * maps leak (H3).
      */
     volatile sm_t *inflight = NULL;   /* transient sm being merged */
-    volatile sm_t *filtered = NULL;   /* positional-filter result */
     PendingOverlay ov;
     volatile bool  overlay_built = false;
     CrackCache     crack = {0};
     volatile bool  crack_built = false;
-    TriUpperCache  upper_cache;
-    volatile bool  upper_cache_built = false;
     volatile bool  short_circuit = false;   /* CNF proved empty: result == NULL */
-    bool           single_run;              /* B1.2: tier-3 valid only if 1 run */
     int           i;
 
     *out_always_true = false;
@@ -1433,224 +960,6 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         }
     }
 
-    /*
-     * When the CNF intersection proved the candidate set empty,
-     * result is NULL and there is nothing further to filter; skip the
-     * upper-tree cache build and the tier-3 / positional passes.
-     */
-    if (!short_circuit)
-    {
-    /*
-     * Phase B1.2: the tier-3 / positional refinements below resolve
-     * trigrams against the single index root via the upper-tree
-     * cache, so they are only valid when the index has exactly one
-     * run.  With multiple runs we skip them: they are lossy
-     * optimizations and the executor recheck stays authoritative, so
-     * results remain correct (just less pre-filtered).  Making the
-     * cache + filters run-aware is a later B1 increment.
-     */
-    single_run = (pg_tre_run_count(scan->indexRelation) == 1);
-
-    /*
-     * Build the per-trigram upper-tree lookup cache.  Both tier-3 and
-     * the Phase 5.1 positional filter walk every candidate TID and used
-     * to call pg_tre_upper_lookup() in their innermost loop -- O(C*T)
-     * upper-tree probes for C candidates and T query trigrams.  Hoist
-     * the lookups into a single O(T) pass; the inner loops do a small
-     * linear-scan cache hit instead.
-     */
-    if (single_run)
-    {
-        tri_upper_cache_build(&upper_cache, scan->indexRelation, &st->q,
-                              st->scan_cxt);
-        upper_cache_built = true;
-    }
-
-    /* Tier-3: per-tuple bloom filter (chain-rank gated; see comment in
-     * pg_tre_amgetbitmap below). */
-    if (single_run &&
-        result != NULL && st->q.global_max_cost >= 0 &&
-        pg_tre_tuple_bloom_enable &&
-        !tre_query_is_single_trigram(&st->q) &&
-        sm_cardinality((sm_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
-    {
-        result = apply_tuple_bloom_filter(scan->indexRelation, &st->q,
-                                          (sm_t *) result, st->scan_cxt,
-                                          &upper_cache);
-    }
-
-    /* Phase 5.1: positional filter (CNF only). */
-    if (single_run &&
-        result != NULL && sm_cardinality((sm_t *) result) > 0 &&
-        st->q.mode == TRIGRAM_QUERY_CNF &&
-        pg_tre_tuple_bloom_enable &&
-        !tre_query_is_single_trigram(&st->q) &&
-        sm_cardinality((sm_t *) result) <= (uint64) pg_tre_tier3_max_candidates)
-    {
-        filtered = sm_create(sm_get_capacity((sm_t *) result));
-        if (filtered != NULL)
-        {
-            uint64 tid_idx = SM_IDX_MAX;
-            /*
-             * H4: pg_tre_posting_lookup_positions() returns a pointer
-             * into a process-global static buffer (posting.c) that is
-             * aliased across re-entrant scans.  Copy each result into
-             * this scan-context buffer immediately and read only from
-             * the copy, so a re-entrant posting lookup cannot clobber
-             * positions out from under us.  The posting side caps a
-             * single TID's position list at 1024 entries.
-             */
-            uint32 *pos_copy = palloc(sizeof(uint32) * 1024);
-
-            while ((tid_idx = sm_next_member((sm_t *) result, tid_idx, NULL)) != SM_IDX_MAX)
-            {
-                bool passes = (st->q.mode == TRIGRAM_QUERY_CNF);
-                int ci, j;
-
-                for (ci = 0;
-                     ci < st->q.n &&
-                     (st->q.mode == TRIGRAM_QUERY_CNF ? passes : !passes);
-                     ci++)
-                {
-                    const TrigramConjunct *conj = &st->q.conjuncts[ci];
-
-                    if (st->q.mode == TRIGRAM_QUERY_CNF)
-                    {
-                        bool conj_pass = false;
-                        bool any_evaluated = false;
-                        for (j = 0; j < conj->n && !conj_pass; j++)
-                        {
-                            const TrigramDisjunct *dis = &conj->alts[j];
-                            PgTreUpperRef ref;
-                            const uint32 *positions;
-                            int n_positions, p;
-
-                            if (!tri_upper_cache_lookup(&upper_cache,
-                                                        dis->trigram_hash,
-                                                        &ref))
-                                continue;
-                            any_evaluated = true;
-
-                            n_positions = pg_tre_posting_lookup_positions(
-                                            scan->indexRelation,
-                                            ref.root, ref.inline_data,
-                                            ref.inline_bytes,
-                                            tid_idx, &positions);
-                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
-
-                            if (n_positions == 0)
-                            {
-                                conj_pass = true;
-                                break;
-                            }
-
-                            /* H4: copy out of the shared static buffer before use. */
-                            if (n_positions > 1024)
-                                n_positions = 1024;
-                            memcpy(pos_copy, positions,
-                                   sizeof(uint32) * n_positions);
-                            positions = pos_copy;
-
-                            for (p = 0; p < n_positions; p++)
-                            {
-                                if (positions[p] >= (uint32) dis->min_offset &&
-                                    positions[p] <= (uint32) dis->max_offset)
-                                {
-                                    conj_pass = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!any_evaluated)
-                            conj_pass = true;
-                        if (!conj_pass)
-                            passes = false;
-                    }
-                    else  /* DNF */
-                    {
-                        bool tile_pass = true;
-                        for (j = 0; j < conj->n && tile_pass; j++)
-                        {
-                            const TrigramDisjunct *dis = &conj->alts[j];
-                            PgTreUpperRef ref;
-                            const uint32 *positions;
-                            int n_positions, p;
-                            bool this_tri_pass = false;
-
-                            if (!tri_upper_cache_lookup(&upper_cache,
-                                                        dis->trigram_hash,
-                                                        &ref))
-                            {
-                                tile_pass = false;
-                                break;
-                            }
-
-                            n_positions = pg_tre_posting_lookup_positions(
-                                            scan->indexRelation,
-                                            ref.root, ref.inline_data,
-                                            ref.inline_bytes,
-                                            tid_idx, &positions);
-                            /* synthetic ref from cache: upper_buf=InvalidBuffer; nothing to release. */
-
-                            if (n_positions == 0)
-                                this_tri_pass = true;
-                            else
-                            {
-                                /* H4: copy out of the shared static buffer before use. */
-                                if (n_positions > 1024)
-                                    n_positions = 1024;
-                                memcpy(pos_copy, positions,
-                                       sizeof(uint32) * n_positions);
-                                positions = pos_copy;
-
-                                for (p = 0; p < n_positions; p++)
-                                {
-                                    if (positions[p] >= (uint32) dis->min_offset &&
-                                        positions[p] <= (uint32) dis->max_offset)
-                                    {
-                                        this_tri_pass = true;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (!this_tri_pass)
-                                tile_pass = false;
-                        }
-
-                        if (tile_pass)
-                        {
-                            passes = true;
-                            break;
-                        }
-                        else
-                            passes = false;
-                    }
-                }
-
-                if (passes)
-                {
-                    if (sm_add((sm_t *) filtered, tid_idx) == SM_IDX_MAX)
-                    {
-                        free((sm_t *) filtered);
-                        filtered = NULL;
-                        break;
-                    }
-                }
-            }
-
-            if (filtered != NULL)
-            {
-                free((sm_t *) result);
-                result = filtered;
-                filtered = NULL;
-            }
-        }
-    }
-
-    tri_upper_cache_release(&upper_cache);
-    upper_cache_built = false;
-    }  /* if (!short_circuit) */
 
     crack_cache_destroy(&crack);
     crack_built = false;
@@ -1660,20 +969,16 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         /*
          * H3: a longjmp out of any ereport-capable call above skips the
          * manual frees.  Release every malloc-backed map we still own,
-         * plus the overlay and upper-tree cache, then re-throw.
+         * plus the overlay, then re-throw.
          */
         if (inflight != NULL)
             free((sm_t *) inflight);
-        if (filtered != NULL)
-            free((sm_t *) filtered);
         if (result != NULL)
             free((sm_t *) result);
         if (overlay_built)
             overlay_free(&ov);
         if (crack_built)
             crack_cache_destroy(&crack);
-        if (upper_cache_built)
-            tri_upper_cache_release(&upper_cache);
         PG_RE_THROW();
     }
     PG_END_TRY();
@@ -1743,8 +1048,8 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
             /*
              * Emit all candidate TIDs in a single tbm_add_tuples() call
              * rather than one per TID.  The 'recheck' flag is true
-             * because the index's trigram / bloom / positional filters
-             * are approximate: the executor must recheck the WHERE
+             * because the index's trigram filters and the range-bloom
+             * pre-filter are approximate: the executor must recheck the WHERE
              * clause per row.  (This is recheck, NOT lossy block-level
              * matching - the bitmap stays exact at the TID level until
              * it overflows work_mem.)
@@ -1802,7 +1107,7 @@ pg_tre_amendscan(IndexScanDesc scan)
  *
  * Recheck flags:
  *   xs_recheck = true        -- the index uses approximate filtering
- *                              (trigram + bloom + positional), so the
+ *                              (trigram + range bloom), so the
  *                              executor must recompute body %~~ pat.
  *   xs_recheckorderby = false -- the distance we returned is exact;
  *                              no Sort is needed above us.
@@ -2126,8 +1431,9 @@ pg_tre_amgettuple(IndexScanDesc scan, ScanDirection dir)
     pg_tre_unpack_tid(e->packed_tid, &scan->xs_heaptid);
 
     /*
-     * Tell the executor to recheck the WHERE clause: our trigram /
-     * bloom / positional filters are approximate, and even the post-
+     * Tell the executor to recheck the WHERE clause: our trigram
+     * filters and the range-bloom pre-filter are approximate, and even
+     * the post-
      * filter set still contains false positives that survive only
      * because of the conservative-pass rules in tre_compute_candidate_sm.
      */

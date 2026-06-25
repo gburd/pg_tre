@@ -99,18 +99,26 @@ extern int  pg_tre_default_max_cost;
 extern int  pg_tre_pending_list_limit_kb;
 extern int  pg_tre_min_trigram_freq;
 extern int  pg_tre_range_size_blocks;
-extern int  pg_tre_bloom_tuple_bits;
 extern int  pg_tre_max_extraction_fanout;
 extern int  pg_tre_max_nfa_states;
 extern int  pg_tre_compile_timeout_ms;
 extern int  pg_tre_match_timeout_ms;
 extern bool pg_tre_fastupdate;
-extern bool pg_tre_tuple_bloom_enable;
 extern bool pg_tre_flush_to_run;
 extern bool pg_tre_crack_on_read;
 extern bool pg_tre_coalesce_enable;
-extern int  pg_tre_tier3_max_candidates;
 extern int  pg_tre_build_max_entries_mb;
+
+/*
+ * Width of the legacy per-tuple bloom (bits).  The per-tuple positional
+ * bloom/payload path was removed in 3.0.0; new builds emit payload-free
+ * posting leaves.  This constant remains because (a) the range-bloom
+ * width is derived from it at meta init (bloom_range_m_bits = 16x) and
+ * (b) the vacuum-repack reader must know the per-entry bloom stride to
+ * walk OLD (pre-3.0 v8) payload-bearing leaves correctly.  Old leaves
+ * were all built with the historical default of 128 bits.
+ */
+#define PG_TRE_BLOOM_TUPLE_BITS 128
 extern double pg_tre_similarity_threshold;
 
 /* Initialization entry points. */

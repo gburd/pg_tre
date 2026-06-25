@@ -66,7 +66,12 @@ extern void pg_tre_bloom_union(PgTreBloom *dst, const PgTreBloom *src);
  * pick the right wire layout.  The bit array must be at offset
  * MAXALIGN(sizeof(PgTreBloom)) within view_buf, so callers should
  * arrange the buffer as [header slot][bit array] before reading bytes
- * into the bit-array slot via pg_tre_posting_lookup_tuple_bloom().
+ * into the bit-array slot.
+ *
+ * NOTE: the per-tuple positional bloom READER was removed in 3.0.0
+ * (no current caller).  This decoder + the shared PgTreBloom
+ * primitives are retained for the range-bloom tier and any future
+ * re-introduction of a bloom reader.
  *
  * page_format_version is the per-page on-disk format the bytes came
  * from; it must satisfy PG_TRE_FORMAT_VERSION_MIN <= v <=

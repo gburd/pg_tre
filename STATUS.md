@@ -124,18 +124,18 @@ that silently dropped every leaf past the first.
 ### Configuration
 
 - GUCs: `pg_tre.default_max_cost`, `pg_tre.pending_list_limit`,
-  `pg_tre.range_size_blocks`, `pg_tre.bloom_tuple_bits`,
+  `pg_tre.range_size_blocks`,
   `pg_tre.max_extraction_fanout`, `pg_tre.max_nfa_states`,
   `pg_tre.compile_timeout_ms`, `pg_tre.match_timeout_ms`,
-  `pg_tre.tier3_max_candidates`, `pg_tre.min_trigram_freq`,
-  `pg_tre.fastupdate`, `pg_tre.tuple_bloom_enable`.
-- `pg_tre.tuple_bloom_enable = true` by default (1.2.3+):
-  the tier-3 per-tuple bloom and positional filter run
-  routinely.  The 1.2.2 bloom-header fix and the 1.2.3
-  pending-overlay fix together resolved the long-running
-  bypass.  Recheck remains authoritative for correctness.
-- Reloptions: `q`, `bloom_tuple_bits`, `range_size_blocks`,
-  `fastupdate`, `tuple_bloom_enable`, `pending_list_limit`.
+  `pg_tre.min_trigram_freq`,
+  `pg_tre.fastupdate`.
+- The per-tuple positional bloom/payload path (the `tuple_bloom_enable`
+  / `bloom_tuple_bits` GUCs + reloption, the `tier3_max_candidates`
+  GUC, and the tier-3.1 positional pre-filter) was removed in 3.0.0.
+  Builds emit payload-free posting leaves; the range bloom (tier-1
+  skip) is retained.  Recheck remains authoritative for correctness.
+- Reloptions: `q`, `range_size_blocks`, `fastupdate`,
+  `pending_list_limit`.
 
 ### Testing
 

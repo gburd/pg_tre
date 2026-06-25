@@ -4,8 +4,9 @@
  *   - ambulkdelete: walk every posting tree reachable from the upper
  *     tree and strip dead heap TIDs (issue C2).  For each stored TID we
  *     invoke the supplied IndexBulkDeleteCallback; TIDs reported dead
- *     are removed from the leaf sparsemap and their parallel payload
- *     entries are dropped, and the leaf is WAL-logged.  Real statistics
+ *     are removed from the leaf sparsemap (and, on OLD pre-3.0
+ *     payload-bearing leaves, their parallel payload entries are
+ *     dropped too), and the leaf is WAL-logged.  Real statistics
  *     are reported (tuples_removed / num_index_tuples / num_pages).
  *   - amvacuumcleanup: merge the pending list into posting trees and
  *     report index-size statistics.

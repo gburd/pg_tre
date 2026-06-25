@@ -32,17 +32,14 @@ int  pg_tre_default_max_cost       = 3;
 int  pg_tre_pending_list_limit_kb  = 4096;   /* 4 MiB */
 int  pg_tre_min_trigram_freq       = 1;      /* 0 disables */
 int  pg_tre_range_size_blocks      = 128;
-int  pg_tre_bloom_tuple_bits       = 128;
 int  pg_tre_max_extraction_fanout  = 4096;
 int  pg_tre_max_nfa_states         = 10000;
 int  pg_tre_compile_timeout_ms     = 1000;
 int  pg_tre_match_timeout_ms       = 1000;
 bool pg_tre_fastupdate             = true;
-bool pg_tre_tuple_bloom_enable     = true;  /* lossy positional pre-filter; PGC_USERSET as of 2.0.3 */
 bool pg_tre_flush_to_run           = false; /* Phase B1.3: gated (see bench) */
 bool pg_tre_crack_on_read          = false; /* Phase B1.5: gated (see bench) */
 bool pg_tre_coalesce_enable        = false; /* v2.0 coalescing: gated (see bench) */
-int  pg_tre_tier3_max_candidates   = 50000;
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
 
@@ -66,12 +63,6 @@ pg_tre_init_guc(void)
         NULL,
         &pg_tre_range_size_blocks,
         128, 1, 131072, PGC_SIGHUP, 0, NULL, NULL, NULL);
-
-    DefineCustomIntVariable("pg_tre.bloom_tuple_bits",
-        "Bits per per-tuple bloom filter.",
-        NULL,
-        &pg_tre_bloom_tuple_bits,
-        128, 32, 1024, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.max_extraction_fanout",
         "Maximum number of trigram disjuncts a query may emit.",
@@ -101,22 +92,6 @@ pg_tre_init_guc(void)
         "Enable the fast-update pending list for inserts.",
         NULL,
         &pg_tre_fastupdate,
-        true, PGC_USERSET, 0, NULL, NULL, NULL);
-
-    DefineCustomBoolVariable("pg_tre.tuple_bloom_enable",
-        "Store the per-tuple positional payload (positions + bloom) in"
-        " posting leaves for the tier-3.1 positional pre-filter.",
-        "This payload is a LOSSY pre-filter only -- the executor recheck is"
-        " authoritative, so disabling it never changes query results, only"
-        " how many candidates are pre-filtered before recheck.  It costs"
-        " ~22 bytes per (trigram,TID) UNCOMPRESSED, which on a large/high-"
-        " cardinality corpus dominates the index (it was ~58%% of one"
-        " 30k-row field-report index).  Now PGC_USERSET so it can be"
-        " toggled per session before CREATE INDEX (was PGC_SIGHUP and"
-        " uncontrollable per build before 2.0.3).  Default ON for"
-        " compatibility; set OFF for a much denser index when the"
-        " positional pre-filter is not needed.",
-        &pg_tre_tuple_bloom_enable,
         true, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.flush_to_run",
@@ -174,16 +149,6 @@ pg_tre_init_guc(void)
         " .agent/notes/blocker1-density-brief.md.",
         &pg_tre_coalesce_enable,
         false, PGC_USERSET, 0, NULL, NULL, NULL);
-
-    DefineCustomIntVariable("pg_tre.tier3_max_candidates",
-        "Skip per-tuple bloom and positional filters when the candidate"
-        " set already exceeds this many TIDs.",
-        "Tier-3 filters do per-TID work proportional to the candidate"
-        " cardinality.  For very large candidate sets the recheck path"
-        " is cheaper than running tier-3, so we skip it.  Set to 0 to"
-        " disable tier-3 entirely; INT_MAX disables this safety belt.",
-        &pg_tre_tier3_max_candidates,
-        50000, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.build_max_entries_mb",
         "Optional temp-disk safety valve for index builds (0 = unlimited,"

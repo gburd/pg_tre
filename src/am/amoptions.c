@@ -1,7 +1,7 @@
 /*
  * src/am/amoptions.c - reloptions and opclass validation.
  *
- * Phase 6 adds per-index storage options (q, range_size, bloom_bits,
+ * Phase 6 adds per-index storage options (q, range_size,
  * fastupdate, pending_list_limit).  Phase 0 accepts only the empty set
  * and treats amvalidate as always-true for the single opclass we ship.
  */
@@ -28,10 +28,8 @@ typedef struct PgTreOptions
     int32       vl_len_;                /* varlena header (do not touch directly!) */
     int         pending_list_limit_kb;  /* fast-update pending list size limit */
     int         q;                      /* trigram size (Phase 8; must be 3 until then) */
-    int         bloom_tuple_bits;       /* bits per tuple bloom filter */
     int         range_size_blocks;      /* heap blocks per range bloom entry */
     bool        fastupdate;             /* enable fast-update pending list */
-    bool        tuple_bloom_enable;     /* enable per-tuple bloom filters */
 } PgTreOptions;
 
 static relopt_kind pg_tre_relopt_kind = 0;
@@ -53,20 +51,12 @@ pg_tre_init_reloptions(void)
                       "Trigram size (must be 3 until Phase 8)",
                       3, 3, 3, AccessExclusiveLock);
 
-    add_int_reloption(pg_tre_relopt_kind, "bloom_tuple_bits",
-                      "Bits per per-tuple bloom filter",
-                      128, 32, 1024, AccessExclusiveLock);
-
     add_int_reloption(pg_tre_relopt_kind, "range_size_blocks",
                       "Heap blocks summarized per range bloom entry",
                       128, 1, 131072, AccessExclusiveLock);
 
     add_bool_reloption(pg_tre_relopt_kind, "fastupdate",
                        "Enable fast-update pending list",
-                       true, AccessExclusiveLock);
-
-    add_bool_reloption(pg_tre_relopt_kind, "tuple_bloom_enable",
-                       "Enable per-tuple bloom filters",
                        true, AccessExclusiveLock);
 }
 
@@ -78,14 +68,10 @@ pg_tre_amoptions(Datum reloptions, bool validate)
          offsetof(PgTreOptions, pending_list_limit_kb)},
         {"q", RELOPT_TYPE_INT,
          offsetof(PgTreOptions, q)},
-        {"bloom_tuple_bits", RELOPT_TYPE_INT,
-         offsetof(PgTreOptions, bloom_tuple_bits)},
         {"range_size_blocks", RELOPT_TYPE_INT,
          offsetof(PgTreOptions, range_size_blocks)},
         {"fastupdate", RELOPT_TYPE_BOOL,
          offsetof(PgTreOptions, fastupdate)},
-        {"tuple_bloom_enable", RELOPT_TYPE_BOOL,
-         offsetof(PgTreOptions, tuple_bloom_enable)},
     };
 
     /* Phase 6: if reloptions not initialized, return NULL to use GUC defaults */
@@ -132,13 +118,6 @@ pg_tre_get_q(Relation index)
 }
 
 int
-pg_tre_get_bloom_tuple_bits(Relation index)
-{
-    PgTreOptions *opts = pg_tre_get_options(index);
-    return opts ? opts->bloom_tuple_bits : pg_tre_bloom_tuple_bits;
-}
-
-int
 pg_tre_get_range_size_blocks(Relation index)
 {
     PgTreOptions *opts = pg_tre_get_options(index);
@@ -150,13 +129,6 @@ pg_tre_get_fastupdate(Relation index)
 {
     PgTreOptions *opts = pg_tre_get_options(index);
     return opts ? opts->fastupdate : pg_tre_fastupdate;
-}
-
-bool
-pg_tre_get_tuple_bloom_enable(Relation index)
-{
-    PgTreOptions *opts = pg_tre_get_options(index);
-    return opts ? opts->tuple_bloom_enable : pg_tre_tuple_bloom_enable;
 }
 
 bool
