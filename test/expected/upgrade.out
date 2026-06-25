@@ -38,14 +38,14 @@ FROM pg_tre_index_format_status('upg_idx'::regclass)
 ORDER BY format_version;
  format_version | has_pages 
 ----------------+-----------
-              8 | t
+              9 | t
 (1 row)
 
 -- (2) Min format version matches LATEST exactly.
 SELECT pg_tre_index_min_format_version('upg_idx'::regclass) AS min_fmt;
  min_fmt 
 ---------
-       8
+       9
 (1 row)
 
 -- (3) Run pg_tre_upgrade_index.  Must succeed cleanly.
@@ -82,13 +82,13 @@ FROM pg_tre_index_format_status('upg_idx'::regclass)
 ORDER BY format_version;
  format_version | has_pages 
 ----------------+-----------
-              8 | t
+              9 | t
 (1 row)
 
 SELECT pg_tre_index_min_format_version('upg_idx'::regclass) AS min_fmt_after;
  min_fmt_after 
 ---------------
-             8
+             9
 (1 row)
 
 -- (6) Error path: non-pg_tre relation rejected.
