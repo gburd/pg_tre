@@ -16,7 +16,7 @@ ANALYZE rc_t;
 SELECT count(*) AS n_runs FROM tre_run_catalog_status('rc_idx');
 SELECT run_id, level FROM tre_run_catalog_status('rc_idx');
 
--- The index is at format v8.
+-- The index is at format v9.
 SELECT format_version FROM pg_tre_index_format_status('rc_idx');
 
 -- Scan result equals seq-scan ground truth.

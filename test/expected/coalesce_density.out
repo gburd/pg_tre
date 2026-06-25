@@ -1,4 +1,4 @@
--- Posting-page coalescing DENSITY win (Blocker 1, format v8).
+-- Posting-page coalescing DENSITY win (Blocker 1, format v9).
 --
 -- v2.0 shipped coalescing with a narrow medium bucket (2048, 3072]: a
 -- coalesced page only ever packed ~2 slots, and the entire
@@ -16,7 +16,7 @@
 --      exists (so the wider band actually packed medium postings).
 --   3. The coalesce-ON index is STRICTLY smaller than the coalesce-OFF
 --      index (the density win, not merely non-regression).
---   4. The ON index is at on-disk format v8 (additive; no REINDEX).
+--   4. The ON index is at on-disk format v9 (additive; no REINDEX).
 --
 -- The exact page/byte counts are not hard-coded (fragile across
 -- sparsemap revisions); we assert the direction of the win only.
@@ -128,8 +128,8 @@ SELECT CASE WHEN pg_relation_size('density_on_idx')
  ok
 (1 row)
 
--- (4) Format v8: every page of the ON index is at format v8.
-SELECT CASE WHEN min(format_version) = 8 THEN 'ok' ELSE 'bad' END
+-- (4) Format v8: every page of the ON index is at format v9.
+SELECT CASE WHEN min(format_version) = 9 THEN 'ok' ELSE 'bad' END
          AS format_result
 FROM pg_tre_index_format_status('density_on_idx'::regclass);
  format_result 

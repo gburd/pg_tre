@@ -1,4 +1,4 @@
--- Posting-page coalescing (v2.0, format v8).
+-- Posting-page coalescing (v2.0, format v9).
 --
 -- Coalescing packs medium-cardinality trigram postings onto shared
 -- pages instead of one dedicated page each.  It changes ON-DISK SIZE
@@ -9,7 +9,7 @@
 --   2. The coalesce-ON index is NO LARGER than the coalesce-OFF index
 --      (the size win is best-effort and corpus-dependent, but the
 --      feature must never regress size).
---   3. Both indexes are at on-disk format v8 (the additive bump landed;
+--   3. Both indexes are at on-disk format v9 (the additive bump landed;
 --      no page is below v8 in a from-scratch build).
 --
 -- We do NOT assert exact trigram/page counts or that coalescing
@@ -91,9 +91,9 @@ SELECT CASE WHEN pg_relation_size('coalesce_on_idx')
               <= pg_relation_size('coalesce_off_idx')
             THEN 'ok' ELSE 'bad' END AS size_result;
 
--- (3) Format v8: every page of the coalesced index is at format v8
+-- (3) Format v8: every page of the coalesced index is at format v9
 -- (no page is below the latest version in a from-scratch build).
-SELECT CASE WHEN min(format_version) = 8 THEN 'ok' ELSE 'bad' END
+SELECT CASE WHEN min(format_version) = 9 THEN 'ok' ELSE 'bad' END
          AS format_result
 FROM pg_tre_index_format_status('coalesce_on_idx'::regclass);
 

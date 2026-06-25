@@ -81,7 +81,7 @@
  * release can fold this into a v9 LATEST bump once the format-version
  * regression assertions are reconciled.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 8
+#define PG_TRE_FORMAT_VERSION_LATEST 9
 #define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the
