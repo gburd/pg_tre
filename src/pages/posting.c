@@ -1360,7 +1360,7 @@ pg_tre_posting_lookup_tuple_bloom(Relation index,
         smap = sm_wrap(sm_bytes, hdr->sparsemap_bytes);
         if (smap != NULL)
             sm_open(smap, sm_bytes, hdr->sparsemap_bytes);
-        if (!sm_contains(smap, packed_tid))
+        if (!sm_contains(smap, packed_tid, NULL))
         {
             free(smap);
             UnlockReleaseBuffer(buf);
@@ -1552,7 +1552,7 @@ pg_tre_posting_lookup_positions(Relation index,
             sm_open(smap, (uint8 *) (hdr + 1), smap_size);
 
         /* Check if TID is present */
-        if (!sm_contains(smap, packed_tid))
+        if (!sm_contains(smap, packed_tid, NULL))
         {
             UnlockReleaseBuffer(buf);
             return 0;  /* TID not in posting */
@@ -1751,7 +1751,7 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
     }
 
     member = SM_IDX_MAX;
-    while ((member = sm_next_member(smap, member)) != SM_IDX_MAX)
+    while ((member = sm_next_member(smap, member, NULL)) != SM_IDX_MAX)
     {
         ItemPointerData iptr;
         bool    dead;
@@ -2171,7 +2171,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
         sm_open(smap, sm_bytes, smap_size);
 
     member = SM_IDX_MAX;
-    while (smap != NULL && (member = sm_next_member(smap, member)) != SM_IDX_MAX)
+    while (smap != NULL && (member = sm_next_member(smap, member, NULL)) != SM_IDX_MAX)
     {
         ItemPointerData iptr;
         bool    dead;

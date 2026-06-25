@@ -1111,7 +1111,7 @@ apply_tuple_bloom_filter(Relation index, const TrigramQuery *q,
      * ~65M empty indexes; this one visits only candidates.
      */
     idx = SM_IDX_MAX;
-    while ((idx = sm_next_member(candidates, idx)) != SM_IDX_MAX)
+    while ((idx = sm_next_member(candidates, idx, NULL)) != SM_IDX_MAX)
     {
         bool passes = true;
 
@@ -1502,7 +1502,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
              */
             uint32 *pos_copy = palloc(sizeof(uint32) * 1024);
 
-            while ((tid_idx = sm_next_member((sm_t *) result, tid_idx)) != SM_IDX_MAX)
+            while ((tid_idx = sm_next_member((sm_t *) result, tid_idx, NULL)) != SM_IDX_MAX)
             {
                 bool passes = (st->q.mode == TRIGRAM_QUERY_CNF);
                 int ci, j;
@@ -1754,7 +1754,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
             uint64 i = SM_IDX_MAX;
             int n = 0;
 
-            while ((i = sm_next_member(result, i)) != SM_IDX_MAX)
+            while ((i = sm_next_member(result, i, NULL)) != SM_IDX_MAX)
                 pg_tre_unpack_tid(i, &tids[n++]);
 
             tbm_add_tuples(tbm, tids, n, true /* recheck */);
@@ -1994,7 +1994,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         {
             uint64 idx = SM_IDX_MAX;
 
-            while ((idx = sm_next_member((sm_t *) result, idx)) != SM_IDX_MAX)
+            while ((idx = sm_next_member((sm_t *) result, idx, NULL)) != SM_IDX_MAX)
             {
                 ItemPointerData tid;
                 int32           dist = 0;

@@ -203,7 +203,7 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
             RangeAccum *last_ra = NULL;
             uint64 iter_count = 0;
 
-            while ((tid = sm_next_member(smap, prev_idx)) != SM_IDX_MAX)
+            while ((tid = sm_next_member(smap, prev_idx, NULL)) != SM_IDX_MAX)
             {
                 BlockNumber heap_blk;
                 BlockNumber range_start;

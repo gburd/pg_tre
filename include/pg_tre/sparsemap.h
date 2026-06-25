@@ -163,6 +163,7 @@
 #define sparsemap            SM__P(sparsemap)
 #define sm_t                 SM__P(sm_t)
 #define sm_allocator_t       SM__P(sm_allocator_t)
+#define sm_cursor_t          SM__P(sm_cursor_t)
 #define sm_membership_t      SM__P(sm_membership_t)
 #define sm_stats_t           SM__P(sm_stats_t)
 #define sm_subset_relation_t SM__P(sm_subset_relation_t)
@@ -186,7 +187,6 @@
 #define sm_create_from_array        SM__P(sm_create_from_array)
 #define sm_create_from_range        SM__P(sm_create_from_range)
 #define sm_create_singleton         SM__P(sm_create_singleton)
-#define sm_create_with_allocator    SM__P(sm_create_with_allocator)
 #define sm_deserialize              SM__P(sm_deserialize)
 #define sm_difference               SM__P(sm_difference)
 #define sm_difference_cardinality   SM__P(sm_difference_cardinality)
@@ -252,87 +252,120 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "4.0.0"
-#define SM_VERSION_MAJOR  4
+#define SM_VERSION_STRING "5.0.0"
+#define SM_VERSION_MAJOR  5
 #define SM_VERSION_MINOR  0
 #define SM_VERSION_PATCH  0
 
-/** Opaque handle to a sparsemap instance. */
+/** Handle to a sparsemap instance.
+ *
+ * By default this is an opaque type: allocate with sm_create() /
+ * sm_wrap() and access only through the sm_* functions.  The struct
+ * layout is private and may change between releases (the byte
+ * capacity, used-byte count, and a lineage tag, none of which are
+ * part of the serialized wire format).
+ *
+ * Define SM_EXPOSE_STRUCT before including <sm.h> to make the full
+ * struct definition visible -- needed only to embed an sm_t by value
+ * inside another structure (for example a shared-memory control
+ * block).  Doing so opts out of the ABI-opacity guarantee: code that
+ * embeds sm_t by value must be recompiled whenever the struct layout
+ * changes.  The serialized format is unaffected either way.
+ */
 typedef struct sparsemap sm_t;
 
-/** @brief Custom allocator hooks.
+/** @brief Custom allocator hooks (process-global, CRoaring-style).
  *
- * Sparsemap allocates memory in three places: at construction time
- * (sm_create / sm_wrap / sm_owned_copy / sm_union / etc.), at grow
- * time (sm_set_data_size, sm_*_inplace, sm_*_grow), and at free time.
+ * Sparsemap allocates memory at construction time (sm_create /
+ * sm_wrap / sm_owned_copy / sm_union / ...), at grow time
+ * (sm_set_data_size, sm_*_inplace, sm_*_grow), and at free time.
  *
  * Embedders that need to route those allocations through a custom
- * allocator (e.g. PostgreSQL's palloc / pfree, embedded allocators,
- * arena allocators) can supply a sm_allocator_t.  Two scopes:
- *
- *   sm_set_allocator(hooks)             process-wide default; affects
- *                                       every sparsemap created without
- *                                       an explicit override.  Pass an
- *                                       all-zero struct to revert to
- *                                       libc malloc/free.
- *
- *   sm_create_with_allocator(n, hooks)  per-map override; the supplied
- *                                       hooks are copied into the map
- *                                       and used for every allocation
- *                                       on this map.  Maps derived from
- *                                       it (sm_copy, sm_union, etc.)
- *                                       inherit the same allocator.
+ * allocator (PostgreSQL's palloc / pfree, an arena, a tracking
+ * wrapper) install one process-wide with sm_set_allocator(), exactly
+ * as CRoaring's roaring_init_memory_hook does.  There is no per-map
+ * allocator: the hooks are global, and no allocator state is stored
+ * in sm_t (keeping it to three words).
  *
  * Contract for the hook implementations:
  *
- *   - alloc(n, aux): return a pointer to at least `n` bytes of
- *     uninitialized memory, or NULL on failure.
- *   - alloc_zero(n, aux): return at least `n` bytes of *zero-filled*
- *     memory, or NULL on failure.  Optional: if NULL, sparsemap
- *     falls back to alloc() + memset(0).  Implement separately when
- *     your allocator can deliver zeroed memory cheaply (e.g.
- *     mmap(MAP_ANONYMOUS), kernel page allocator, calloc).
- *   - realloc(p, n, aux): grow or shrink an existing allocation; return
+ *   - malloc(n): return at least `n` bytes of uninitialized memory,
+ *     or NULL on failure.
+ *   - realloc(p, n): grow or shrink an existing allocation; return
  *     the (possibly relocated) pointer or NULL on failure.  p == NULL
- *     is equivalent to alloc(n, aux).
- *   - free(p, aux): release an allocation made by alloc/realloc.  Must
+ *     behaves like malloc(n).
+ *   - free(p): release an allocation made by malloc/realloc.  Must
  *     accept p == NULL as a no-op.
- *   - aligned_alloc / aligned_free: reserved for future SIMD work.
- *     Not invoked by any 2.2.x code path.
  *
  * Any individual function pointer may be NULL; sparsemap falls back
  * to the libc equivalent for that operation.  An all-zero struct
- * therefore means "use libc throughout".
+ * therefore means "use libc throughout", which is the default.
  */
 typedef struct sm_allocator {
-	void *(*alloc)(size_t n, void *aux);
-	void *(*alloc_zero)(size_t n, void *aux);
-	void *(*realloc)(void *p, size_t n, void *aux);
-	void (*free)(void *p, void *aux);
-	/* Aligned-allocation slots, reserved for future SIMD work.  Not
-	 * exercised by any 2.2.x code path -- the regular alloc/realloc
-	 * already hand back 8-byte-aligned blocks, which is what every
-	 * current sparsemap operation needs.  Provide them now so the
-	 * struct shape is stable when SIMD lands; the scalar paths
-	 * ignore them.  When implemented, semantics will match C11
-	 * aligned_alloc(): `alignment` is a power of two, `n` must be a
-	 * multiple of `alignment`. */
-	void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
-	void (*aligned_free)(void *p, void *aux);
-	void *aux;
+	void *(*malloc)(size_t n);
+	void *(*realloc)(void *p, size_t n);
+	void (*free)(void *p);
 } sm_allocator_t;
 
-/** @brief Set the process-wide default allocator hooks.
+/** @brief Set the process-wide allocator hooks.
  *
- * Affects every sparsemap created subsequently without an explicit
- * override.  Pass an all-zero struct (e.g. `(sm_allocator_t){0}`) to
- * reset to libc malloc/realloc/free.  Not thread-safe; intended for
- * one-shot library initialization.
- *
- * The struct is taken by value and copied into a static.  The
- * caller's copy can go out of scope safely.
+ * Affects every allocation sparsemap makes after the call.  Pass an
+ * all-zero struct (e.g. `(sm_allocator_t){0}`) to reset to libc
+ * malloc/realloc/free.  Not thread-safe; intended for one-shot
+ * library initialization before any map is created, exactly like
+ * CRoaring's roaring_init_memory_hook.  The struct is copied into a
+ * file-static, so the caller's copy can go out of scope safely.
  */
 void sm_set_allocator(sm_allocator_t a);
+
+/*
+ * Full struct definition.  Visible to the library's own translation
+ * unit (which defines SM_INTERNAL before including this header) and
+ * to consumers that explicitly opt in with SM_EXPOSE_STRUCT.  Kept in
+ * one place so the embedded-copy use case cannot drift from the
+ * library's own definition.
+ *
+ * sm_t is three machine words.  The allocation-lineage tag (how
+ * m_data was provisioned) is folded into the low bits of m_capacity:
+ * capacity is always rounded up to an 8-byte boundary, so its low 3
+ * bits are free.  Use the internal __sm_cap() / __sm_kind() accessors
+ * rather than touching m_capacity directly.  There is no per-map
+ * allocator and no stored cursor; reads accelerate through a
+ * caller-owned sm_cursor_t (see below).  Nothing here is serialized.
+ */
+#if defined(SM_INTERNAL) || defined(SM_EXPOSE_STRUCT)
+struct __attribute__((aligned(8))) sparsemap {
+	size_t m_capacity;  /* (capacity & ~7) bytes; low 3 bits = lineage */
+	size_t m_data_used; /* used size of m_data, in bytes */
+	uint8_t *m_data;    /* the serialized bitmap data */
+};
+#endif
+
+/** @brief Caller-owned read cursor for accelerated sequential lookups.
+ *
+ * A cursor caches the most-recently-located chunk so a SEQUENCE of
+ * monotonically NON-DECREASING idx lookups on an UNMUTATED map resumes
+ * the chunk walk from there instead of from chunk 0, turning an
+ * otherwise O(N^2) scan into O(N).  Only sm_contains(), sm_next_member(),
+ * and sm_prev_member() accept one.
+ *
+ * Contract:
+ *   - Initialize with `sm_cursor_t c = SM_CURSOR_INIT;` before the loop.
+ *   - Pass `&c` to consecutive lookups with non-decreasing idx.
+ *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
+ *     sm_set_data_size / sm_clear / sm_split / the *_inplace ops / ...)
+ *     between two cursor uses invalidates the cursor.  Using a stale
+ *     cursor afterwards is undefined behavior; reset it with
+ *     SM_CURSOR_INIT.
+ *   - Do not share one cursor across a mutation or across maps.
+ *   - Passing NULL means "no acceleration" (walk from chunk 0); always
+ *     safe.
+ */
+typedef struct sm_cursor {
+	size_t offset;      /* byte offset of cached chunk; SIZE_MAX = invalid */
+	uint64_t start_idx; /* cached chunk's start bit */
+} sm_cursor_t;
+#define SM_CURSOR_INIT { (size_t)-1, 0 }
 
 /** Sentinel value returned when a lookup finds no matching bit. */
 #define SM_IDX_MAX UINT64_MAX
@@ -361,27 +394,11 @@ void sm_set_allocator(sm_allocator_t a);
  * @code
  *   sm_t *map = sm_create(4096);
  *   sm_add(map, 42);
- *   assert(sm_contains(map, 42));
+ *   assert(sm_contains(map, 42, NULL));
  *   sm_free(map);
  * @endcode
  */
 sm_t *sm_create(size_t size);
-
-/** @brief Allocate a sparsemap with a per-map allocator override.
- *
- * Use this when you want a specific allocator for one or a few maps
- * and the rest of the process can keep using the default.  Pass an
- * all-zero struct (e.g. `(sm_allocator_t){0}`) to fall back to the
- * global default (set via sm_set_allocator) -- in that case the map
- * snapshots the global allocator at creation time and uses it for
- * the lifetime of the map regardless of subsequent sm_set_allocator
- * calls.
- *
- * The hook struct is taken by value and copied into the map.  The
- * caller's copy can go out of scope safely.  Maps derived from this
- * one (sm_copy, sm_union, sm_xor, etc.) inherit the same allocator.
- */
-sm_t *sm_create_with_allocator(size_t size, sm_allocator_t a);
 
 /** @brief Deprecated alias for sm_create().
  *
@@ -498,7 +515,7 @@ void sm_open(sm_t *map, uint8_t *data, size_t size);
  *     sm_t *m = sm_create(n + slack);
  *     memcpy(sm_get_data(m), data, n);
  *     sm_open(m, sm_get_data(m), n + slack);
- *     // m_alloc_kind ends up SM_WRAPPED; restore SM_OWNED_CONTIGUOUS
+ *     // lineage ends up SM_WRAPPED; restore SM_OWNED_CONTIGUOUS
  *     // because the buffer is in fact contiguous with the struct.
  *
  * Returns an SM_OWNED_CONTIGUOUS map of capacity `n + slack` whose
@@ -613,9 +630,11 @@ void *sm_get_data(const sm_t *map);
  *
  * @param[in] map  The sparsemap to query.
  * @param[in] idx  0-based bit position.
+ * @param[in] cur  Optional read cursor for sequential acceleration, or
+ *                 NULL.  See sm_cursor_t.
  * @returns true if bit \a idx is 1, false if 0 or out of range.
  */
-bool sm_contains(sm_t *map, uint64_t idx);
+bool sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur);
 
 /** @brief Set or clear the bit at \a idx.
  *
@@ -642,6 +661,12 @@ uint64_t sm_assign(sm_t *map, uint64_t idx, bool value);
  * Setting a bit may trigger chunk coalescing: if the new bit extends a
  * contiguous run of set bits across chunk boundaries, adjacent chunks may be
  * merged into a single RLE chunk.
+ *
+ * Note: sm_add takes no read cursor, so building a map by calling it in
+ * an ascending loop is O(N^2) (each call rewalks the chunk list).
+ * Callers building a map from many indices should use sm_add_many() /
+ * sm_add_many_grow(), which thread an internal cursor for O(N)
+ * construction.
  *
  * @param[in,out] map  The sparsemap to modify.
  * @param[in]     idx  0-based bit position to set.
@@ -991,7 +1016,8 @@ uint64_t sm_singleton_member(const sm_t *map);
  * Standard idiom for forward iteration:
  * @code
  *   uint64_t i = SM_IDX_MAX;  // start sentinel
- *   while ((i = sm_next_member(map, i)) != SM_IDX_MAX) {
+ *   sm_cursor_t c = SM_CURSOR_INIT;
+ *   while ((i = sm_next_member(map, i, &c)) != SM_IDX_MAX) {
  *       // i is the next set bit
  *   }
  * @endcode
@@ -1000,25 +1026,29 @@ uint64_t sm_singleton_member(const sm_t *map);
  *
  * @param[in] map       The sparsemap to scan.
  * @param[in] prev_idx  Lower exclusive bound (use SM_IDX_MAX for "start at 0").
+ * @param[in] cur       Optional read cursor for sequential acceleration,
+ *                      or NULL.  See sm_cursor_t.
  * @returns The next set bit index, or SM_IDX_MAX if none.
  */
-uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx);
+uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
 
 /** @brief Find the highest set bit at index < \a prev_idx.
  *
  * Standard idiom for reverse iteration:
  * @code
  *   uint64_t i = SM_IDX_MAX;  // start past-the-end
- *   while ((i = sm_prev_member(map, i)) != SM_IDX_MAX) {
+ *   while ((i = sm_prev_member(map, i, NULL)) != SM_IDX_MAX) {
  *       // i is the previous set bit
  *   }
  * @endcode
  *
  * @param[in] map       The sparsemap to scan.
  * @param[in] prev_idx  Upper exclusive bound (use SM_IDX_MAX for "start at end").
+ * @param[in] cur       Optional read cursor (currently unused for reverse
+ *                      iteration; accepted for API symmetry), or NULL.
  * @returns The previous set bit index, or SM_IDX_MAX if none.
  */
-uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx);
+uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
 
 /* -------------------------------------------------------------------
  * Cardinality without allocation
@@ -1060,8 +1090,8 @@ double sm_jaccard_index(const sm_t *a, const sm_t *b);
  * Equivalent to a loop over `sm_add(map, arr[i])`, but sorts a private
  * copy of `arr` ascending first, so the cost is O(n log n + n)
  * regardless of caller order.  (A raw unsorted loop is O(n^2): the
- * map's tail-chunk cursor only accelerates ascending inserts, so
- * random-order inserts each do a full chunk walk + byte-shift.)  The
+ * bulk path threads an internal cursor that only accelerates ascending
+ * inserts, so random-order inserts each do a full chunk walk + byte-shift.)  The
  * caller's array is const and untouched.
  *
  * @param[in,out] map  Destination.
@@ -1079,7 +1109,7 @@ bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
  * buffer is realloc'd geometrically on ENOSPC instead of failing.
  * Sorts a private copy of `arr` ascending first (same O(n log n + n)
  * rationale).  This is the bulk-build entry point for callers that
- * accumulate an unbounded TID stream.
+ * accumulate an unbounded index stream.
  *
  * @param[in,out] map  Destination (may be realloc'd; *map is updated).
  * @param[in]     arr  Array of indices (any order).
