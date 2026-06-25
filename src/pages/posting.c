@@ -517,7 +517,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
          * in v2.0.2), turning the build back into O(N log N).
          */
         CHECK_FOR_INTERRUPTS();
-        if (!sm_add_many_grow(&fresh, b->tids, (size_t) b->n_tids))
+        if (!sm_add_many_grow(&fresh, (const uint64_t *) b->tids, (size_t) b->n_tids))
         {
             size_t final_cap = sm_get_capacity(fresh);
             sm_free(fresh);
@@ -649,7 +649,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                     if (probe == NULL)                                    \
                         ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),   \
                             errmsg("pg_tre: failed to allocate slice sparsemap"))); \
-                    if (!sm_add_many_grow(&probe, b->tids + tid_idx,      \
+                    if (!sm_add_many_grow(&probe, (const uint64_t *) b->tids + tid_idx, \
                                           (size_t) (len_)))               \
                     {                                                     \
                         sm_free(probe);                                   \
@@ -731,7 +731,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                     if (exact == NULL)
                         ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                             errmsg("pg_tre: failed to allocate slice sparsemap")));
-                    if (!sm_add_many_grow(&exact, b->tids + tid_idx,
+                    if (!sm_add_many_grow(&exact, (const uint64_t *) b->tids + tid_idx,
                                           (size_t) tids_in_leaf))
                     {
                         sm_free(exact);
