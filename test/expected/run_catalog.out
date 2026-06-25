@@ -33,11 +33,11 @@ SELECT run_id, level FROM tre_run_catalog_status('rc_idx');
       0 |     1
 (1 row)
 
--- The index is at format v8.
+-- The index is at format v9.
 SELECT format_version FROM pg_tre_index_format_status('rc_idx');
  format_version 
 ----------------
-              8
+              9
 (1 row)
 
 -- Scan result equals seq-scan ground truth.
