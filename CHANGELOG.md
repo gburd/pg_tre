@@ -16,17 +16,32 @@ v6/v7/v8 indexes read unchanged.
 
 ### Changed
 
-- **Vendored sparsemap upgraded to v5.1.0** (verbatim from upstream).  v5.0.0
+- **Vendored sparsemap upgraded to v5.1.1** (verbatim from upstream).  v5.0.0
   shrinks `sm_t` from 32 to 24 bytes (the read cursor moved out of the struct
   into an explicit, optional `sm_cursor_t *` argument on `sm_contains` /
   `sm_next_member` / `sm_prev_member`; the allocation-lineage tag folds into
   `m_capacity`'s low bits); v5.1.0 widens the internal chunk count to 64-bit
-  (removing the 2^32-chunk ceiling).  The **on-disk wire format is unchanged**
-  (`SM_WIRE_VERSION` still 2), so serialized postings are byte-compatible --
-  no REINDEX from the sparsemap bump.  pg_tre uses `sm_t` only by pointer, so
-  the struct shrink is transparent; all read-cursor call sites pass `NULL`.
-  Also picks up upstream `sm_rank` chunk-walk fixes and consumer-overridable
-  intrinsics.
+  (removing the 2^32-chunk ceiling); v5.1.1 restores the O(N) bulk-insert
+  guarantee (the v5.0 cursor-out-of-struct rewrite had reset the bulk cursor
+  on every new chunk, which made building a large posting O(N^2)).  The
+  **on-disk wire format is unchanged** (`SM_WIRE_VERSION` still 2), so
+  serialized postings are byte-compatible -- no REINDEX from the sparsemap
+  bump.  pg_tre uses `sm_t` only by pointer, so the struct shrink is
+  transparent.  Also picks up upstream `sm_rank` chunk-walk fixes and
+  consumer-overridable intrinsics.
+
+- **Index build is now O(N log N) instead of O(N^2) on large/dense
+  postings.**  The posting serializer fed TIDs to the sparsemap one at a
+  time (re-walking the chunk directory per insert), and the member-iteration
+  loops (range-tier bulkload, scan emitters, pending drains, vacuum repack)
+  passed `NULL` read cursors (re-walking per member).  With the per-tuple
+  payload gone, dense postings pack far more TIDs per leaf, which tipped
+  these into multi-minute `CREATE INDEX` hangs.  The build now bulk-loads
+  via `sm_add_many_grow`, sizes multi-leaf slices by a proportional estimate
+  (a few probes, not a full binary search), and threads a read cursor
+  through every hot member-iteration loop.  Measured on a 40-hot-trigram
+  corpus (index == seq-scan at every scale): 10k 0.6s, 30k 4.5s, 60k 10s,
+  100k 19s -- previously a hang past ~60k.
 
 - **pg_tre no longer creates the `(text,text)` similarity operators**
   `%`, `<->`, `<%`, `<<->`, `<<%`, `<<<->`.  They collided with pg_trgm's
@@ -72,7 +87,7 @@ v6/v7/v8 indexes read unchanged.
 
 - The pg.ddx.io / agora operator, whose 500k-row build timeout drove the
   bloom removal, and who needs pg_tre and pg_trgm co-loaded.
-- The sparsemap project for the v5.1.0 release.
+- The sparsemap project for the v5.1.1 release.
 
 ---
 
