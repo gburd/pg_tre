@@ -631,8 +631,10 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                  * with per-TID sm_add_grow is O(M^2) -- sm_add_grow
                  * re-walks the chunk directory from the front on every
                  * add (the 100k-row CREATE INDEX hang).  Instead we
-                 * binary-search the prefix length, building each trial
-                 * slice in one O(M log M) sm_add_many_grow pass.
+                 * estimate the prefix length proportionally
+                 * (bytes ~ k*tids for a contiguous ascending slice) and
+                 * correct with a few one-shot sm_add_many_grow probes --
+                 * far fewer than a full binary search's ~log2(avail).
                  */
                 int avail = n_tids - tid_idx;
                 int tids_in_leaf;
@@ -669,24 +671,56 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                     }
                     else
                     {
-                        /* Binary-search the largest prefix length whose
-                         * serialized size <= budget.  Monotone in len. */
-                        int lo = 1, hi = avail, best = 1;
-                        while (lo <= hi)
+                        /*
+                         * Proportional estimate: bytes ~ k*tids, so
+                         * len ~ avail * budget / whole_sz.  Aim a touch
+                         * under (95%) to land at-or-below budget on the
+                         * first probe, then correct: grow while the
+                         * slice still fits, shrink while it overshoots.
+                         * For a uniform-density slice this converges in
+                         * 1-3 probes vs ~log2(avail) for binary search.
+                         */
+                        int est = (int) (((double) avail * (double) budget
+                                          / (double) whole_sz) * 0.95);
+                        int len;
+                        Size esz;
+                        if (est < 1)
+                            est = 1;
+                        if (est > avail)
+                            est = avail;
+                        len = est;
+                        SLICE_SIZE_OF(len, esz);
+                        if (esz <= budget)
                         {
-                            int mid = lo + (hi - lo) / 2;
-                            Size msz;
-                            CHECK_FOR_INTERRUPTS();
-                            SLICE_SIZE_OF(mid, msz);
-                            if (msz <= budget)
+                            /* Grow geometrically while it still fits. */
+                            while (len < avail)
                             {
-                                best = mid;
-                                lo = mid + 1;
+                                int step = (avail - len + 7) / 8;
+                                int nlen = len + step;
+                                Size nsz;
+                                CHECK_FOR_INTERRUPTS();
+                                SLICE_SIZE_OF(nlen, nsz);
+                                if (nsz > budget)
+                                    break;
+                                len = nlen;
                             }
-                            else
-                                hi = mid - 1;
                         }
-                        tids_in_leaf = best;
+                        else
+                        {
+                            /* Shrink by 1/8ths until it fits. */
+                            while (len > 1)
+                            {
+                                int step = (len + 7) / 8;
+                                len -= step;
+                                if (len < 1)
+                                    len = 1;
+                                CHECK_FOR_INTERRUPTS();
+                                SLICE_SIZE_OF(len, esz);
+                                if (esz <= budget)
+                                    break;
+                            }
+                        }
+                        tids_in_leaf = len;
                     }
                 }
                 if (tids_in_leaf < 1)
@@ -1185,7 +1219,9 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
     }
 
     member = SM_IDX_MAX;
-    while ((member = sm_next_member(smap, member, NULL)) != SM_IDX_MAX)
+    {
+    sm_cursor_t mcur = SM_CURSOR_INIT;
+    while ((member = sm_next_member(smap, member, &mcur)) != SM_IDX_MAX)
     {
         ItemPointerData iptr;
         bool    dead;
@@ -1233,6 +1269,7 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
             memcpy(new_payload + new_payload_used, this_entry, this_entry_len);
             new_payload_used += this_entry_len;
         }
+    }
     }
 
     sm_free(smap);
@@ -1605,7 +1642,9 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
         sm_open(smap, sm_bytes, smap_size);
 
     member = SM_IDX_MAX;
-    while (smap != NULL && (member = sm_next_member(smap, member, NULL)) != SM_IDX_MAX)
+    {
+    sm_cursor_t mcur = SM_CURSOR_INIT;
+    while (smap != NULL && (member = sm_next_member(smap, member, &mcur)) != SM_IDX_MAX)
     {
         ItemPointerData iptr;
         bool    dead;
@@ -1664,6 +1703,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
             memcpy(new_payload + new_payload_used, this_entry, this_entry_len);
             new_payload_used += this_entry_len;
         }
+    }
     }
 
     if (smap != NULL)

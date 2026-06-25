@@ -199,11 +199,12 @@ pg_tre_range_bulkload(Relation index, UpperTrigramIterator iter, void *iter_ctx)
         {
             uint64 tid;
             uint64 prev_idx = SM_IDX_MAX;
+            sm_cursor_t cur = SM_CURSOR_INIT;
             BlockNumber last_range_start = InvalidBlockNumber;
             RangeAccum *last_ra = NULL;
             uint64 iter_count = 0;
 
-            while ((tid = sm_next_member(smap, prev_idx, NULL)) != SM_IDX_MAX)
+            while ((tid = sm_next_member(smap, prev_idx, &cur)) != SM_IDX_MAX)
             {
                 BlockNumber heap_blk;
                 BlockNumber range_start;

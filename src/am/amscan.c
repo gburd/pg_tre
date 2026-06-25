@@ -1058,8 +1058,9 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
                 palloc(sizeof(ItemPointerData) * card);
             uint64 i = SM_IDX_MAX;
             int n = 0;
+            sm_cursor_t scur = SM_CURSOR_INIT;
 
-            while ((i = sm_next_member(result, i, NULL)) != SM_IDX_MAX)
+            while ((i = sm_next_member(result, i, &scur)) != SM_IDX_MAX)
                 pg_tre_unpack_tid(i, &tids[n++]);
 
             tbm_add_tuples(tbm, tids, n, true /* recheck */);
@@ -1298,8 +1299,9 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         else if (result != NULL && sm_cardinality((sm_t *) result) > 0)
         {
             uint64 idx = SM_IDX_MAX;
+            sm_cursor_t scur = SM_CURSOR_INIT;
 
-            while ((idx = sm_next_member((sm_t *) result, idx, NULL)) != SM_IDX_MAX)
+            while ((idx = sm_next_member((sm_t *) result, idx, &scur)) != SM_IDX_MAX)
             {
                 ItemPointerData tid;
                 int32           dist = 0;

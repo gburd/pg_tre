@@ -749,9 +749,10 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
              * block range it spins ~100% CPU for minutes even though the
              * set may hold only a handful of members.
              */
-            for (j = sm_next_member(merged, SM_IDX_MAX, NULL);
+            sm_cursor_t mcur = SM_CURSOR_INIT;
+            for (j = sm_next_member(merged, SM_IDX_MAX, &mcur);
                  j != SM_IDX_MAX;
-                 j = sm_next_member(merged, j, NULL))
+                 j = sm_next_member(merged, j, &mcur))
             {
                 ItemPointerData tid;
                 CHECK_FOR_INTERRUPTS();
@@ -1448,7 +1449,9 @@ collapse_fold_run(Relation index, BlockNumber root_upper,
 
         me = merge_find(mc, e->trigram_hash, true);
         idx = SM_IDX_MAX;
-        while ((idx = sm_next_member(sm, idx, NULL)) != SM_IDX_MAX)
+        {
+        sm_cursor_t icur = SM_CURSOR_INIT;
+        while ((idx = sm_next_member(sm, idx, &icur)) != SM_IDX_MAX)
         {
             if (me->n_tids >= me->tids_alloced)
             {
@@ -1459,6 +1462,7 @@ collapse_fold_run(Relation index, BlockNumber root_upper,
                 MemoryContextSwitchTo(o);
             }
             me->tids[me->n_tids++] = idx;
+        }
         }
         free(sm);
     }
