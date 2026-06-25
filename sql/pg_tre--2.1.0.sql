@@ -329,15 +329,13 @@ CREATE FUNCTION tre_trgm_sim_op(text, text)
     RETURNS bool AS 'MODULE_PATHNAME', 'pg_tre_trgm_sim_op'
     LANGUAGE C STRICT STABLE PARALLEL SAFE;
 
-CREATE OPERATOR % (
-    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_trgm_sim_op,
-    COMMUTATOR = %, RESTRICT = contsel, JOIN = contjoinsel
-);
-
-CREATE OPERATOR <-> (
-    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_trgm_distance,
-    COMMUTATOR = <->
-);
+-- NOTE: pg_tre does NOT create the bare (text,text) similarity operators
+-- %, <->, <%, <<->, <<%, <<<->.  Those symbols are owned by pg_trgm, and
+-- operators are global by (symbol, argtypes), so creating them here would
+-- make pg_tre and pg_trgm mutually exclusive in one database.  Call the
+-- distinctly-named functions instead (tre_trgm_similarity(a,b),
+-- tre_word_similarity(a,b), ...), or load pg_trgm for its % / <-> / etc.
+-- pg_tre's own index operators (%~~, <@>) do not collide.
 
 -- ---------------------------------------------------------------
 -- 2.1.0 (Phase A / A2 remainder): word_similarity operators.
@@ -374,23 +372,9 @@ CREATE FUNCTION tre_strict_word_dist_op(text, text)
     RETURNS float4 AS 'MODULE_PATHNAME', 'pg_tre_strict_word_dist_op'
     LANGUAGE C STRICT STABLE PARALLEL SAFE;
 
-CREATE OPERATOR <% (
-    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_word_sim_op,
-    RESTRICT = contsel, JOIN = contjoinsel
-);
-
-CREATE OPERATOR <<-> (
-    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_word_dist_op
-);
-
-CREATE OPERATOR <<% (
-    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_strict_word_sim_op,
-    RESTRICT = contsel, JOIN = contjoinsel
-);
-
-CREATE OPERATOR <<<-> (
-    LEFTARG = text, RIGHTARG = text, PROCEDURE = tre_strict_word_dist_op
-);
+-- (see note above) the bare <% / <<-> / <<% / <<<-> operators are NOT
+-- created -- they collide with pg_trgm.  Use tre_word_similarity(a,b) /
+-- tre_strict_word_similarity(a,b) and the *_dist functions instead.
 
 
 -- Build sizing precheck (customer ask: estimate temp/final size before

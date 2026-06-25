@@ -6,8 +6,8 @@
 -- Before 2.0.4 this ERROR'd ("inline vacuum repack overflow") and aborted
 -- VACUUM; 2.0.4 kept the original blob (no removal); 2.1.0 MIGRATES the
 -- survivors to a dedicated posting leaf so the dead TIDs are actually
--- reclaimed (self-healing).  Hit most easily with the payload off (no
--- slack), so we build that way, DELETE + VACUUM twice, and assert the
+-- reclaimed (self-healing).  Builds are payload-free as of 3.0.0 (no
+-- inline slack), so we build, DELETE + VACUUM twice, and assert the
 -- index keeps agreeing with a sequential scan.  Single-token robust style.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS pg_tre;
@@ -19,11 +19,9 @@ SELECT 'noise' || g
     || (CASE WHEN (g * 2654435761) % 3 = 0 THEN ' midtoken' ELSE '' END)
 FROM generate_series(1, 5000) g;
 
-SET pg_tre.tuple_bloom_enable = off;
 SET pg_tre.coalesce_enable = on;
 CREATE INDEX vr_idx ON vr_t USING tre (body);
 SET pg_tre.coalesce_enable = off;
-SET pg_tre.tuple_bloom_enable = on;
 
 -- delete a scattered chunk + VACUUM (the path that used to overflow),
 -- then confirm index == seq-scan.
