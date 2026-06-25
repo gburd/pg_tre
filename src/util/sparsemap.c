@@ -369,16 +369,30 @@ __sm_store_idx(uint8_t *p, const __sm_idx_t v)
 	memcpy(p, &v, sizeof(v));
 }
 
-static inline uint32_t
-__sm_load_u32(const uint8_t *p)
+/*
+ * The chunk-count header occupies SM_SIZEOF_OVERHEAD (8) bytes at the
+ * start of m_data.  Through v5.0 the count was stored as a uint32_t
+ * (the low 4 bytes), capping a map at 2^32-1 chunks; the high 4 bytes
+ * were always zero (sm_create / sm_clear memset the whole buffer, and
+ * sm_deserialize copies a body whose high bytes are likewise zero).
+ *
+ * v5.1 widens the count to uint64_t using the full 8-byte slot.  This
+ * is wire-compatible in both directions: a v5.1 reader sees the same
+ * value in a v5.0 stream (high bytes zero), and a v5.1 writer storing
+ * a count < 2^32 produces byte-identical output.  The ceiling now
+ * exceeds the addressable index space, so the chunk count is no
+ * longer a binding limit for any consumer.
+ */
+static inline uint64_t
+__sm_load_u64(const uint8_t *p)
 {
-	uint32_t v;
+	uint64_t v;
 	memcpy(&v, p, sizeof(v));
 	return (v);
 }
 
 static inline void
-__sm_store_u32(uint8_t *p, const uint32_t v)
+__sm_store_u64(uint8_t *p, const uint64_t v)
 {
 	memcpy(p, &v, sizeof(v));
 }
@@ -1822,7 +1836,7 @@ __sm_get_chunk_count(const sm_t *map)
 	if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
 		return (0);
 	}
-	return (__sm_load_u32(&map->m_data[0]));
+	return ((size_t)__sm_load_u64(&map->m_data[0]));
 }
 
 /**
@@ -2116,7 +2130,7 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 static void
 __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 {
-	__sm_store_u32((uint8_t *)&map->m_data[0], (uint32_t)new_count);
+	__sm_store_u64((uint8_t *)&map->m_data[0], (uint64_t)new_count);
 }
 
 /**
@@ -7665,7 +7679,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			memcpy(buf + SM_SIZEOF_OVERHEAD, src,
 			    SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 			/* Set the number of chunks to 1 in our stunt map. */
-			__sm_store_u32((uint8_t *)buf, (uint32_t)1);
+			__sm_store_u64((uint8_t *)buf, (uint64_t)1);
 			/* And initialize the stunt double chunk we need to split. */
 			sm_open(&stunt, buf,
 			    (SM_SIZEOF_OVERHEAD * (unsigned long)3) +
