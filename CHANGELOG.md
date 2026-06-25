@@ -16,11 +16,12 @@ v6/v7/v8 indexes read unchanged.
 
 ### Changed
 
-- **Vendored sparsemap upgraded to v5.0.0** (verbatim from upstream).  v5.0.0
+- **Vendored sparsemap upgraded to v5.1.0** (verbatim from upstream).  v5.0.0
   shrinks `sm_t` from 32 to 24 bytes (the read cursor moved out of the struct
   into an explicit, optional `sm_cursor_t *` argument on `sm_contains` /
   `sm_next_member` / `sm_prev_member`; the allocation-lineage tag folds into
-  `m_capacity`'s low bits).  The **on-disk wire format is unchanged**
+  `m_capacity`'s low bits); v5.1.0 widens the internal chunk count to 64-bit
+  (removing the 2^32-chunk ceiling).  The **on-disk wire format is unchanged**
   (`SM_WIRE_VERSION` still 2), so serialized postings are byte-compatible --
   no REINDEX from the sparsemap bump.  pg_tre uses `sm_t` only by pointer, so
   the struct shrink is transparent; all read-cursor call sites pass `NULL`.
@@ -71,7 +72,7 @@ v6/v7/v8 indexes read unchanged.
 
 - The pg.ddx.io / agora operator, whose 500k-row build timeout drove the
   bloom removal, and who needs pg_tre and pg_trgm co-loaded.
-- The sparsemap project for the v5.0.0 release.
+- The sparsemap project for the v5.1.0 release.
 
 ---
 
