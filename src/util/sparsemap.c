@@ -4044,6 +4044,22 @@ done:;
 	if (coalesce) {
 		__sm_coalesce_chunk(map, &chunk, offset, start, p, idx, true);
 	}
+	/*
+	 * Re-seat the caller's cursor at the chunk we just touched so an
+	 * ascending bulk insert (sm_add_many / sm_add_many_grow) resumes
+	 * the next __sm_get_chunk_offset walk here instead of from the
+	 * head -- the difference between O(N) and O(N^2) when a hot
+	 * trigram accumulates tens of thousands of TIDs.  We record the
+	 * byte offset and the chunk's start index; __sm_get_chunk_offset
+	 * self-validates this (re-walking from the head if a later
+	 * mutation shifted the chunk), so a stale seat is merely slow,
+	 * never wrong.  Coalescing may have moved the chunk, so seat
+	 * AFTER it and let the next call's validation sort out any drift.
+	 */
+	if (cur != NULL) {
+		cur->offset = offset;
+		cur->start_idx = start;
+	}
 	return (ret_idx);
 }
 
@@ -4078,12 +4094,15 @@ sm_add(sm_t *map, const uint64_t idx)
 static uint64_t
 __sm_add_c(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 {
-	const size_t before = __sm_get_chunk_count(map);
-	uint64_t rc = __sm_map_set(map, idx, true, cur);
-	if (cur != NULL && __sm_get_chunk_count(map) != before) {
-		*cur = (sm_cursor_t)SM_CURSOR_INIT;
-	}
-	return (rc);
+	/*
+	 * __sm_map_set re-seats *cur at the touched chunk (see its done:
+	 * label), so we no longer reset the cursor here on a chunk-count
+	 * change -- that blanket reset defeated the ascending-append fast
+	 * path (every new chunk forced the next lookup back to the head,
+	 * making bulk insert O(N^2)).  __sm_get_chunk_offset self-validates
+	 * the seat, so an occasionally-stale cursor is safe.
+	 */
+	return (__sm_map_set(map, idx, true, cur));
 }
 
 uint64_t

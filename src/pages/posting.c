@@ -501,37 +501,30 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
     {
         size_t cap = (size_t) b->n_tids * 16 + 1024;
         sm_t *fresh = sm_create(cap);
-        int k;
         if (fresh == NULL)
             ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
                 errmsg("pg_tre: failed to allocate sparsemap for serialization")));
-        for (k = 0; k < b->n_tids; k++)
+        /*
+         * Bulk-load via sm_add_many_grow rather than a per-TID
+         * sm_add_grow loop.  The per-add path re-walks the chunk
+         * directory from the front on every insertion
+         * (__sm_get_chunk_offset), which is O(N^2) for the
+         * tens-of-thousands of TIDs a hot trigram accumulates -- the
+         * profile showed a 100k-row dense 'the' posting spending
+         * ~99%% of CREATE INDEX in __sm_add_grow/__sm_get_chunk_offset.
+         * sm_add_many_grow sorts a private copy ascending and appends
+         * with a retained tail cursor (the same fix the merge path got
+         * in v2.0.2), turning the build back into O(N log N).
+         */
+        CHECK_FOR_INTERRUPTS();
+        if (!sm_add_many_grow(&fresh, b->tids, (size_t) b->n_tids))
         {
-            int retries = 0;
-            /* Make this loop cancellable; per-TID iterations are cheap
-             * but n_tids can reach the millions on wide tables. */
-            CHECK_FOR_INTERRUPTS();
-            while (sm_add_grow(&fresh, b->tids[k]) == SM_IDX_MAX)
-            {
-                /*
-                 * sm_add_grow already doubled the buffer once and
-                 * retried.  If the retry still ENOSPCs (or the
-                 * underlying allocation failed), call sm_add_grow
-                 * again — each iteration doubles the buffer.  The
-                 * 16-iteration cap (~65000× the initial size) is a
-                 * safety bound: a real bug rather than a sparse-TID
-                 * input would hit it.
-                 */
-                if (++retries > 16)
-                {
-                    size_t final_cap = sm_get_capacity(fresh);
-                    sm_free(fresh);
-                    ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                        errmsg("pg_tre: sm_add_grow exhausted retries for tid[%d] (n_tids=%d, cap=%zu)",
-                               k, b->n_tids, final_cap),
-                        errhint("File a bug with the table size and column statistics.")));
-                }
-            }
+            size_t final_cap = sm_get_capacity(fresh);
+            sm_free(fresh);
+            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                errmsg("pg_tre: sm_add_many_grow failed (n_tids=%d, cap=%zu)",
+                       b->n_tids, final_cap),
+                errhint("File a bug with the table size and column statistics.")));
         }
         sz = sm_get_size(fresh);
         {
@@ -603,9 +596,9 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
         }
 
         /* Multi-leaf case: partition TIDs and write right-to-left chain.
-         * Use ~70% of budget per leaf to allow some compression overhead. */
+         * Each leaf is binary-searched to the largest TID prefix that
+         * still fits the page budget. */
         {
-            Size target_leaf_size = (budget * 7) / 10;
             int n_tids = b->n_tids;
             int tid_idx = 0;
             BlockNumber right_link = InvalidBlockNumber;
@@ -615,78 +608,117 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             while (tid_idx < n_tids)
             {
                 /*
-                 * Greedily pack TIDs into this leaf until the SERIALIZED
-                 * sparsemap approaches target_leaf_size, instead of
-                 * stopping at a fixed TID count.  The old heuristic
-                 * (tids_in_leaf = target / 8 bytes-per-TID) catastrophic-
-                 * ally under-filled leaves for well-compressing postings:
-                 * a dense trigram's TIDs RLE-compress to <1 B/TID, so
-                 * 710 TIDs occupied ~190 B of an 8 KB page (~2-6% full)
-                 * and a high-cardinality trigram sprawled across dozens
-                 * of near-empty leaves -- the ~50x density blowup past
-                 * ~10k rows in the v2.0.2 field report.  We now add TIDs
-                 * to the live slice map and stop when its real serialized
-                 * size crosses target_leaf_size (checked every
-                 * CHECK_STRIDE adds to amortize sm_get_size).  b->tids is
-                 * ascending (tuplesort order), so the slice is contiguous
-                 * and RLE-friendly.
+                 * Size each leaf by SERIALIZED bytes, not a fixed TID
+                 * count.  The old heuristic (budget / 8 bytes-per-TID)
+                 * catastrophically under-filled leaves for well-
+                 * compressing postings: a dense trigram's TIDs RLE-
+                 * compress to <1 B/TID, so 710 TIDs occupied ~190 B of
+                 * an 8 KB page (~2-6% full) and a high-cardinality
+                 * trigram sprawled across dozens of near-empty leaves --
+                 * the ~50x density blowup past ~10k rows in the v2.0.2
+                 * field report.  b->tids is ascending (tuplesort order),
+                 * so each leaf is a contiguous, RLE-friendly prefix; we
+                 * binary-search its length below.
                  */
-                int tids_in_leaf = 0;
+                /*
+                 * Pick the largest contiguous TID prefix whose
+                 * SERIALIZED sparsemap stays within the page budget.
+                 *
+                 * We must size by serialized bytes, not a fixed TID
+                 * count: a dense trigram RLE-compresses to <1 B/TID, so
+                 * a fixed estimate catastrophically under-fills (the
+                 * v2.0.2 density blowup).  But probing incrementally
+                 * with per-TID sm_add_grow is O(M^2) -- sm_add_grow
+                 * re-walks the chunk directory from the front on every
+                 * add (the 100k-row CREATE INDEX hang).  Instead we
+                 * binary-search the prefix length, building each trial
+                 * slice in one O(M log M) sm_add_many_grow pass.
+                 */
                 int avail = n_tids - tid_idx;
-                int tid_ceiling = avail;
-                const int CHECK_STRIDE = 64;
-                size_t cap = (size_t) avail * 4 + 1024;
-                sm_t *slice_smap = sm_create(cap);
+                int tids_in_leaf;
                 uint8 *slice_bytes;
                 Size slice_sz;
 
-                if (slice_smap == NULL)
-                    ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
-                        errmsg("pg_tre: failed to allocate slice sparsemap")));
+                /* slice_size_of(len): serialized bytes of the first len
+                 * TIDs starting at tid_idx, via a one-shot bulk load. */
+#define SLICE_SIZE_OF(len_, out_sz_)                                       \
+                do {                                                      \
+                    sm_t *probe = sm_create((size_t) (len_) * 4 + 1024);  \
+                    if (probe == NULL)                                    \
+                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),   \
+                            errmsg("pg_tre: failed to allocate slice sparsemap"))); \
+                    if (!sm_add_many_grow(&probe, b->tids + tid_idx,      \
+                                          (size_t) (len_)))               \
+                    {                                                     \
+                        sm_free(probe);                                   \
+                        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), \
+                            errmsg("pg_tre: multi-leaf slice sm_add_many_grow failed (len=%d)", (len_)))); \
+                    }                                                     \
+                    (out_sz_) = sm_get_size(probe);                       \
+                    sm_free(probe);                                       \
+                } while (0)
 
-                while (tids_in_leaf < tid_ceiling)
+                CHECK_FOR_INTERRUPTS();
                 {
-                    int retries = 0;
-                    CHECK_FOR_INTERRUPTS();
-                    while (sm_add_grow(&slice_smap,
-                                       b->tids[tid_idx + tids_in_leaf]) == SM_IDX_MAX)
+                    Size whole_sz;
+                    SLICE_SIZE_OF(avail, whole_sz);
+                    if (whole_sz <= budget)
                     {
-                        if (++retries > 16)
-                        {
-                            size_t final_cap = sm_get_capacity(slice_smap);
-                            sm_free(slice_smap);
-                            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                                errmsg("pg_tre: multi-leaf slice sm_add_grow exhausted retries (tids_in_leaf=%d, cap=%zu)",
-                                       tids_in_leaf, final_cap)));
-                        }
+                        /* Everything left fits in one leaf. */
+                        tids_in_leaf = avail;
                     }
-                    tids_in_leaf++;
-                    if ((tids_in_leaf % CHECK_STRIDE) == 0
-                        && sm_get_size(slice_smap) >= target_leaf_size)
-                        break;
+                    else
+                    {
+                        /* Binary-search the largest prefix length whose
+                         * serialized size <= budget.  Monotone in len. */
+                        int lo = 1, hi = avail, best = 1;
+                        while (lo <= hi)
+                        {
+                            int mid = lo + (hi - lo) / 2;
+                            Size msz;
+                            CHECK_FOR_INTERRUPTS();
+                            SLICE_SIZE_OF(mid, msz);
+                            if (msz <= budget)
+                            {
+                                best = mid;
+                                lo = mid + 1;
+                            }
+                            else
+                                hi = mid - 1;
+                        }
+                        tids_in_leaf = best;
+                    }
                 }
                 if (tids_in_leaf < 1)
                     tids_in_leaf = 1;
 
-                slice_sz = sm_get_size(slice_smap);
-                slice_bytes = (uint8 *) palloc(slice_sz + 16);
-                memcpy(slice_bytes, sm_get_data(slice_smap), slice_sz);
-                memset(slice_bytes + slice_sz, 0, 16);
-                sm_free(slice_smap);
-
-                /* Verify this leaf fits within budget */
-                if (slice_sz > budget)
                 {
-                    /* Too big; try with half the TIDs */
-                    if (tids_in_leaf <= 1)
-                        ereport(ERROR,
-                                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                                 errmsg("pg_tre: single TID exceeds leaf budget")));
-                    pfree(slice_bytes);
-                    /* Retry with half */
-                    tids_in_leaf /= 2;
-                    continue;
+                    sm_t *exact = sm_create((size_t) tids_in_leaf * 4 + 1024);
+                    if (exact == NULL)
+                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                            errmsg("pg_tre: failed to allocate slice sparsemap")));
+                    if (!sm_add_many_grow(&exact, b->tids + tid_idx,
+                                          (size_t) tids_in_leaf))
+                    {
+                        sm_free(exact);
+                        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                            errmsg("pg_tre: multi-leaf exact slice sm_add_many_grow failed (tids_in_leaf=%d)",
+                                   tids_in_leaf)));
+                    }
+                    slice_sz = sm_get_size(exact);
+                    slice_bytes = (uint8 *) palloc(slice_sz + 16);
+                    memcpy(slice_bytes, sm_get_data(exact), slice_sz);
+                    sm_free(exact);
                 }
+#undef SLICE_SIZE_OF
+                memset(slice_bytes + slice_sz, 0, 16);
+
+                /* Slice is bounded <= budget by construction above. */
+                if (slice_sz > budget)
+                    ereport(ERROR,
+                            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                             errmsg("pg_tre: multi-leaf slice exceeds budget (%zu > %zu)",
+                                    slice_sz, budget)));
 
                 /* Write this leaf */
                 uint64 leaf_min_tid = b->tids[tid_idx];
