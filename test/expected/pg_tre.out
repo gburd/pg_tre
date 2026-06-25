@@ -61,7 +61,7 @@ SELECT * FROM tre_amatch_detail('colour', 'color', 3);
 SELECT tre_version();
        tre_version        
 --------------------------
- pg_tre 2.1.0 (TRE 0.9.0)
+ pg_tre 3.0.0 (TRE 0.9.0)
 (1 row)
 
 -- Edge cases: empty strings

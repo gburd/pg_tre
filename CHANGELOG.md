@@ -6,6 +6,75 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.0.0] - 2026-06-25 - sparsemap v5, drop per-tuple bloom, coexist with pg_trgm
+
+Major release.  Three changes, two of them breaking the SQL surface or the
+fast-update payload layout; on-disk format bumps **v8 -> v9** but stays
+backward-readable (`PG_TRE_FORMAT_VERSION_MIN` = 6), so
+`ALTER EXTENSION pg_tre UPDATE TO '3.0.0'` works with **no REINDEX** -- old
+v6/v7/v8 indexes read unchanged.
+
+### Changed
+
+- **Vendored sparsemap upgraded to v5.0.0** (verbatim from upstream).  v5.0.0
+  shrinks `sm_t` from 32 to 24 bytes (the read cursor moved out of the struct
+  into an explicit, optional `sm_cursor_t *` argument on `sm_contains` /
+  `sm_next_member` / `sm_prev_member`; the allocation-lineage tag folds into
+  `m_capacity`'s low bits).  The **on-disk wire format is unchanged**
+  (`SM_WIRE_VERSION` still 2), so serialized postings are byte-compatible --
+  no REINDEX from the sparsemap bump.  pg_tre uses `sm_t` only by pointer, so
+  the struct shrink is transparent; all read-cursor call sites pass `NULL`.
+  Also picks up upstream `sm_rank` chunk-walk fixes and consumer-overridable
+  intrinsics.
+
+- **pg_tre no longer creates the `(text,text)` similarity operators**
+  `%`, `<->`, `<%`, `<<->`, `<<%`, `<<<->`.  They collided with pg_trgm's
+  operators of the same name/arg-types, which made the two extensions
+  mutually exclusive in one database (the second `CREATE EXTENSION` failed).
+  **pg_tre and pg_trgm can now be loaded together.**  The behavior is still
+  available through the distinctly-named functions that remain
+  (`tre_trgm_similarity(a,b)`, `tre_word_similarity(a,b)`,
+  `tre_strict_word_similarity(a,b)`, and the `tre_*_op` / `tre_*_dist_op`
+  helpers), or by loading pg_trgm for its `%` / `<->` / etc.  pg_tre's own
+  distinctive operators -- `%~~` (approximate regex) and `<@>` (edit-distance
+  ORDER BY) -- do not collide and are unchanged.  The `2.1.0 -> 3.0.0`
+  upgrade script drops the six operators from an existing install.
+
+### Removed
+
+- **The per-tuple positional bloom / posting-leaf payload path is gone.**
+  Each posting-leaf entry previously stored, per (trigram, TID), the trigram
+  positions plus a 128-bit bloom of the row's trigrams, feeding a lossy
+  tier-3.1 positional pre-filter.  It is removed entirely: it never changed
+  results (the executor recheck is authoritative), it saturated to a ~1.0
+  false-positive rate on document/body columns (every bit set), it was the
+  majority of the index by bytes on such columns, and its build-time
+  per-row-bloom hash table caused multi-hundred-second build timeouts at
+  ~500k rows.  Removing it:
+  - GUCs `pg_tre.tuple_bloom_enable` and `pg_tre.bloom_tuple_bits`, and the
+    matching index reloptions, are gone.
+  - New posting leaves are sparsemap-only (`payload_bytes = 0`); the on-disk
+    format bumps to v9.  Old v8 payload-bearing leaves still read correctly
+    (the payload is simply ignored).
+  - Builds are dramatically faster and indexes much smaller on text-heavy
+    columns; the >500k build timeout is resolved.
+  The **range bloom** (per heap-block range, tier-1 skip) is kept.
+
+### Notes
+
+- Known, pre-existing: the range-bloom tier is built but not yet probed at
+  scan time (`pg_tre_range_lookup` is unused) -- tracked for a follow-up; it
+  is not a regression (the scan never used it).
+- Upgrade from 1.6.0 / 1.12.0 / 2.0.4 / 2.1.0 is CI-verified; no REINDEX.
+
+### Acknowledgements
+
+- The pg.ddx.io / agora operator, whose 500k-row build timeout drove the
+  bloom removal, and who needs pg_tre and pg_trgm co-loaded.
+- The sparsemap project for the v5.0.0 release.
+
+---
+
 ## [2.1.0] - 2026-06-22 - Phase 3: inline postings migrate out-of-line on vacuum
 
 Minor release: a posting whose inline slot can no longer hold it after a
