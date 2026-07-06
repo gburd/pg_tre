@@ -853,7 +853,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
             /* CNF: AND across conjuncts. */
             for (i = 0; i < st->q.n; i++)
             {
-                sm_t *sm = resolve_conjunct_with_overlay(
+                sm_t *sm;
+                CHECK_FOR_INTERRUPTS();
+                sm = resolve_conjunct_with_overlay(
                                       scan->indexRelation,
                                       &st->q.conjuncts[i],
                                       st->scan_cxt, &ov, &crack);
@@ -899,6 +901,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 const TrigramConjunct *tile = &st->q.conjuncts[i];
                 int j;
 
+                CHECK_FOR_INTERRUPTS();
                 for (j = 0; j < tile->n; j++)
                 {
                     PgTreUpperRef ref;
@@ -1022,6 +1025,8 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
         nblocks = RelationGetNumberOfBlocks(heap);
         for (blk = 0; blk < nblocks; blk++)
         {
+            if ((blk & 0x3FFF) == 0)
+                CHECK_FOR_INTERRUPTS();
             tbm_add_page(tbm, blk);
             emitted++;
         }
@@ -1061,7 +1066,11 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
             sm_cursor_t scur = SM_CURSOR_INIT;
 
             while ((i = sm_next_member(result, i, &scur)) != SM_IDX_MAX)
+            {
+                if ((n & 0x3FFF) == 0)
+                    CHECK_FOR_INTERRUPTS();
                 pg_tre_unpack_tid(i, &tids[n++]);
+            }
 
             tbm_add_tuples(tbm, tids, n, true /* recheck */);
             ntids += n;

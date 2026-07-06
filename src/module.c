@@ -403,6 +403,19 @@ pg_tre_match_guarded(void *compiled, const char *str, int str_len,
 {
     TreMatchResult result;
 
+    /*
+     * Per-match interrupt check.  Every match on a heap value -- the
+     * %~~ recheck the executor runs once per candidate row, plus every
+     * amatch/similarity UDF -- routes through here, so this single guard
+     * makes an index scan cancellable at candidate-row granularity.
+     * Without it a broad candidate scan over a large index (many cheap
+     * rechecks between core's per-page interrupt checks, stalled on heap
+     * I/O) ignores statement_timeout / pg_cancel_backend for minutes and
+     * cannot be aborted -- a production-safety problem, not just a slow
+     * query.  CHECK_FOR_INTERRUPTS is cheap when no interrupt is pending.
+     */
+    CHECK_FOR_INTERRUPTS();
+
     pg_tre_arm_match_deadline(0);
     PG_TRY();
     {
