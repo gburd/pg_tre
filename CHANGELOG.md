@@ -6,6 +6,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.0.1] - 2026-07-06 - make %~~ scans cancellable
+
+Code-only patch release.  No SQL-surface, WAL, or on-disk-format change;
+`ALTER EXTENSION pg_tre UPDATE TO '3.0.1'` is a version bump with no REINDEX.
+
+### Fixed
+
+- **`%~~ tre_pattern(...)` index scans now respond to query cancellation.**
+  A broad candidate scan over a large index ignored `statement_timeout`,
+  client disconnect, and `pg_terminate_backend`, running for minutes stuck
+  in heap I/O -- on a busy host these un-cancellable scans piled up into a
+  load spiral and a site-wide outage (reported from production, pg.ddx.io).
+  Root cause: the per-candidate-row recheck (and the candidate-set build and
+  bitmap-emit loops) had no `CHECK_FOR_INTERRUPTS()`, and PostgreSQL
+  cancellation is cooperative.  Added interrupt checks at the choke points --
+  `pg_tre_match_guarded()` (every match on a heap value routes through it),
+  the CNF/DNF conjunct loops in the candidate build, and the bitmap emit
+  loops.  Verified: an 8.5 s fuzzy `%~~` scan now aborts at ~0.3 s under
+  `statement_timeout='300ms'`.  This makes `statement_timeout` -- the
+  standard mechanism -- effective for `tre` scans, which is the right lever
+  for bounding an expensive scan (no bespoke scan-budget GUC is needed).
+
+### Notes
+
+- Operator gotcha carried into the `3.0.0 -> 3.0.1` upgrade script: the
+  per-tuple bloom removed in 3.0.0 means `CREATE INDEX ... USING tre (...)
+  WITH (tuple_bloom_enable=...)` (and `bloom_tuple_bits`) is no longer
+  accepted and will error -- drop the clause from index-build scripts.
+- Selectivity for exact-substring (edit distance 0) still estimates from the
+  rarest single required trigram, so a long literal whose trigrams intersect
+  to near-nothing can be over-estimated and produce a broad candidate scan
+  (the intersection is not modelled without co-occurrence stats).  Tracked as
+  a follow-up; with this release such a scan is at least cancellable.  Wiring
+  the already-built range-bloom tier into the scan (still unused) is the
+  other lever tracked for candidate-set narrowing.
+
+### Acknowledgements
+
+- The pg.ddx.io / agora operator, whose production incident report and clean
+  reproduction drove this fix.
+
+---
+
 ## [3.0.0] - 2026-06-25 - sparsemap v5, drop per-tuple bloom, coexist with pg_trgm
 
 Major release.  Three changes, two of them breaking the SQL surface or the

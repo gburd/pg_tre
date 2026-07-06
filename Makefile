@@ -16,8 +16,8 @@
 
 EXTENSION    = pg_tre
 MODULE_big   = pg_tre
-DATA         = sql/pg_tre--3.0.1-dev.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql sql/pg_tre--1.5.4.sql sql/pg_tre--1.5.3.sql sql/pg_tre--1.5.2.sql sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
-       sql/pg_tre--3.0.0--3.0.1-dev.sql \
+DATA         = sql/pg_tre--3.0.1.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql sql/pg_tre--1.5.4.sql sql/pg_tre--1.5.3.sql sql/pg_tre--1.5.2.sql sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+       sql/pg_tre--3.0.0--3.0.1.sql \
        sql/pg_tre--2.1.0--3.0.0.sql \
        sql/pg_tre--2.0.4--2.1.0.sql \
        sql/pg_tre--2.0.3--2.0.4.sql \
@@ -410,7 +410,7 @@ coverage-report:
 # ------------------------------------------------------------------
 # Release tarball
 # ------------------------------------------------------------------
-PG_TRE_VERSION = 3.0.1-dev
+PG_TRE_VERSION = 3.0.1
 DIST_NAME      = pg_tre-$(PG_TRE_VERSION)
 
 dist:

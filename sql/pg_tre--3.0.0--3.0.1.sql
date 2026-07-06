@@ -1,0 +1,11 @@
+-- pg_tre 3.0.0 -> 3.0.1 upgrade.
+--
+-- Code-only release (query-cancellation fix in the %~~ scan/recheck
+-- path).  No catalog, SQL-surface, WAL, or on-disk-format change, so
+-- this upgrade is a pure version bump -- no REINDEX, no DDL.
+--
+-- Operator note (carried forward from 3.0.0): the per-tuple bloom was
+-- removed in 3.0.0, so `CREATE INDEX ... USING tre (...) WITH
+-- (tuple_bloom_enable=...)` is NO LONGER ACCEPTED and will error.  If an
+-- index-build script still passes that reloption (or bloom_tuple_bits),
+-- drop the clause.  Existing indexes are unaffected.
