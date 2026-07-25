@@ -18,6 +18,23 @@
         "type": "github"
       }
     },
+    "lime-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780361969,
+        "narHash": "sha256-5qUIxci2QseASATEIF4iIJ2OSEuSdjUjCfvOVL/iHBU=",
+        "ref": "refs/heads/main",
+        "rev": "3a0829df74c8a163f0e0aa557427c217fa79e580",
+        "revCount": 391,
+        "type": "git",
+        "url": "https://codeberg.org/gregburd/lime.git"
+      },
+      "original": {
+        "rev": "3a0829df74c8a163f0e0aa557427c217fa79e580",
+        "type": "git",
+        "url": "https://codeberg.org/gregburd/lime.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1781074563,
@@ -37,7 +54,9 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "lime-src": "lime-src",
+        "nixpkgs": "nixpkgs",
+        "tre-src": "tre-src"
       }
     },
     "systems": {
@@ -52,6 +71,23 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "tre-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1726831540,
+        "narHash": "sha256-5O8yqzv+SR8x0X7GtC2Pjo94gp0799M2Va8wJ4EKyf8=",
+        "owner": "laurikari",
+        "repo": "tre",
+        "rev": "d0e0c997336b3210f05b3e1daa7bb5cb9900d274",
+        "type": "github"
+      },
+      "original": {
+        "owner": "laurikari",
+        "repo": "tre",
+        "rev": "d0e0c997336b3210f05b3e1daa7bb5cb9900d274",
         "type": "github"
       }
     }

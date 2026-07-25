@@ -576,6 +576,34 @@ shared_preload_libraries = 'pg_tre'
 Restart PG and `CREATE EXTENSION pg_tre;` in each database that
 needs it.
 
+### Nix / flake
+
+The flake exposes the built extension per PostgreSQL major, so you can
+build an installable `{.so, .control, .sql}` set without a local
+toolchain (the vendored TRE and Lime submodules are pinned as flake
+inputs and built for you):
+
+```bash
+nix build github:gburd/pg_tre#pg18   # or #pg17, #default (= pg18)
+```
+
+`$out` follows the PGXS layout:
+
+```
+$out/lib/pg_tre.so
+$out/share/postgresql/extension/pg_tre.control
+$out/share/postgresql/extension/pg_tre--<ver>.sql   (+ upgrade scripts)
+```
+
+The `.so` links only libc and libm (the vendored TRE is static), so it
+is ABI-portable into an official `postgres:18` Docker image. A common
+container-deploy pattern is to overlay those three files into the
+image's `$(pg_config --pkglibdir)` and
+`$(pg_config --sharedir)/extension/` (e.g. via a ConfigMap +
+initContainer on Kubernetes), then set
+`shared_preload_libraries = 'pg_tre'`.  Match the extension's PG major
+to the image's PG major.
+
 Packaging templates for Debian (`debian/`), RPM
 (`packaging/pg_tre.spec`), Homebrew
 (`doc/homebrew-formula.rb`), Docker (`doc/Dockerfile`), and PGXN

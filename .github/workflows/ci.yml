@@ -173,6 +173,25 @@ jobs:
               exit 1
           fi
 
+      - name: Verify flake-pinned submodule revs match .gitmodules gitlinks
+        run: |
+          # The flake fetches vendor/tre and vendor/lime as pinned inputs
+          # (so `nix build` works without ?submodules=1).  Those revs must
+          # stay in lockstep with the actual submodule gitlinks, or the
+          # `nix build` output would diverge from the `make` build.
+          fail=0
+          check() { # $1=submodule path  $2=flake url substring
+            gl=$(git ls-tree HEAD "$1" | awk '{print $3}')
+            if ! grep -qF "$gl" flake.nix; then
+              echo "DRIFT: $1 gitlink $gl not pinned in flake.nix"
+              fail=1
+            fi
+          }
+          check vendor/tre
+          check vendor/lime
+          [ "$fail" = 0 ] && echo "flake inputs match submodule gitlinks"
+          exit $fail
+
       - name: Verify STATUS.md is populated
         run: |
           test -s STATUS.md && grep -qE "Released:|## What ships" STATUS.md
