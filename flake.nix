@@ -47,7 +47,7 @@
           in
           pkgs.stdenv.mkDerivation {
             pname = "pg_tre";
-            version = "3.0.1";
+            version = "3.0.2";
 
             # The vendored submodules (vendor/tre, vendor/lime) are pinned
             # as flake inputs and copied in during postPatch, so this build

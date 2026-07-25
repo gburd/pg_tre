@@ -6,6 +6,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.0.2] - 2026-07-06 - installable extension packages in the flake
+
+Packaging + documentation release.  No C, WAL, SQL-surface, or on-disk-format
+change; `ALTER EXTENSION pg_tre UPDATE TO '3.0.2'` is a version bump with no
+REINDEX.
+
+### Added
+
+- **The Nix flake now exposes the built extension per PostgreSQL major**,
+  mirroring pg_fts: `nix build github:gburd/pg_tre#pg18` (also `#pg17`,
+  `#extension`, `#default`) yields a PGXS-layout `$out`:
+  ```
+  $out/lib/pg_tre.so
+  $out/share/postgresql/extension/pg_tre.control
+  $out/share/postgresql/extension/pg_tre--<ver>.sql   (+ upgrade scripts)
+  ```
+  The `.so` links only libc + libm (the vendored TRE is static), so it is
+  ABI-portable into an official `postgres:NN` Docker image (overlay the three
+  files into `$(pg_config --pkglibdir)` / `.../extension/`, then set
+  `shared_preload_libraries = 'pg_tre'`).  Requested by a downstream deployer
+  running pg_tre alongside other extensions in a Kubernetes PG18 image.
+- The vendored TRE and Lime submodules are pinned as `flake = false` inputs
+  at the same revs as the git submodules, so `nix build` works from a plain
+  flake ref without `?submodules=1`.  Building the extension previously
+  failed because flakes do not fetch submodules (empty `vendor/tre` made
+  TRE's `./configure` die with a misleading "C compiler cannot create
+  executables", its stderr being redirected to `/dev/null` upstream), and
+  because the Makefile's `git -C vendor/tre apply` patch step needs a `.git`
+  dir the Nix source lacks.  Both are handled in the flake's `postPatch`.
+- A CI lint step guards against the flake-pinned submodule revs drifting from
+  the `.gitmodules` gitlinks.
+
+### Notes
+
+- README documents the flake build and the container-overlay deploy pattern.
+- Match the extension's PostgreSQL major to the image's PostgreSQL major.
+
+---
+
 ## [3.0.1] - 2026-07-06 - make %~~ scans cancellable
 
 Code-only patch release.  No SQL-surface, WAL, or on-disk-format change;

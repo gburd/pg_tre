@@ -1,0 +1,7 @@
+-- pg_tre 3.0.1 -> 3.0.2 upgrade.
+--
+-- Packaging + documentation release: the Nix flake now exposes the
+-- built extension per PostgreSQL major (nix build .#pg17 / .#pg18),
+-- mirroring pg_fts, so it can be overlaid into an official postgres:NN
+-- image.  No C, WAL, SQL-surface, or on-disk-format change; this upgrade
+-- is a pure version bump -- no REINDEX, no DDL.
