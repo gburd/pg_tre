@@ -22,4 +22,15 @@
 extern int pg_tre_uleven_expand(const uint8 tri[3], int k,
                                 uint8 (*out)[3], int max_out);
 
+/*
+ * Codepoint-alphabet (UTF-8 aware) expansion.  For an all-ASCII trigram
+ * this is identical to pg_tre_uleven_expand; for a trigram containing any
+ * codepoint > 0x7F it returns only the exact trigram (bounded fanout,
+ * soundness preserved by the authoritative heap recheck).  This is the
+ * variant the k>0 tiling spine uses so that expanded trigrams hash the
+ * same way the index built them (pg_tre_hash_trigram_cp).
+ */
+extern int pg_tre_uleven_expand_cp(const int32 tri[3], int k,
+                                   int32 (*out)[3], int max_out);
+
 #endif /* PG_TRE_ULEVEN_H */

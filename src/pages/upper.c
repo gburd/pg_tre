@@ -169,6 +169,8 @@ upper_flush_leaf(UpperBulkState *state)
      * inline blobs after the entry array). */
     PageTreGetOpaque(page)->flags = (uint16) state->leaf_n_entries;
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(buf);
 
     /* WAL-log as full-page image.  MarkBufferDirty must precede
@@ -184,6 +186,8 @@ upper_flush_leaf(UpperBulkState *state)
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
         PageSetLSN(page, recptr);
     }
+
+    END_CRIT_SECTION();
 
     /* Record the leaf block and its first key. */
     if (state->n_leaves >= state->leaves_alloced)
@@ -343,6 +347,8 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
         ((PageHeader) page)->pd_lower =
             (char *) &entries[this_n] - (char *) page;
 
+        START_CRIT_SECTION();
+
         MarkBufferDirty(buf);
 
         /* MarkBufferDirty must precede XLogRegisterBuffer (PG18
@@ -357,6 +363,8 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
             recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
             PageSetLSN(page, recptr);
         }
+
+        END_CRIT_SECTION();
 
         next_keys[page_idx]   = keys[start];   /* first key on this page */
         next_blocks[page_idx] = BufferGetBlockNumber(buf);
@@ -410,19 +418,6 @@ pg_tre_upper_bulkload(Relation index, upper_bulkload_iter_func iter,
 
     MemoryContextDelete(state->mcxt);
     return tree_root;
-}
-
-/* ---- Phase 1/4: Single-entry insert (sketch) ---- */
-
-void
-pg_tre_upper_insert(Relation index, uint64 hash, BlockNumber root,
-                    const uint8 *inline_data, Size inline_bytes)
-{
-    /*
-     * Phase 4: descend the tree to find the correct leaf, insert the
-     * entry, split if needed.  For Phase 2, this is not yet used.
-     */
-    elog(ERROR, "pg_tre: upper-tree insert not yet implemented (Phase 4)");
 }
 
 /* ---- Upper-tree lookup (Phase 2 stub, Phase 3 real) ---- */

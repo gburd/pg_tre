@@ -1,0 +1,103 @@
+-- test/sql/parallel_build.sql
+-- Regression test for parallel CREATE INDEX (amcanbuildparallel = true,
+-- pg_tre.enable_parallel_build on by default).
+--
+-- The parallelizable phase is the heap scan + trigram extraction +
+-- coordinated tuplesort; the leader merges every participant's partial
+-- run and serially builds the posting trees, upper tree, and range tier.
+-- This test confirms:
+--
+--   1. A parallel build succeeds and produces a valid index.
+--   2. The parallel-built index returns exactly the same rows as a
+--      seq scan (the correctness gate: no tuple is lost or duplicated
+--      across the participant split).
+--   3. A serial build of the same data answers identically.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/parallel_build.sql:16: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS pbuild_t CASCADE;
+psql:test/sql/parallel_build.sql:18: NOTICE:  table "pbuild_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE pbuild_t (id serial, body text);
+CREATE TABLE
+INSERT INTO pbuild_t (body)
+SELECT md5(i::text) || ' error' || (i % 100) || ' token' || (i % 13)
+FROM generate_series(1, 20000) AS i;
+INSERT 0 20000
+-- Force the planner to assign build workers regardless of table size.
+SET max_parallel_maintenance_workers = 4;
+SET
+SET max_parallel_workers = 8;
+SET
+SET min_parallel_table_scan_size = 0;
+SET
+SET maintenance_work_mem = '32MB';
+SET
+SET pg_tre.enable_parallel_build = on;
+SET
+SET client_min_messages = warning;   -- suppress per-build NOTICEs (worker count varies)
+SET
+CREATE INDEX pbuild_par ON pbuild_t USING tre (body);
+CREATE INDEX
+-- Index must be valid.
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'pbuild_par'::regclass;
+ indisvalid | indisready 
+------------+------------
+ t          | t
+(1 row)
+
+-- Differential vs seq scan across several patterns.
+SET enable_seqscan = off;
+SET
+SELECT count(*) AS idx_exact FROM pbuild_t WHERE body %~~ tre_pattern('error42', 0);
+ idx_exact 
+-----------
+       200
+(1 row)
+
+SELECT count(*) AS idx_token FROM pbuild_t WHERE body %~~ tre_pattern('token7', 0);
+ idx_token 
+-----------
+      1538
+(1 row)
+
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT count(*) AS seq_exact FROM pbuild_t WHERE body %~~ tre_pattern('error42', 0);
+ seq_exact 
+-----------
+       200
+(1 row)
+
+SELECT count(*) AS seq_token FROM pbuild_t WHERE body %~~ tre_pattern('token7', 0);
+ seq_token 
+-----------
+      1538
+(1 row)
+
+RESET enable_seqscan;
+RESET
+RESET enable_indexscan;
+RESET
+RESET enable_bitmapscan;
+RESET
+-- A serial build of the same data must answer identically.
+SET pg_tre.enable_parallel_build = off;
+SET
+CREATE INDEX pbuild_ser ON pbuild_t USING tre (body);
+CREATE INDEX
+SET enable_seqscan = off;
+SET
+SELECT count(*) AS ser_exact FROM pbuild_t WHERE body %~~ tre_pattern('error42', 0);
+ ser_exact 
+-----------
+       200
+(1 row)
+
+RESET enable_seqscan;
+RESET
+DROP TABLE pbuild_t CASCADE;
+DROP TABLE

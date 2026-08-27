@@ -173,6 +173,8 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
      */
     wal_log = (forknum == INIT_FORKNUM) || RelationNeedsWAL(index);
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(metabuf);
 
     /* MarkBufferDirty must precede XLogRegisterBuffer (PG18 asserts
@@ -186,6 +188,8 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
         PageSetLSN(metapage, recptr);
     }
+
+    END_CRIT_SECTION();
 
     UnlockReleaseBuffer(metabuf);
 
@@ -220,6 +224,8 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
     meta->n_trigrams = n_trigrams;
     meta->n_tuples_indexed = n_tuples_indexed;
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(metabuf);
 
     /* WAL-log the update.  MarkBufferDirty must precede
@@ -235,6 +241,8 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
         PageSetLSN(metapage, recptr);
     }
+
+    END_CRIT_SECTION();
 
     UnlockReleaseBuffer(metabuf);
 }

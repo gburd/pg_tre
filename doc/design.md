@@ -12,15 +12,20 @@ columns for fast approximate-regex queries:
     CREATE INDEX docs_tre ON docs USING tre (body);
     SELECT * FROM docs WHERE body %~~ tre_pattern('enviro.{~2}ment', 2);
 
-Delivered via a three-tier filter funnel over trigram postings:
+Delivered via a trigram-posting index over the text column:
 
-1. **Range tier** -- BRIN-style block-range blooms reject whole
-   heap regions that lack any required trigram.
-2. **Posting tier** -- per-trigram sparsemap postings, AND/OR-merged
-   to produce a candidate TID set.
-3. **Per-tuple tier** -- 128-bit bloom per indexed tuple stored
-   inline with the posting, used to refine the candidate set
-   without heap I/O.
+1. **Posting tier (authoritative)** -- per-trigram sparsemap
+   postings, AND/OR-merged per query to produce a candidate TID set.
+   This is the filter that drives the scan.
+2. **Range tier (build-time summary)** -- BRIN-style block-range
+   blooms are written at build time as a coarse per-heap-block-range
+   summary.  They are retained for future block-range skipping and
+   introspection but are **not** consulted on the current scan path
+   (the posting tier already yields exact candidate TIDs).
+
+A per-tuple bloom tier existed through 2.x and was removed in 3.0.0
+(the executor recheck is authoritative, so it added size without
+changing results).
 
 Recheck is always performed against the heap via TRE's
 `regaexec`.

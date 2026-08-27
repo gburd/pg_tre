@@ -340,12 +340,21 @@ tre_match_scalar(PG_FUNCTION_ARGS)
 
 	/* Build a text value from the pattern */
 	pat_txt = cstring_to_text_with_len(pattern, pattern_len);
-	
-	/* Call the legacy tre_amatch function */
-	result = DatumGetBool(DirectFunctionCall3(pg_tre_amatch,
+
+	/*
+	 * Recheck honoring the pattern's per-edit cost weights.  Routing
+	 * through the 6-arg cost-aware entry point (rather than the 3-arg
+	 * pg_tre_amatch, which hardcodes unit costs) keeps the indexed %~~
+	 * recheck semantically identical to the seq-scan tre_amatch(...,
+	 * cost_ins, cost_del, cost_subst) UDF for non-uniform-cost patterns.
+	 */
+	result = DatumGetBool(DirectFunctionCall6(pg_tre_amatch_with_costs,
 											  PointerGetDatum(haystack_text),
 											  PointerGetDatum(pat_txt),
-											  Int32GetDatum(pat->max_cost)));
+											  Int32GetDatum(pat->max_cost),
+											  Int32GetDatum(pat->cost_ins),
+											  Int32GetDatum(pat->cost_del),
+											  Int32GetDatum(pat->cost_subst)));
 
 	PG_RETURN_BOOL(result);
 }
@@ -364,4 +373,16 @@ int32
 tre_pattern_get_max_cost(TrePattern p)
 {
 	return p->max_cost;
+}
+
+void
+tre_pattern_get_costs(TrePattern p, int32 *cost_ins, int32 *cost_del,
+					  int32 *cost_subst)
+{
+	if (cost_ins)
+		*cost_ins = p->cost_ins;
+	if (cost_del)
+		*cost_del = p->cost_del;
+	if (cost_subst)
+		*cost_subst = p->cost_subst;
 }

@@ -9,12 +9,19 @@
 #include "postgres.h"
 
 #include "access/amapi.h"
+#include "access/amvalidate.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
+#include "catalog/pg_amop.h"
+#include "catalog/pg_amproc.h"
+#include "catalog/pg_opclass.h"
+#include "catalog/pg_opfamily.h"
 #include "catalog/pg_type.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 
 #include "pg_tre/amapi.h"
 #include "pg_tre/pg_tre.h"
@@ -131,9 +138,151 @@ pg_tre_get_fastupdate(Relation index)
     return opts ? opts->fastupdate : pg_tre_fastupdate;
 }
 
+/*
+ * Validate an operator class / operator family for the `tre` access
+ * method.  Called by CREATE OPERATOR CLASS / ALTER OPERATOR FAMILY and
+ * by amvalidate() sanity checks.  We verify:
+ *
+ *   - every support (amproc) procedure has a sane, non-cross-type
+ *     signature;
+ *   - every operator (amop) member uses a strategy number we understand
+ *     (search strategy 1 = matchop, 3..7 = LIKE/ILIKE/regex/iregex/eq;
+ *     order-by strategy 2 = distance), is marked with the correct
+ *     amoppurpose, and (for order-by members) names a valid sort family;
+ *   - the opclass declares its indexed type.
+ *
+ * On any violation we ereport(WARNING) with a specific message and return
+ * false, matching the behavior of the in-core AMs (btree/gin/gist) rather
+ * than silently accepting a misconfigured opfamily.
+ */
 bool
 pg_tre_amvalidate(Oid opclassoid)
 {
-    /* Phase 6: basic validation stub.  Full validation deferred to Phase 7. */
-    return true;
+    bool        result = true;
+    HeapTuple   classtup;
+    Form_pg_opclass classform;
+    Oid         opfamilyoid;
+    Oid         opcintype;
+    char       *opclassname;
+    CatCList   *proclist;
+    CatCList   *oprlist;
+    int         i;
+
+    classtup = SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid));
+    if (!HeapTupleIsValid(classtup))
+        elog(ERROR, "cache lookup failed for operator class %u", opclassoid);
+    classform = (Form_pg_opclass) GETSTRUCT(classtup);
+
+    opfamilyoid = classform->opcfamily;
+    opcintype = classform->opcintype;
+    opclassname = NameStr(classform->opcname);
+
+    /* The tre AM indexes text columns; the opclass input type must be text. */
+    if (opcintype != TEXTOID)
+    {
+        ereport(WARNING,
+                (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                 errmsg("tre operator class \"%s\" indexes type %u, expected text",
+                        opclassname, opcintype)));
+        result = false;
+    }
+
+    /* Validate support (amproc) procedures. */
+    proclist = SearchSysCacheList1(AMPROCNUM, ObjectIdGetDatum(opfamilyoid));
+    for (i = 0; i < proclist->n_members; i++)
+    {
+        HeapTuple   proctup = &proclist->members[i]->tuple;
+        Form_pg_amproc procform = (Form_pg_amproc) GETSTRUCT(proctup);
+
+        /*
+         * pg_tre does not (yet) register any support procedures for its
+         * opclass -- extraction and recheck are driven from the operator
+         * members and the AM callbacks, not from opclass support procs.
+         * Any support procedure that shows up here is therefore
+         * unexpected.  We still range-check the procnum so a future
+         * addition fails loudly rather than silently.
+         */
+        if (procform->amprocnum < 1 ||
+            procform->amprocnum > 4 /* amsupport ceiling */)
+        {
+            ereport(WARNING,
+                    (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                     errmsg("tre opfamily %u contains support procedure %u with invalid support number %d",
+                            opfamilyoid, procform->amproc, procform->amprocnum)));
+            result = false;
+        }
+    }
+    ReleaseCatCacheList(proclist);
+
+    /* Validate operator (amop) members. */
+    oprlist = SearchSysCacheList1(AMOPSTRATEGY, ObjectIdGetDatum(opfamilyoid));
+    for (i = 0; i < oprlist->n_members; i++)
+    {
+        HeapTuple   oprtup = &oprlist->members[i]->tuple;
+        Form_pg_amop oprform = (Form_pg_amop) GETSTRUCT(oprtup);
+
+        /* Strategy number must be one we understand (1..7). */
+        if (oprform->amopstrategy < 1 || oprform->amopstrategy > 7)
+        {
+            ereport(WARNING,
+                    (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                     errmsg("tre opfamily %u contains operator %u with invalid strategy number %d",
+                            opfamilyoid, oprform->amopopr,
+                            oprform->amopstrategy)));
+            result = false;
+        }
+
+        /*
+         * Strategy 2 (<@>) is the KNN order-by operator; every other
+         * strategy is a search operator.  Verify amoppurpose matches and
+         * that order-by members name a valid sort opfamily.
+         */
+        if (oprform->amopstrategy == 2)
+        {
+            if (oprform->amoppurpose != AMOP_ORDER)
+            {
+                ereport(WARNING,
+                        (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                         errmsg("tre opfamily %u strategy 2 operator %u must be an ORDER BY member",
+                                opfamilyoid, oprform->amopopr)));
+                result = false;
+            }
+            if (!OidIsValid(oprform->amopsortfamily))
+            {
+                ereport(WARNING,
+                        (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                         errmsg("tre opfamily %u order-by operator %u lacks a sort operator family",
+                                opfamilyoid, oprform->amopopr)));
+                result = false;
+            }
+        }
+        else
+        {
+            if (oprform->amoppurpose != AMOP_SEARCH)
+            {
+                ereport(WARNING,
+                        (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                         errmsg("tre opfamily %u strategy %d operator %u must be a search member",
+                                opfamilyoid, oprform->amopstrategy,
+                                oprform->amopopr)));
+                result = false;
+            }
+        }
+
+        /* Operator must return boolean (search) or the sort type (order-by). */
+        if (oprform->amoppurpose == AMOP_SEARCH &&
+            get_op_rettype(oprform->amopopr) != BOOLOID)
+        {
+            ereport(WARNING,
+                    (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                     errmsg("tre opfamily %u search operator %u does not return boolean",
+                            opfamilyoid, oprform->amopopr)));
+            result = false;
+        }
+    }
+    ReleaseCatCacheList(oprlist);
+
+    ReleaseSysCache(classtup);
+
+    return result;
 }

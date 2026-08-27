@@ -1,0 +1,87 @@
+-- test/sql/custom_costs.sql
+-- Regression test: the %~~ index recheck honors a pattern's per-edit
+-- cost weights (cost_ins, cost_del, cost_subst), matching the seq-scan
+-- tre_amatch(text, text, k, ci, cd, cs) UDF.
+--
+-- Before this fix the operator recheck (tre_match_scalar) called the
+-- unit-cost path and silently ignored non-uniform costs, so an indexed
+-- %~~ scan could return different rows than the equivalent function
+-- call for a pattern built with tre_pattern_make_full().
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/custom_costs.sql:11: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS cost_t CASCADE;
+psql:test/sql/custom_costs.sql:13: NOTICE:  table "cost_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE cost_t (id serial, body text);
+CREATE TABLE
+-- 'abcd'  : exact
+-- 'abxd'  : one substitution from 'abcd'
+-- 'abd'   : one deletion from 'abcd'
+-- 'abccd' : one insertion into 'abcd'
+INSERT INTO cost_t (body) VALUES
+  ('abcd zzz'), ('abxd zzz'), ('abd zzz'), ('abccd zzz'), ('wxyz zzz');
+INSERT 0 5
+CREATE INDEX cost_idx ON cost_t USING tre (body);
+psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: collected 30 trigram entries from 5 heap tuples
+psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: built 17 posting trees
+psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: build complete, indexed 5 heap tuples into 17 trigrams
+CREATE INDEX
+-- Build a pattern with expensive substitution (cost_subst = 5) but a
+-- max_cost budget of 1.  A substitution therefore costs 5 > 1 and must
+-- NOT match; a deletion/insertion (cost 1) still may.  The expensive
+-- construction uses tre_pattern(pattern, max_cost, ci, cd, cs).
+-- Reference: the seq-scan function form with the same weights.
+SET enable_seqscan = off;
+SET
+SELECT id, body FROM cost_t
+WHERE body %~~ tre_pattern('abcd', 1, 1, 1, 5)
+ORDER BY id;
+ id |   body    
+----+-----------
+  1 | abcd zzz
+  3 | abd zzz
+  4 | abccd zzz
+(3 rows)
+
+-- Same predicate but forced through a seq scan: must be identical.
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT id, body FROM cost_t
+WHERE body %~~ tre_pattern('abcd', 1, 1, 1, 5)
+ORDER BY id;
+ id |   body    
+----+-----------
+  1 | abcd zzz
+  3 | abd zzz
+  4 | abccd zzz
+(3 rows)
+
+RESET enable_seqscan;
+RESET
+RESET enable_indexscan;
+RESET
+RESET enable_bitmapscan;
+RESET
+-- Now cheap substitution (default 1,1,1): the substitution row 'abxd'
+-- should match at max_cost 1.
+SET enable_seqscan = off;
+SET
+SELECT id, body FROM cost_t
+WHERE body %~~ tre_pattern('abcd', 1)
+ORDER BY id;
+ id |   body    
+----+-----------
+  1 | abcd zzz
+  2 | abxd zzz
+  3 | abd zzz
+  4 | abccd zzz
+(4 rows)
+
+RESET enable_seqscan;
+RESET
+DROP TABLE cost_t CASCADE;
+DROP TABLE

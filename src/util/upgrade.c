@@ -153,15 +153,17 @@ pg_tre_upgrade_page_to_latest(Page page)
         case 5:
         case 6:
         case 7:
+        case 8:
             /*
-             * Non-range pages: byte-identical across v3..v8.  We
+             * Non-range pages: byte-identical across v3..v9.  We
              * just need to flip the per-page version stamp below.
-             * v6 -> v7 (Phase B1 run catalog) and v7 -> v8 (posting-
-             * page coalescing) are both purely additive: existing
-             * pages are unchanged, the new page kinds only appear in
-             * indexes built/rebuilt at the new version, and the meta
-             * page's v7 catalog fields are initialized separately
-             * (see the meta-page arm below).
+             * v6 -> v7 (Phase B1 run catalog), v7 -> v8 (posting-
+             * page coalescing), and v8 -> v9 (dense recycle /
+             * sparsemap v5 wire-compatible) are all purely additive:
+             * existing pages are unchanged, the new page kinds only
+             * appear in indexes built/rebuilt at the new version, and
+             * the meta page's v7 catalog fields are initialized
+             * separately (see the meta-page arm below).
              */
             break;
         default:

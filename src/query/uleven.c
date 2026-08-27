@@ -155,6 +155,41 @@ uleven_expand_k1(const uint8 tri[3], uint8 (*out)[3], int max_out)
 }
 
 /*
+ * Codepoint-alphabet dedup: same as dedupe_trigrams but over int32[3].
+ */
+static int
+dedupe_trigrams_cp(int32 (*tris)[3], int n)
+{
+    int i, j, out = 0;
+
+    for (i = 0; i < n; i++)
+    {
+        bool dup = false;
+        for (j = 0; j < out; j++)
+        {
+            if (tris[j][0] == tris[i][0] &&
+                tris[j][1] == tris[i][1] &&
+                tris[j][2] == tris[i][2])
+            {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup)
+        {
+            if (out != i)
+            {
+                tris[out][0] = tris[i][0];
+                tris[out][1] = tris[i][1];
+                tris[out][2] = tris[i][2];
+            }
+            out++;
+        }
+    }
+    return out;
+}
+
+/*
  * Public API: expand a trigram to include all trigrams within edit distance k.
  * Returns the number of distinct trigrams written to `out`, up to `max_out`.
  * Returns -1 if the expansion would exceed max_out (overflow).
@@ -221,4 +256,88 @@ pg_tre_uleven_expand(const uint8 tri[3], int k, uint8 (*out)[3], int max_out)
 
     /* k > 2: not supported in Phase 5 initial cut (fanout explosion) */
     return -1;
+}
+
+/*
+ * Codepoint-alphabet expansion (UTF-8 aware).
+ *
+ * The byte-alphabet expansion above is only *complete* for trigrams whose
+ * codepoints are all ASCII (<= 0x7F): UTF-8 encodes ASCII as single bytes,
+ * and no multibyte sequence contains an ASCII byte, so for an all-ASCII
+ * trigram the byte neighbors and the codepoint neighbors coincide.  For a
+ * trigram containing a codepoint > 0x7F, enumerating every codepoint
+ * substitution/insertion (alphabet up to 0x10FFFF) would blow the fanout
+ * budget, and the byte-level neighbors would not correspond to any
+ * codepoint the index actually hashed.
+ *
+ * Soundness is preserved regardless: the pigeonhole tiling only requires
+ * that alternative 0 be the *exact* trigram, and the heap recheck (TRE
+ * regaexec) is authoritative.  So:
+ *
+ *   - all-ASCII trigram: expand in byte space (== codepoint space) and
+ *     copy the results out as codepoints -- full k-neighborhood, same as
+ *     before but now hashed as codepoints (previously these were also
+ *     ASCII so the hashes matched; this keeps that behavior).
+ *   - trigram with any codepoint > 0x7F: emit only the exact codepoint
+ *     trigram.  Fewer alternatives (a tighter, still-correct filter);
+ *     the recheck removes any false positive, and no *true* match is
+ *     dropped because the exact trigram is always present in a matching
+ *     text at edit distance 0 within its tile under the pigeonhole
+ *     argument.
+ *
+ * This fixes the prior bug where extract_spine_from_ast dropped codepoints
+ * > 0xFF entirely (corrupting trigram positions) and hashed 0x80..0xFF
+ * codepoints as raw bytes (never matching the index's codepoint hashes),
+ * i.e. silent false negatives on CJK/accented approximate queries.
+ */
+int
+pg_tre_uleven_expand_cp(const int32 tri[3], int k, int32 (*out)[3],
+                        int max_out)
+{
+    bool all_ascii = (tri[0] >= 0 && tri[0] <= 0x7F &&
+                      tri[1] >= 0 && tri[1] <= 0x7F &&
+                      tri[2] >= 0 && tri[2] <= 0x7F);
+
+    if (k < 0 || max_out <= 0)
+        return 0;
+
+    if (k == 0 || !all_ascii)
+    {
+        /* Exact trigram only. */
+        if (max_out < 1)
+            return -1;
+        out[0][0] = tri[0];
+        out[0][1] = tri[1];
+        out[0][2] = tri[2];
+        return 1;
+    }
+
+    /* all-ASCII, k >= 1: expand in byte space, copy back as codepoints. */
+    {
+        uint8   btri[3];
+        uint8 (*btmp)[3];
+        int     n, i;
+
+        btri[0] = (uint8) tri[0];
+        btri[1] = (uint8) tri[1];
+        btri[2] = (uint8) tri[2];
+
+        btmp = (uint8 (*)[3]) palloc(sizeof(uint8[3]) * max_out);
+        n = pg_tre_uleven_expand(btri, k, btmp, max_out);
+        if (n < 0)
+        {
+            pfree(btmp);
+            return -1;
+        }
+
+        for (i = 0; i < n; i++)
+        {
+            out[i][0] = (int32) btmp[i][0];
+            out[i][1] = (int32) btmp[i][1];
+            out[i][2] = (int32) btmp[i][2];
+        }
+        pfree(btmp);
+
+        return dedupe_trigrams_cp(out, n);
+    }
 }

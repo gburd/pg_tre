@@ -8,6 +8,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "access/amapi.h"
+#include "nodes/execnodes.h"   /* IndexInfo (pg_tre_ambuild, parallel build) */
 
 /* Strategy numbers for the text operator class. */
 #define PG_TRE_STRATEGY_APPROX_MATCH   1   /* text '%~~' tre_pattern */
@@ -32,8 +33,19 @@ extern Datum tre_handler(PG_FUNCTION_ARGS);
 
 /* Individual callback prototypes (src/am/...). */
 extern IndexBuildResult *pg_tre_ambuild(Relation heap, Relation index,
-                                        struct IndexInfo *indexInfo);
+                                        IndexInfo *indexInfo);
 extern void pg_tre_ambuildempty(Relation index);
+
+/*
+ * Parallel CREATE INDEX worker entry point.  Referenced by name from the
+ * ParallelContext set up in pgtre_begin_parallel(); must be an exported
+ * (non-static) symbol so the parallel-worker machinery can find it in the
+ * pg_tre shared library.
+ */
+struct dsm_segment;
+struct shm_toc;
+extern void pg_tre_parallel_build_main(struct dsm_segment *seg,
+                                       struct shm_toc *toc);
 extern bool pg_tre_aminsert(Relation index, Datum *values, bool *isnull,
                             ItemPointer ht_ctid, Relation heapRel,
                             IndexUniqueCheck checkUnique,
@@ -51,6 +63,8 @@ extern void pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 extern int64 pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
 extern bool  pg_tre_amgettuple(IndexScanDesc scan, ScanDirection dir);
 extern void pg_tre_amendscan(IndexScanDesc scan);
+extern void pg_tre_ammarkpos(IndexScanDesc scan);
+extern void pg_tre_amrestrpos(IndexScanDesc scan);
 extern void pg_tre_amcostestimate(struct PlannerInfo *root,
                                   struct IndexPath *path,
                                   double loop_count,
@@ -79,3 +93,5 @@ extern bool pg_tre_get_fastupdate(Relation index);
 struct TrePatternData;
 extern char  *tre_pattern_get_text(struct TrePatternData *p, int *len_out);
 extern int32  tre_pattern_get_max_cost(struct TrePatternData *p);
+extern void   tre_pattern_get_costs(struct TrePatternData *p, int32 *cost_ins,
+									int32 *cost_del, int32 *cost_subst);

@@ -104,6 +104,8 @@ finalize_range_page(Relation index, Buffer rangebuf,
     ((PageHeader) page)->pd_lower =
         (LocationIndex) (content + entry_offset_in_content - (char *) page);
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(rangebuf);
 
     if (RelationNeedsWAL(index))
@@ -115,6 +117,8 @@ finalize_range_page(Relation index, Buffer rangebuf,
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_RANGE_UPDATE);
         PageSetLSN(page, recptr);
     }
+
+    END_CRIT_SECTION();
 
     UnlockReleaseBuffer(rangebuf);
 }

@@ -6,6 +6,94 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.1.0] - 2026-08-27 - recheck-cost fidelity, UTF-8 fuzzy correctness, AM hardening
+
+Correctness + robustness release on the 3.0 lineage.  On-disk format is
+unchanged (v9, `PG_TRE_FORMAT_VERSION_MIN` = 6); `ALTER EXTENSION pg_tre
+UPDATE TO '3.1.0'` is a version bump with **no REINDEX**.
+
+### Fixed
+
+- **`%~~` / `<@>` recheck now honors per-edit cost weights.** A pattern
+  built with `tre_pattern(pattern, max_cost, cost_ins, cost_del,
+  cost_subst)` previously rechecked through the unit-cost path when driven
+  by the index, so an indexed scan could return different rows than the
+  equivalent `tre_amatch(..., ci, cd, cs)` function call.  The operator
+  recheck (`tre_match_scalar`) and the KNN distance pipeline now thread the
+  pattern's real costs through, so indexed and sequential results match for
+  non-uniform-cost patterns.
+- **Approximate (k>0) matching is UTF-8 codepoint-correct.**  The k>0
+  tiling spine slid a trigram window over raw UTF-8 *bytes* and dropped
+  codepoints > 0xFF, producing trigram hashes that did not match how the
+  index hashed the text (codepoint-based) — silently missing matching rows
+  on CJK / accented text.  The spine is now codepoint-based
+  (`pg_tre_uleven_expand_cp` + `pg_tre_hash_trigram_cp`), so fuzzy queries
+  over multibyte text agree with a sequential scan.  (Soundness was always
+  backstopped by the authoritative heap recheck; this fixes false
+  negatives in the candidate set.)
+- **PG18/PG19 build compatibility**: `run_catalog.c` now includes
+  `utils/tuplestore.h` and `pg_tre/amapi.h` now includes
+  `nodes/execnodes.h` explicitly (both were transitive includes that
+  newer/other PG builds dropped), fixing implicit-declaration and
+  `unknown type name 'IndexInfo'` build errors.
+
+### Added
+
+- **Real opclass validation (`amvalidate`).**  Replaces the previous
+  always-true stub with checks that the opclass indexes `text`, every
+  operator uses a known strategy (1 `%~~`, 2 `<@>` ORDER BY, 3–7 LIKE/
+  ILIKE/regex/iregex/eq) with the correct `amoppurpose`, order-by members
+  name a valid sort family, and search operators return boolean.
+- **KNN `ORDER BY <@>` mark/restore.**  `ammarkpos`/`amrestrpos` are
+  implemented as an O(1) save/restore of the materialized result cursor,
+  so plans that rewind over the distance-ordered output (e.g. a merge
+  join) work correctly.
+- **Parallel `CREATE INDEX`** (`amcanbuildparallel` = true,
+  `pg_tre.enable_parallel_build` on by default).  A leader plus background
+  workers divide the heap scan + trigram extraction + sort into one
+  coordinated `tuplesort`; the leader merges every participant's run and
+  builds the posting/upper/range trees serially.  Works for plain builds
+  and `CREATE INDEX CONCURRENTLY`; the worker count is bounded by
+  `max_parallel_maintenance_workers`.  Two coordination bugs found and
+  fixed under a debugger before enabling: the leader-wait loop held the
+  DSM spinlock across `ConditionVariableSleep` (a self-deadlock that
+  surfaced as a "stuck spinlock" PANIC at scale), and the CONCURRENTLY
+  path passed the wrong scan snapshot / `ii_Concurrent` to the workers
+  (an `OldestXmin` assertion in heapam).  Verified on a 16-vCPU host:
+  repeated 200k/300k/1M-row builds, concurrent builds, and CIC all
+  produce byte-for-byte the same candidate sets as a serial build and a
+  sequential scan.
+
+- **Online format upgrade covers the full v6–v9 range.**
+  `pg_tre_upgrade_index()`'s per-page dispatch handled v3–v7 but errored
+  ("page format upgrade from v8 not implemented") on a v8 page from a
+  2.x coalescing-era index.  v3–v9 non-range pages are byte-identical
+  apart from the version stamp, so v8 is now handled like the rest; an
+  in-place, no-REINDEX upgrade to v9 works from any supported prior
+  format.
+
+### Changed
+
+- **WAL critical-section consistency.**  The meta, upper, posting, and
+  range page writers now wrap their `MarkBufferDirty` → `XLogInsert` →
+  `PageSetLSN` sequences in `START_CRIT_SECTION`/`END_CRIT_SECTION`,
+  matching the free-log / coalesced / run-catalog writers.  No behavior
+  change today; removes a latent torn-write hazard for future edits.
+- **Removed dead code**: the unreferenced `pg_tre_upper_insert` "Phase 4"
+  stub (incremental upper-tree insert was never wired; the build uses bulk
+  rebuild-on-flush).
+
+### Documentation
+
+- README, `doc/design.md`, and `STATUS.md` corrected to describe the
+  actual scan path: a trigram posting tier (authoritative) plus a
+  build-time BRIN-style range-bloom summary that is **not** consulted at
+  scan time, and no per-tuple bloom tier (removed in 3.0.0).  The prior
+  "three-tier funnel" wording and the stale "in-memory build / will OOM"
+  performance note (fixed by the 1.8.0 tuplesort build) were removed.
+
+---
+
 ## [3.0.2] - 2026-07-06 - installable extension packages in the flake
 
 Packaging + documentation release.  No C, WAL, SQL-surface, or on-disk-format

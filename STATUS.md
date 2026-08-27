@@ -1,8 +1,27 @@
 # pg_tre status
 
-Released: **3.0.2** (2026-06).  See `CHANGELOG.md` for full
+Released: **3.1.0** (2026-08).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+3.1.0 is a correctness + robustness release on the 3.0 lineage:
+on-disk format unchanged (v9, min readable v6), no re-index
+required.  Headline changes: (1) the `%~~` and `<@>` recheck now
+honors a pattern's per-edit cost weights (`cost_ins`/`cost_del`/
+`cost_subst`), matching the seq-scan UDF form; (2) approximate
+(k>0) matching is UTF-8 codepoint-correct over multibyte text
+(the k>0 tiling spine previously slid over raw bytes and dropped
+codepoints > 0xFF, silently missing CJK/accented matches); (3)
+real opclass validation (`amvalidate`) instead of the previous
+always-true stub; (4) the KNN `ORDER BY <@>` path gains
+`ammarkpos`/`amrestrpos`; (5) consistent WAL critical sections
+across all page writers; (6) a PG18/PG19 build-compat include fix.
+Parallel `CREATE INDEX` (`amcanbuildparallel`,
+`pg_tre.enable_parallel_build` on by default) is now shipped and
+enabled -- a leader plus background workers feed one coordinated
+`tuplesort`, working for plain builds and `CREATE INDEX
+CONCURRENTLY`.  `pg_tre_upgrade_index()` now covers the full
+v6–v9 format range for in-place, no-REINDEX upgrades.
 
 1.5.6 is a robustness + DoS-hardening release on the 1.5.0
 lineage: same on-disk format (v5), no re-index required.

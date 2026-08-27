@@ -28,6 +28,7 @@
 
 #include "access/amapi.h"
 #include "access/genam.h"
+#include "access/parallel.h"
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -35,9 +36,13 @@
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
 #include "executor/executor.h"
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
+#include "optimizer/optimizer.h"
 #include "storage/bufmgr.h"
+#include "storage/condition_variable.h"
+#include "tcop/tcopprot.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
@@ -46,6 +51,7 @@
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 #include "utils/typcache.h"
+#include "utils/wait_event.h"
 
 #include "funcapi.h"
 #include "access/relation.h"
@@ -92,7 +98,68 @@ typedef struct BuildState
 
     double      heap_tuples;
     MemoryContext tmpctx;
+
+    /*
+     * Parallel build coordination.  NULL/absent for a serial build.
+     * btshared points at the DSM-resident shared state; sharedsort is
+     * the tuplesort coordination object all participants attach to.
+     */
+    struct PgTreShared *pgtshared;
+    Sharedsort         *sharedsort;
 } BuildState;
+
+/*
+ * Status record for a parallel index build, resident in the DSM segment
+ * shared by the leader and all workers.  Mirrors nbtree's BTShared.
+ */
+typedef struct PgTreShared
+{
+    /* Immutable state set up by the leader before launching workers. */
+    Oid         heaprelid;
+    Oid         indexrelid;
+    bool        isconcurrent;
+    int         scantuplesortstates;
+
+    /*
+     * mutex protects the mutable fields below and coordinates worker
+     * completion (workersdonecv).
+     */
+    slock_t     mutex;
+    ConditionVariable workersdonecv;
+
+    /* Mutable state, protected by mutex. */
+    int         nparticipantsdone;
+    double      reltuples;       /* summed heap tuples scanned */
+    double      indtuples;       /* summed trigram tuples emitted */
+
+    /*
+     * ParallelTableScanDescData follows immediately (variable length);
+     * fetch via a computed offset, not embedded, so the struct stays
+     * fixed-size for the DSM key layout.
+     */
+} PgTreShared;
+
+/* DSM keys for the parallel build TOC. */
+#define PG_TRE_BUILD_KEY_SHARED         UINT64CONST(0xB000000000000001)
+#define PG_TRE_BUILD_KEY_TUPLESORT      UINT64CONST(0xB000000000000002)
+#define PG_TRE_BUILD_KEY_QUERY_TEXT     UINT64CONST(0xB000000000000003)
+#define PG_TRE_BUILD_KEY_WAL_USAGE      UINT64CONST(0xB000000000000004)
+#define PG_TRE_BUILD_KEY_BUFFER_USAGE   UINT64CONST(0xB000000000000005)
+
+/*
+ * Leader-private state for a parallel build: the ParallelContext plus
+ * pointers into the DSM segment.  Mirrors nbtree's BTLeader.
+ */
+typedef struct PgTreLeader
+{
+    ParallelContext *pcxt;
+    int              nparticipanttuplesorts;
+    PgTreShared     *pgtshared;
+    Sharedsort      *sharedsort;
+    Snapshot         snapshot;
+    WalUsage        *walusage;
+    BufferUsage     *bufferusage;
+} PgTreLeader;
 
 /* Accumulator for posting entries during sort readout. */
 typedef struct PostingAccum
@@ -459,6 +526,372 @@ upper_iter(void *ctx, uint64 *hash, BlockNumber *root,
     return true;
 }
 
+/* ---------------------------------------------------------------------
+ * Parallel build support.
+ *
+ * The parallelizable phase is the heap scan + trigram extraction + sort
+ * ingestion.  All participants (leader + workers) feed one coordinated
+ * tuplesort; after every participant finishes its portion, the leader
+ * performs the final merge, then serially builds the posting trees,
+ * upper tree, and range tier from the fully-sorted stream.  This mirrors
+ * nbtree's _bt_begin_parallel / _bt_parallel_scan_and_sort split.
+ * ------------------------------------------------------------------- */
+
+/* Forward declarations. */
+static void pgtre_scan_and_sort(BuildState *bstate, bool progress);
+void pgtre_end_parallel(PgTreLeader *leader);
+
+/*
+ * Attempt to launch parallel workers for the build.  On success, fills in
+ * bstate->pgtshared / bstate->sharedsort and returns a PgTreLeader; on
+ * failure (couldn't get workers) returns NULL and the caller falls back
+ * to a serial build.
+ */
+static PgTreLeader *
+pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
+{
+    ParallelContext *pcxt;
+    PgTreShared     *pgtshared;
+    Sharedsort      *sharedsort;
+    PgTreLeader     *leader;
+    Snapshot         snapshot;
+    Size             estshared;
+    Size             estsort;
+    ParallelTableScanDesc pscan;
+    WalUsage        *walusage;
+    BufferUsage     *bufferusage;
+    char            *sharedquery;
+    int              querylen;
+    int              scantuplesortstates;
+
+    EnterParallelMode();
+    Assert(request > 0);
+
+    pcxt = CreateParallelContext("pg_tre", "pg_tre_parallel_build_main",
+                                 request);
+
+    /* leader participates as a worker too, per nbtree. */
+    scantuplesortstates = request + 1;
+
+    /*
+     * Choose the scan snapshot up front (nbtree pattern): a non-concurrent
+     * build uses SnapshotAny and does its own visibility filtering; a
+     * CONCURRENTLY build takes a regular MVCC snapshot and indexes whatever
+     * is visible to it.  The same snapshot must drive the DSM estimate (an
+     * MVCC snapshot is serialized into the parallel scan descriptor and
+     * costs space), the scan initialization, and the workers'
+     * ii_Concurrent flag -- otherwise table_index_build_scan mis-derives
+     * OldestXmin and trips an assertion in heapam.
+     */
+    if (!isconcurrent)
+        snapshot = SnapshotAny;
+    else
+        snapshot = RegisterSnapshot(GetTransactionSnapshot());
+
+    /*
+     * Estimate DSM space: shared status + parallel scan descriptor.
+     * The scan descriptor is placed at BUFFERALIGN(sizeof(PgTreShared))
+     * (see the pscan pointer computation below and in the worker); the
+     * estimate must use the same alignment so shm_toc_allocate reserves
+     * enough -- getting this wrong overruns into the next chunk and
+     * corrupts the shared spinlock (manifests as a "stuck spinlock"
+     * PANIC in a worker).  Mirrors nbtree's _bt_parallel_estimate_shared.
+     */
+    estshared = add_size(BUFFERALIGN(sizeof(PgTreShared)),
+                         table_parallelscan_estimate(bstate->heap,
+                                                     snapshot));
+    shm_toc_estimate_chunk(&pcxt->estimator, estshared);
+
+    /* Tuplesort coordination object. */
+    estsort = tuplesort_estimate_shared(scantuplesortstates);
+    shm_toc_estimate_chunk(&pcxt->estimator, estsort);
+
+    shm_toc_estimate_keys(&pcxt->estimator, 2);
+
+    /* Query text for worker debug/instrumentation. */
+    if (debug_query_string)
+    {
+        querylen = strlen(debug_query_string);
+        shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
+        shm_toc_estimate_keys(&pcxt->estimator, 1);
+    }
+    else
+        querylen = 0;
+
+    /* WAL/buffer usage instrumentation slots. */
+    shm_toc_estimate_chunk(&pcxt->estimator,
+                           mul_size(sizeof(WalUsage), pcxt->nworkers));
+    shm_toc_estimate_keys(&pcxt->estimator, 1);
+    shm_toc_estimate_chunk(&pcxt->estimator,
+                           mul_size(sizeof(BufferUsage), pcxt->nworkers));
+    shm_toc_estimate_keys(&pcxt->estimator, 1);
+
+    InitializeParallelDSM(pcxt);
+
+    /* If no workers could actually be launched, fall back to serial. */
+    if (pcxt->seg == NULL)
+    {
+        DestroyParallelContext(pcxt);
+        ExitParallelMode();
+        return NULL;
+    }
+
+    /* Set up the shared status record. */
+    pgtshared = (PgTreShared *) shm_toc_allocate(pcxt->toc, estshared);
+    pgtshared->heaprelid = RelationGetRelid(bstate->heap);
+    pgtshared->indexrelid = RelationGetRelid(bstate->index);
+    pgtshared->isconcurrent = isconcurrent;
+    pgtshared->scantuplesortstates = scantuplesortstates;
+    SpinLockInit(&pgtshared->mutex);
+    ConditionVariableInit(&pgtshared->workersdonecv);
+    pgtshared->nparticipantsdone = 0;
+    pgtshared->reltuples = 0.0;
+    pgtshared->indtuples = 0.0;
+
+    /* Parallel heap scan descriptor lives immediately after the struct. */
+    pscan = (ParallelTableScanDesc) ((char *) pgtshared + BUFFERALIGN(sizeof(PgTreShared)));
+    table_parallelscan_initialize(bstate->heap, pscan, snapshot);
+
+    shm_toc_insert(pcxt->toc, PG_TRE_BUILD_KEY_SHARED, pgtshared);
+
+    /* Set up the shared tuplesort coordination object. */
+    sharedsort = (Sharedsort *) shm_toc_allocate(pcxt->toc, estsort);
+    tuplesort_initialize_shared(sharedsort, scantuplesortstates, pcxt->seg);
+    shm_toc_insert(pcxt->toc, PG_TRE_BUILD_KEY_TUPLESORT, sharedsort);
+
+    /* Store the query text. */
+    if (debug_query_string)
+    {
+        sharedquery = (char *) shm_toc_allocate(pcxt->toc, querylen + 1);
+        memcpy(sharedquery, debug_query_string, querylen + 1);
+        shm_toc_insert(pcxt->toc, PG_TRE_BUILD_KEY_QUERY_TEXT, sharedquery);
+    }
+
+    /* Instrumentation. */
+    walusage = shm_toc_allocate(pcxt->toc,
+                                mul_size(sizeof(WalUsage), pcxt->nworkers));
+    shm_toc_insert(pcxt->toc, PG_TRE_BUILD_KEY_WAL_USAGE, walusage);
+    bufferusage = shm_toc_allocate(pcxt->toc,
+                                   mul_size(sizeof(BufferUsage), pcxt->nworkers));
+    shm_toc_insert(pcxt->toc, PG_TRE_BUILD_KEY_BUFFER_USAGE, bufferusage);
+
+    LaunchParallelWorkers(pcxt);
+
+    leader = (PgTreLeader *) palloc0(sizeof(PgTreLeader));
+    leader->pcxt = pcxt;
+    leader->nparticipanttuplesorts = pcxt->nworkers_launched + 1;
+    leader->pgtshared = pgtshared;
+    leader->sharedsort = sharedsort;
+    leader->snapshot = snapshot;
+    leader->walusage = walusage;
+    leader->bufferusage = bufferusage;
+
+    /* If no workers actually started, tear down and fall back to serial. */
+    if (pcxt->nworkers_launched == 0)
+    {
+        pgtre_end_parallel(leader);
+        return NULL;
+    }
+
+    bstate->pgtshared = pgtshared;
+    bstate->sharedsort = sharedsort;
+
+    return leader;
+}
+
+/*
+ * Shut down a parallel build: wait for workers, accumulate their tuple
+ * counts, and destroy the parallel context.
+ */
+void
+pgtre_end_parallel(PgTreLeader *leader)
+{
+    int i;
+
+    /* Shut the workers down and gather instrumentation. */
+    WaitForParallelWorkersToFinish(leader->pcxt);
+
+    for (i = 0; i < leader->pcxt->nworkers_launched; i++)
+        InstrAccumParallelQuery(&leader->bufferusage[i], &leader->walusage[i]);
+
+    if (IsMVCCSnapshot(leader->snapshot))
+        UnregisterSnapshot(leader->snapshot);
+
+    DestroyParallelContext(leader->pcxt);
+    ExitParallelMode();
+}
+
+/*
+ * Wait for all participants to finish their scan+sort portion and return
+ * the total number of heap tuples scanned across all participants.  Also
+ * reports the summed emitted-trigram count via *indtuples.
+ */
+static double
+pgtre_parallel_heapscan(PgTreLeader *leader, double *indtuples)
+{
+    PgTreShared *pgtshared = leader->pgtshared;
+    int          nparticipants = leader->nparticipanttuplesorts;
+    double       reltuples = 0.0;
+
+    for (;;)
+    {
+        SpinLockAcquire(&pgtshared->mutex);
+        if (pgtshared->nparticipantsdone == nparticipants)
+        {
+            reltuples = pgtshared->reltuples;
+            *indtuples = pgtshared->indtuples;
+            SpinLockRelease(&pgtshared->mutex);
+            break;
+        }
+        SpinLockRelease(&pgtshared->mutex);
+
+        ConditionVariableSleep(&pgtshared->workersdonecv,
+                               WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+    }
+
+    ConditionVariableCancelSleep();
+    return reltuples;
+}
+
+/*
+ * Scan the (portion of the) heap assigned to this participant, extract
+ * trigrams, and feed them to the coordinated tuplesort.  Used by both the
+ * leader-as-worker path and the background workers.  Does NOT call
+ * tuplesort_performsort (each participant sorts its own run; the leader
+ * does the final cross-run merge on readout).
+ */
+static void
+pgtre_scan_and_sort(BuildState *bstate, bool progress)
+{
+    if (bstate->pgtshared != NULL)
+    {
+        /* Parallel: scan our slice of the shared parallel scan. */
+        ParallelTableScanDesc pscan =
+            (ParallelTableScanDesc) ((char *) bstate->pgtshared +
+                                     BUFFERALIGN(sizeof(PgTreShared)));
+        TableScanDesc scan = table_beginscan_parallel(bstate->heap, pscan);
+
+        bstate->heap_tuples =
+            table_index_build_scan(bstate->heap, bstate->index,
+                                   bstate->indexInfo, true, progress,
+                                   build_callback, bstate, scan);
+    }
+    else
+    {
+        /* Serial. */
+        bstate->heap_tuples =
+            table_index_build_scan(bstate->heap, bstate->index,
+                                   bstate->indexInfo, true, progress,
+                                   build_callback, bstate, NULL);
+    }
+}
+
+/*
+ * Parallel worker entry point.  Attaches to the DSM segment, opens the
+ * heap+index, feeds its heap slice into the coordinated tuplesort, and
+ * reports its tuple counts back to the leader.
+ */
+PGDLLEXPORT void
+pg_tre_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+{
+    PgTreShared    *pgtshared;
+    Sharedsort     *sharedsort;
+    BuildState      wstate;
+    Relation        heapRel;
+    Relation        indexRel;
+    LOCKMODE        heapLockmode;
+    LOCKMODE        indexLockmode;
+    WalUsage       *walusage;
+    BufferUsage    *bufferusage;
+    char           *sharedquery;
+    TypeCacheEntry *tc;
+    int             sortmem;
+
+    /* Enable instrumentation for this worker. */
+    InstrStartParallelQuery();
+
+    pgtshared = (PgTreShared *) shm_toc_lookup(toc, PG_TRE_BUILD_KEY_SHARED,
+                                               false);
+    sharedsort = (Sharedsort *) shm_toc_lookup(toc, PG_TRE_BUILD_KEY_TUPLESORT,
+                                               false);
+
+    /* Optional query text for pg_stat_activity. */
+    sharedquery = shm_toc_lookup(toc, PG_TRE_BUILD_KEY_QUERY_TEXT, true);
+    if (sharedquery)
+        debug_query_string = sharedquery;
+
+    if (pgtshared->isconcurrent)
+    {
+        heapLockmode = ShareUpdateExclusiveLock;
+        indexLockmode = RowExclusiveLock;
+    }
+    else
+    {
+        heapLockmode = ShareLock;
+        indexLockmode = AccessExclusiveLock;
+    }
+
+    heapRel = table_open(pgtshared->heaprelid, heapLockmode);
+    indexRel = index_open(pgtshared->indexrelid, indexLockmode);
+
+    memset(&wstate, 0, sizeof(wstate));
+    wstate.heap = heapRel;
+    wstate.index = indexRel;
+    wstate.indexInfo = BuildIndexInfo(indexRel);
+    wstate.indexInfo->ii_Concurrent = pgtshared->isconcurrent;
+    wstate.n_emitted = 0;
+    wstate.pgtshared = pgtshared;
+    wstate.sharedsort = sharedsort;
+    wstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
+                                          "pg_tre parallel worker temp",
+                                          ALLOCSET_DEFAULT_SIZES);
+
+    /* Attach to the coordinated tuplesort as a worker participant. */
+    tc = lookup_type_cache(BYTEAOID, TYPECACHE_LT_OPR);
+    if (!OidIsValid(tc->lt_opr))
+        elog(ERROR, "pg_tre: no btree \"<\" operator for bytea");
+
+    tuplesort_attach_shared(sharedsort, seg);
+    sortmem = maintenance_work_mem / pgtshared->scantuplesortstates;
+
+    {
+        SortCoordinate coordinate = palloc0(sizeof(SortCoordinateData));
+
+        coordinate->isWorker = true;
+        coordinate->nParticipants = -1;
+        coordinate->sharedsort = sharedsort;
+
+        wstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
+                                                 InvalidOid, false, sortmem,
+                                                 coordinate, TUPLESORT_NONE);
+    }
+
+    /* Scan our heap slice, feeding the sort. */
+    pgtre_scan_and_sort(&wstate, false);
+    tuplesort_performsort(wstate.sortstate);
+
+    /* Report our tuple counts to the leader. */
+    SpinLockAcquire(&pgtshared->mutex);
+    pgtshared->nparticipantsdone++;
+    pgtshared->reltuples += wstate.heap_tuples;
+    pgtshared->indtuples += (double) wstate.n_emitted;
+    SpinLockRelease(&pgtshared->mutex);
+
+    ConditionVariableSignal(&pgtshared->workersdonecv);
+
+    tuplesort_end(wstate.sortstate);
+
+    /* Publish instrumentation into the leader-visible arrays. */
+    walusage = shm_toc_lookup(toc, PG_TRE_BUILD_KEY_WAL_USAGE, false);
+    bufferusage = shm_toc_lookup(toc, PG_TRE_BUILD_KEY_BUFFER_USAGE, false);
+    InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
+                          &walusage[ParallelWorkerNumber]);
+
+    MemoryContextDelete(wstate.tmpctx);
+    index_close(indexRel, indexLockmode);
+    table_close(heapRel, heapLockmode);
+}
+
 IndexBuildResult *
 pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 {
@@ -474,6 +907,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     BlockNumber root_upper;
     UpperIterState iter_state;
     PgTreCoalescedWriter *coalesce_writer = NULL;
+    PgTreLeader *build_leader = NULL;
 
     /* Phase 2 real build starts here. */
 
@@ -485,49 +919,143 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     bstate.index = index;
     bstate.indexInfo = indexInfo;
     bstate.n_emitted = 0;
+    bstate.pgtshared = NULL;
+    bstate.sharedsort = NULL;
+    bstate.heap_tuples = 0.0;
+    bstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
+                                          "pg_tre build temp context",
+                                          ALLOCSET_DEFAULT_SIZES);
 
-    /*
-     * Sort (trigram_hash, tid, position) tuples encoded as fixed
-     * 20-byte big-endian bytea Datums (see encode_entry).  tuplesort
-     * bounds peak memory by maintenance_work_mem and spills the rest
-     * to temp files, so the build no longer grows resident memory
-     * with the corpus size.  bytea's memcmp ordering reproduces the
-     * historical (hash, packed_tid, position) order exactly.
-     */
     {
+        PgTreLeader *leader = NULL;
         TypeCacheEntry *tc = lookup_type_cache(BYTEAOID, TYPECACHE_LT_OPR);
+        int         sortmem;
 
         if (!OidIsValid(tc->lt_opr))
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("pg_tre: no btree \"<\" operator for bytea")));
 
-        bstate.sortstate = tuplesort_begin_datum(BYTEAOID,
-                                                 tc->lt_opr,
-                                                 InvalidOid,   /* no collation */
-                                                 false,        /* nulls last */
-                                                 maintenance_work_mem,
-                                                 NULL,         /* not parallel */
-                                                 TUPLESORT_NONE);
+        /*
+         * Try to launch a parallel build if the planner requested workers
+         * (indexInfo->ii_ParallelWorkers, set by plan_create_index_workers
+         * via amcanbuildparallel=true) AND the experimental GUC is on.  If
+         * workers can't be obtained we transparently fall back to a serial
+         * build.
+         */
+        if (pg_tre_enable_parallel_build && indexInfo->ii_ParallelWorkers > 0)
+            leader = pgtre_begin_parallel(&bstate,
+                                          indexInfo->ii_Concurrent,
+                                          indexInfo->ii_ParallelWorkers);
+
+        if (leader != NULL)
+        {
+            /*
+             * Parallel build.  Two tuplesort roles for the leader:
+             *
+             *  1. bstate.sortstate is the *leader-role* sort
+             *     (isWorker=false, nParticipants=N): it is NOT fed tuples,
+             *     only tuplesort_performsort()'d to merge every worker's
+             *     partial run and read out below.
+             *
+             *  2. The leader also participates as a *worker* by scanning
+             *     its own heap slice into a separate worker-role sort
+             *     (isWorker=true) that feeds the shared sort, exactly like
+             *     a background worker (mirrors nbtree's
+             *     _bt_leader_participate_as_worker).
+             */
+            build_leader = leader;
+            {
+                SortCoordinate coordinate = palloc0(sizeof(SortCoordinateData));
+
+                coordinate->isWorker = false;
+                coordinate->nParticipants = leader->nparticipanttuplesorts;
+                coordinate->sharedsort = bstate.sharedsort;
+
+                bstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
+                                                         InvalidOid, false,
+                                                         maintenance_work_mem,
+                                                         coordinate,
+                                                         TUPLESORT_NONE);
+            }
+
+            /* Leader participates as a worker: scan a slice, feed shared sort. */
+            {
+                BuildState  wstate;
+                SortCoordinate wcoord = palloc0(sizeof(SortCoordinateData));
+
+                memset(&wstate, 0, sizeof(wstate));
+                wstate.heap = heap;
+                wstate.index = index;
+                wstate.indexInfo = BuildIndexInfo(index);
+                wstate.indexInfo->ii_Concurrent = indexInfo->ii_Concurrent;
+                wstate.n_emitted = 0;
+                wstate.pgtshared = bstate.pgtshared;
+                wstate.sharedsort = bstate.sharedsort;
+                wstate.heap_tuples = 0.0;
+                wstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
+                                                      "pg_tre leader-worker temp",
+                                                      ALLOCSET_DEFAULT_SIZES);
+
+                sortmem = maintenance_work_mem / leader->nparticipanttuplesorts;
+                wcoord->isWorker = true;
+                wcoord->nParticipants = -1;
+                wcoord->sharedsort = bstate.sharedsort;
+                wstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
+                                                         InvalidOid, false,
+                                                         sortmem, wcoord,
+                                                         TUPLESORT_NONE);
+
+                pgtre_scan_and_sort(&wstate, true);
+                tuplesort_performsort(wstate.sortstate);
+
+                /* Report the leader-worker's tuple counts. */
+                SpinLockAcquire(&bstate.pgtshared->mutex);
+                bstate.pgtshared->nparticipantsdone++;
+                bstate.pgtshared->reltuples += wstate.heap_tuples;
+                bstate.pgtshared->indtuples += (double) wstate.n_emitted;
+                SpinLockRelease(&bstate.pgtshared->mutex);
+                ConditionVariableSignal(&bstate.pgtshared->workersdonecv);
+
+                tuplesort_end(wstate.sortstate);
+                MemoryContextDelete(wstate.tmpctx);
+            }
+
+            /* Wait for every participant. */
+            {
+                double indtuples = 0.0;
+                bstate.heap_tuples = pgtre_parallel_heapscan(leader,
+                                                             &indtuples);
+            }
+
+            ereport(NOTICE,
+                    (errmsg("pg_tre: parallel build collected trigrams from "
+                            "%.0f heap tuples across %d participants",
+                            bstate.heap_tuples,
+                            leader->nparticipanttuplesorts)));
+
+            /* Merge every worker's partial run in the leader-role sort. */
+            tuplesort_performsort(bstate.sortstate);
+        }
+        else
+        {
+            /* Serial build. */
+            bstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
+                                                     InvalidOid, false,
+                                                     maintenance_work_mem,
+                                                     NULL, TUPLESORT_NONE);
+
+            /* Step 3: scan heap and collect trigrams. */
+            pgtre_scan_and_sort(&bstate, true);
+
+            ereport(NOTICE,
+                    (errmsg("pg_tre: collected %lld trigram entries from %.0f heap tuples",
+                            (long long) bstate.n_emitted, bstate.heap_tuples)));
+
+            /* Step 4: finish the sort. */
+            tuplesort_performsort(bstate.sortstate);
+        }
     }
-
-    bstate.heap_tuples = 0.0;
-    bstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
-                                          "pg_tre build temp context",
-                                          ALLOCSET_DEFAULT_SIZES);
-
-    /* Step 3: scan heap and collect trigrams. */
-    table_index_build_scan(heap, index, indexInfo, true, true,
-                           build_callback, &bstate, NULL);
-
-    ereport(NOTICE,
-            (errmsg("pg_tre: collected %lld trigram entries from %.0f heap tuples",
-                    (long long) bstate.n_emitted, bstate.heap_tuples)));
-
-    /* Step 4: finish the sort.  tuplesort_performsort() spills to disk
-     * as needed and checks for interrupts internally, so the sort is
-     * both memory-bounded (maintenance_work_mem) and cancellable. */
-    tuplesort_performsort(bstate.sortstate);
 
     /* Step 5: process sorted entries and build posting trees. */
     oldcxt = MemoryContextSwitchTo(bstate.tmpctx);
@@ -808,6 +1336,10 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     MemoryContextDelete(bstate.tmpctx);
 
     tuplesort_end(bstate.sortstate);
+
+    /* Tear down parallel workers now that the shared sort is fully drained. */
+    if (build_leader != NULL)
+        pgtre_end_parallel(build_leader);
 
     /* Return build result. */
     result = (IndexBuildResult *) palloc0(sizeof(IndexBuildResult));

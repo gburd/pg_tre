@@ -101,6 +101,7 @@ typedef struct TreScanState
     OrderEntry      *knn_entries;
     int              knn_n;
     int              knn_pos;
+    int              knn_markpos;    /* saved knn_pos for ammarkpos/amrestrpos */
     void            *knn_compiled;   /* tre_cache_lookup() result */
     int32            knn_max_cost;
     AttrNumber       knn_body_attno;
@@ -121,6 +122,7 @@ pg_tre_ambeginscan(Relation index, int nkeys, int norderbys)
     st->knn_entries = NULL;
     st->knn_n = 0;
     st->knn_pos = 0;
+    st->knn_markpos = -1;
     st->knn_compiled = NULL;
     st->knn_body_attno = InvalidAttrNumber;
 
@@ -169,6 +171,7 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
     st->knn_entries = NULL;
     st->knn_n = 0;
     st->knn_pos = 0;
+    st->knn_markpos = -1;
     st->knn_compiled = NULL;
     st->knn_body_attno = InvalidAttrNumber;
 
@@ -1172,6 +1175,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
     AttrNumber    body_attno;
     void * volatile compiled = NULL;
     int32         max_cost = 0;
+    int32         cost_ins = 1, cost_del = 1, cost_subst = 1;
     struct TrePatternData *pat;
     char         *pat_text;
     int           pat_len;
@@ -1206,6 +1210,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
               PG_DETOAST_DATUM(scan->orderByData[0].sk_argument);
         pat_text = tre_pattern_get_text(pat, &pat_len);
         max_cost = tre_pattern_get_max_cost(pat);
+        tre_pattern_get_costs(pat, &cost_ins, &cost_del, &cost_subst);
         compiled = tre_cache_lookup_pinned(pat_text, pat_len);
     }
 
@@ -1284,7 +1289,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     body = (text *) PG_DETOAST_DATUM_PACKED(val);
                     r = tre_do_match(compiled,
                                      VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
-                                     max_cost, 1, 1, 1,
+                                     max_cost, cost_ins, cost_del, cost_subst,
                                      INT_MAX, INT_MAX, INT_MAX, INT_MAX);
                     pg_tre_check_match_timeout(&r);
                     if (!r.matched)
@@ -1348,7 +1353,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     body = (text *) PG_DETOAST_DATUM_PACKED(val);
                     r = tre_do_match(compiled,
                                      VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
-                                     max_cost, 1, 1, 1,
+                                     max_cost, cost_ins, cost_del, cost_subst,
                                      INT_MAX, INT_MAX, INT_MAX, INT_MAX);
                     ReleaseBuffer(buf);
 
@@ -1470,4 +1475,33 @@ pg_tre_amgettuple(IndexScanDesc scan, ScanDirection dir)
     scan->xs_recheckorderby = false;
 
     return true;
+}
+
+/*
+ * ammarkpos / amrestrpos - save and restore the current scan position.
+ *
+ * These are exercised when a plan node above the index scan needs to
+ * rewind (e.g. a merge join over the KNN-ordered <@> output).  The KNN
+ * path materializes all candidate rows in distance order into
+ * st->knn_entries and walks them with the st->knn_pos cursor, so a
+ * mark/restore is just a save/restore of that cursor -- O(1), no
+ * re-scan.  For the bitmap (%~~) path the executor never calls these
+ * (bitmap scans do not support mark/restore), so guarding on knn_ready
+ * keeps the operation well-defined either way.
+ */
+void
+pg_tre_ammarkpos(IndexScanDesc scan)
+{
+    TreScanState *st = (TreScanState *) scan->opaque;
+
+    st->knn_markpos = st->knn_ready ? st->knn_pos : -1;
+}
+
+void
+pg_tre_amrestrpos(IndexScanDesc scan)
+{
+    TreScanState *st = (TreScanState *) scan->opaque;
+
+    if (st->knn_markpos >= 0)
+        st->knn_pos = st->knn_markpos;
 }

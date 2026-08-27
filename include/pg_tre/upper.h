@@ -31,12 +31,4 @@ extern BlockNumber pg_tre_upper_bulkload(Relation index,
                                          pg_tre_upper_bulkload_iter iter,
                                          void *iter_ctx);
 
-/*
- * Insert a single entry into the upper tree.  Phase 4 implements
- * tree descent + split logic.
- */
-extern void pg_tre_upper_insert(Relation index, uint64 hash,
-                                BlockNumber root,
-                                const uint8 *inline_data, Size inline_bytes);
-
 #endif /* PG_TRE_UPPER_H */

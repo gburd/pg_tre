@@ -216,6 +216,8 @@ posting_leaf_unlink(Relation index, Buffer prev_buf, Buffer cur_buf,
     ((PageHeader) cur_page)->pd_upper =
         BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData));
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(prev_buf);
     MarkBufferDirty(cur_buf);
 
@@ -230,6 +232,7 @@ posting_leaf_unlink(Relation index, Buffer prev_buf, Buffer cur_buf,
         PageSetLSN(prev_page, recptr);
         PageSetLSN(cur_page, recptr);
     }
+    END_CRIT_SECTION();
     (void) cur_blk;
 }
 
@@ -430,6 +433,8 @@ write_single_leaf(Relation index, uint64 trigram_hash,
         ((PageHeader) page)->pd_lower = (sparsemap_area + sz) - (char *) page;
     }
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(buf);
 
     if (RelationNeedsWAL(index))
@@ -441,6 +446,8 @@ write_single_leaf(Relation index, uint64 trigram_hash,
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_INSERT);
         PageSetLSN(page, recptr);
     }
+
+    END_CRIT_SECTION();
 
     UnlockReleaseBuffer(buf);
     return blkno;
@@ -1561,6 +1568,8 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
         ((char *) inline_region + new_region_used) - (char *) page;
     pfree(new_region);
 
+    START_CRIT_SECTION();
+
     MarkBufferDirty(buf);
     if (RelationNeedsWAL(index))
     {
@@ -1571,6 +1580,8 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_VACUUM);
         PageSetLSN(page, recptr);
     }
+
+    END_CRIT_SECTION();
 
     return removed;
 }
@@ -1846,6 +1857,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
     /* WAL: MarkBufferDirty BEFORE XLogRegisterBuffer (PG18 asserts the
      * buffer is dirty + exclusively locked); FPI replay handled by
      * pg_tre_redo_fpi via XLOG_PTRE_VACUUM. */
+    START_CRIT_SECTION();
     MarkBufferDirty(buf);
     if (RelationNeedsWAL(index))
     {
@@ -1856,6 +1868,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
         recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_VACUUM);
         PageSetLSN(page, recptr);
     }
+    END_CRIT_SECTION();
 
     return removed;
 
@@ -2025,6 +2038,7 @@ pg_tre_posting_recycle_deleted(Relation index, Relation heaprel,
 
         /* Re-initialize as a blank page and WAL-log, then record free. */
         pg_tre_page_init(page, BLCKSZ, PG_TRE_PAGE_POSTING_L);
+        START_CRIT_SECTION();
         MarkBufferDirty(buf);
         if (RelationNeedsWAL(index))
         {
@@ -2035,6 +2049,7 @@ pg_tre_posting_recycle_deleted(Relation index, Relation heaprel,
             recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_RECYCLE);
             PageSetLSN(page, recptr);
         }
+        END_CRIT_SECTION();
         UnlockReleaseBuffer(buf);
 
         RecordFreeIndexPage(index, blk);

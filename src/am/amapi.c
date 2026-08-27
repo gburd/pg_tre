@@ -55,8 +55,17 @@ tre_handler(PG_FUNCTION_ARGS)
     amroutine->amstorage       = false;
     amroutine->amclusterable   = false;
     amroutine->ampredlocks     = false;
-    amroutine->amcanparallel   = false;       /* enabled in Phase 8 */
-    amroutine->amcanbuildparallel = false;    /* enabled in Phase 2 */
+    amroutine->amcanparallel   = false;       /* KNN scan streams top-N; bitmap path parallelizes at heap level */
+    /*
+     * Parallel CREATE INDEX: the heap scan + trigram extraction + sort
+     * phase is divided across a leader and background workers feeding one
+     * coordinated tuplesort; the leader then merges and builds the trees
+     * serially (see pgtre_begin_parallel et al. in ambuild.c).  Enabled by
+     * default; the actual use of workers is still gated by the planner's
+     * plan_create_index_workers heuristics and, as a safety valve, by the
+     * pg_tre.enable_parallel_build GUC (default on).
+     */
+    amroutine->amcanbuildparallel = true;
     amroutine->amcaninclude    = false;
     amroutine->amusemaintenanceworkmem = true;
     amroutine->amsummarizing   = false;
@@ -86,8 +95,15 @@ tre_handler(PG_FUNCTION_ARGS)
     amroutine->amgettuple       = pg_tre_amgettuple;
     amroutine->amgetbitmap      = pg_tre_amgetbitmap;
     amroutine->amendscan        = pg_tre_amendscan;
-    amroutine->ammarkpos        = NULL;
-    amroutine->amrestrpos       = NULL;
+    /*
+     * Mark/restore over the KNN (<@> ORDER BY) amgettuple output.  The
+     * KNN path materializes rows in distance order into an array walked
+     * by a cursor, so mark/restore is an O(1) cursor save/restore.  The
+     * bitmap (%~~) path never triggers these (bitmap scans don't support
+     * mark/restore).
+     */
+    amroutine->ammarkpos        = pg_tre_ammarkpos;
+    amroutine->amrestrpos       = pg_tre_amrestrpos;
     amroutine->amestimateparallelscan = NULL;
     amroutine->aminitparallelscan     = NULL;
     amroutine->amparallelrescan       = NULL;

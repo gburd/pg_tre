@@ -22,6 +22,7 @@
 #include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
+#include "utils/tuplestore.h"
 #include "common/string.h"
 
 #include "pg_tre/buffer.h"

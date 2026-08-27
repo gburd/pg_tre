@@ -1,0 +1,67 @@
+-- test/sql/amvalidate.sql
+-- Regression test: opclass validation (amvalidate) and KNN mark/restore.
+--
+-- amvalidate is invoked by the CREATE OPERATOR CLASS / ALTER OPERATOR
+-- FAMILY machinery and by the amvalidate() diagnostic.  A correctly
+-- defined tre opclass must validate cleanly (return true, no WARNING).
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/amvalidate.sql:8: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+-- The shipped tre_text_ops opclass must pass validation.
+SELECT amvalidate(opc.oid)
+FROM pg_opclass opc
+JOIN pg_am am ON am.oid = opc.opcmethod
+WHERE am.amname = 'tre' AND opc.opcname = 'tre_text_ops';
+ amvalidate 
+------------
+ t
+(1 row)
+
+-- The opclass indexes text.
+SELECT opcintype::regtype
+FROM pg_opclass opc
+JOIN pg_am am ON am.oid = opc.opcmethod
+WHERE am.amname = 'tre' AND opc.opcname = 'tre_text_ops';
+ opcintype 
+-----------
+ text
+(1 row)
+
+-- KNN mark/restore: exercise the ORDER BY <@> path under a merge join,
+-- which is where the executor may call ammarkpos/amrestrpos over the
+-- ordered amgettuple output.  The result must be correct regardless.
+DROP TABLE IF EXISTS mr_t CASCADE;
+psql:test/sql/amvalidate.sql:25: NOTICE:  table "mr_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE mr_t (id serial, body text);
+CREATE TABLE
+INSERT INTO mr_t (body)
+SELECT 'connection refused code ' || (i % 20) FROM generate_series(1, 500) i;
+INSERT 0 500
+CREATE INDEX mr_idx ON mr_t USING tre (body);
+psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: collected 11750 trigram entries from 500 heap tuples
+psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: built 42 posting trees
+psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
+psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: build complete, indexed 500 heap tuples into 42 trigrams
+CREATE INDEX
+-- Nearest 5 by edit distance to 'connection refused'.
+SET enable_seqscan = off;
+SET
+SELECT body, body <@> tre_pattern('connection refused', 2) AS dist
+FROM mr_t
+WHERE body %~~ tre_pattern('connection refused', 2)
+ORDER BY body <@> tre_pattern('connection refused', 2) ASC NULLS LAST, id
+LIMIT 5;
+           body            | dist 
+---------------------------+------
+ connection refused code 1 |    0
+ connection refused code 2 |    0
+ connection refused code 3 |    0
+ connection refused code 4 |    0
+ connection refused code 5 |    0
+(5 rows)
+
+RESET enable_seqscan;
+RESET
+DROP TABLE mr_t CASCADE;
+DROP TABLE

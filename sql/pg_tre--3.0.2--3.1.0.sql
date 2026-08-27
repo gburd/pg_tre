@@ -1,0 +1,15 @@
+-- pg_tre 3.0.2 -> 3.1.0 migration.
+--
+-- No SQL-surface change.  3.1.0's changes are all in the C module:
+--   * %~~ / <@> recheck now honors a pattern's per-edit cost weights
+--     (cost_ins/cost_del/cost_subst), matching the seq-scan UDF form;
+--   * approximate (k>0) matching is UTF-8 codepoint-correct over
+--     multibyte text;
+--   * real opclass validation (amvalidate);
+--   * KNN <@> ORDER BY gains ammarkpos/amrestrpos;
+--   * consistent WAL critical sections in the page writers;
+--   * parallel CREATE INDEX (amcanbuildparallel, pg_tre.enable_parallel_build
+--     on by default), including CREATE INDEX CONCURRENTLY;
+--   * pg_tre_upgrade_index() now covers the full v6..v9 format range.
+--
+-- On-disk format is unchanged (v9); no REINDEX is required.

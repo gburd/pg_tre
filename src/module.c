@@ -40,6 +40,7 @@ bool pg_tre_fastupdate             = true;
 bool pg_tre_flush_to_run           = false; /* Phase B1.3: gated (see bench) */
 bool pg_tre_crack_on_read          = false; /* Phase B1.5: gated (see bench) */
 bool pg_tre_coalesce_enable        = false; /* v2.0 coalescing: gated (see bench) */
+bool pg_tre_enable_parallel_build  = false; /* experimental: gated (see GUC) */
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
 
@@ -149,6 +150,18 @@ pg_tre_init_guc(void)
         " .agent/notes/blocker1-density-brief.md.",
         &pg_tre_coalesce_enable,
         false, PGC_USERSET, 0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("pg_tre.enable_parallel_build",
+        "Allow CREATE INDEX to use parallel workers.",
+        "When on and the planner assigns parallel workers, the heap scan +"
+        " trigram extraction + sort phase is divided across a leader and"
+        " background workers feeding one coordinated tuplesort (the leader"
+        " then merges and builds the trees serially).  On by default; set"
+        " off to force every build down the single-process path.  The"
+        " number of workers is still bounded by"
+        " max_parallel_maintenance_workers and the planner's heuristics.",
+        &pg_tre_enable_parallel_build,
+        true, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.build_max_entries_mb",
         "Optional temp-disk safety valve for index builds (0 = unlimited,"

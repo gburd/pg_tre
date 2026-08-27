@@ -2,13 +2,16 @@
 
 **PostgreSQL 18+ native index access method for approximate regex matching.**
 
-[![Status](https://img.shields.io/badge/status-1.5.6_released-green)](STATUS.md)
+[![Status](https://img.shields.io/badge/status-3.1.0_released-green)](STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
 
-pg_tre indexes text columns using a three-tier filter funnel (range bloom →
-trigram postings → per-tuple bloom) backed by the [TRE
+pg_tre indexes text columns using sparsemap trigram postings, AND/OR-merged
+per query and backed by the [TRE
 library](https://github.com/laurikari/tre) for approximate-regex recheck.
+A BRIN-style per-block-range bloom tier is written at build time as a
+coarse summary; the authoritative candidate filter at scan time is the
+posting tier, and every candidate row is rechecked against the heap.
 
 It turns the classic `ripgrep`-over-data problem ("find text that looks like
 this, maybe with a typo") into a SQL-composable indexed query:
@@ -20,27 +23,30 @@ SELECT id FROM docs WHERE body %~~ tre_pattern('(error){~1}.*(42[0-9]){~0}', 1);
 
 ### How the index works
 
-Three filter tiers narrow the candidate set before the heap recheck. Each
-tier is cheaper than the next; the executor never reads the heap for rows
-the earlier tiers eliminated.
+The regex is compiled to a trigram formula, resolved against the sparsemap
+posting trees to a candidate TID set, and every candidate row is rechecked
+against the heap with TRE's approximate matcher. The executor never reads
+the heap for rows the posting tier eliminated.
 
 ```mermaid
 flowchart TD
     Q["SQL query<br/><code>body %~~ tre_pattern(pat, k)</code>"]
     P["Regex parser (Lime LALR(1))"]
     E["AST &rarr; trigram formula<br/>Navarro tiling + Mihov-Schulz expansion"]
-    T1["Tier 1: range bloom<br/>BRIN-style per-block-range filter"]
-    T2["Tier 2: sparsemap posting trees<br/>per-trigram AND/OR merge"]
-    T3["Tier 3: per-tuple bloom<br/>skip heap fetch when all required<br/>trigrams provably absent"]
+    T2["sparsemap posting trees<br/>per-trigram AND/OR merge"]
     RC["Heap recheck (TRE regaexec)<br/>exact edit-distance match"]
     R[["Result rows"]]
 
-    Q --> P --> E --> T1
-    T1 -->|"surviving block ranges"| T2
-    T2 -->|"candidate TIDs"| T3
-    T3 -->|"refined TIDs"| RC
+    Q --> P --> E --> T2
+    T2 -->|"candidate TIDs"| RC
     RC --> R
 ```
+
+> The build also writes a BRIN-style per-block-range bloom summary
+> (`pg_tre.range_size_blocks`); it is a coarse structure kept for
+> future block-range skipping and is not consulted on the current
+> scan path (the posting tier already yields exact candidate TIDs).
+> An earlier per-tuple bloom tier was removed in 3.0.0.
 
 ---
 
@@ -49,11 +55,12 @@ flowchart TD
 - **True edit-distance regex matching** — configurable `k` (insertions,
   deletions, substitutions) per sub-expression, e.g.
   `(foo){~1}.*(bar){~2}`.
-- **Three-tier filter funnel** — BRIN-style range blooms eliminate
-  heap-block ranges; sparsemap trigram postings AND/OR merge
-  candidates; per-tuple blooms refine without heap I/O.
+- **Sparsemap trigram postings** — per-trigram posting trees
+  AND/OR-merged per query to a candidate TID set; every candidate
+  is rechecked against the heap so results are always exact.
 - **Native access method** — real `IndexAmRoutine`, planner cost
-  estimation, WAL-logged, VACUUM-aware.
+  estimation, WAL-logged, VACUUM-aware, KNN `ORDER BY <@>` with
+  mark/restore.
 - **UTF-8 codepoint trigrams** — CJK, accents, emoji indexed
   correctly; ASCII stays zero-overhead.
 - **DoS protection** — configurable caps on NFA states, compile
@@ -523,19 +530,19 @@ in [`doc/perf.md`](doc/perf.md)):
 - Non-selective queries correctly fall back to seq scan (planner
   cost model is calibrated).
 
-**Current taxes**: index build is ~3.5× slower and ~12× larger
-than pg_trgm because of the per-tuple bloom payload and
-uncompressed upper-tree layout.  Multi-leaf posting trees
-(landed in 1.0.0) and payload compression (a v2.0 follow-up)
-close most of this.
+**Current taxes**: index build is slower and larger than pg_trgm
+because of the upper-tree layout; multi-leaf posting trees (1.0.0),
+per-row trigram de-duplication (2.0), and removal of the per-tuple
+bloom payload (3.0.0) have narrowed the gap.
 
-**Build memory (important at scale)**: the build is in-memory;
-peak RSS ≈ `24 B × avg_trigrams_per_row × N_rows` plus
-`~56 B × N_rows`.  500k rows of ~1 KB bodies ≈ 6 GB of working
-set and will OOM a typical cgroup.  A `tuplesort`-based build
-that bounds memory by `maintenance_work_mem` is planned for
-v1.8.0.  Until then, size builds from the table in
-[`LIMITATIONS.md`](LIMITATIONS.md).
+**Build memory (important at scale)**: since 1.8.0 the build sorts
+trigram tuples with PostgreSQL's `tuplesort`, so peak build memory is
+bounded by `maintenance_work_mem` (disk-spilled) and does **not** grow
+with corpus size — an 80M-emission build peaks ~230 MB under a 32 MB
+`maintenance_work_mem`.  The remaining scale consideration is
+build-time **temp disk** (~64 B per emitted trigram), not memory; size
+it up front with `tre_estimate_index_build()`.  See
+[`LIMITATIONS.md`](LIMITATIONS.md) for the measured sizing model.
 
 ### Deployment recommendations
 
@@ -614,27 +621,30 @@ Packaging templates for Debian (`debian/`), RPM
 ## Status and roadmap
 
 See [STATUS.md](STATUS.md) for the release-state tracker.
-Current state is **1.5.6** — production release with the
-`<@>` similarity operator, multi-leaf right-link-chained
-range tier (on-disk format v5), replication-correctness
-fixes, and a full Tier-3 testing apparatus (sanitizer CI,
-shell test scripts for `wal_audit`, `replication`, `stress`).
+Current state is **3.1.0** — production release adding the KNN
+`ORDER BY <@>` mark/restore callbacks, real opclass validation
+(`amvalidate`), edit-distance recheck that honors per-pattern edit
+costs, and UTF-8-correct approximate (k>0) matching over multibyte
+text (on-disk format v9, backward-readable to v6).
 
-- **Feature-complete**: build, scan, incremental writes,
-  crash recovery (single-node), approximate regex k≤2,
-  UTF-8, DoS hardening, planner cost model, three-tier
-  filter funnel including per-tuple bloom (tier-3),
-  multi-leaf posting trees with Lehman-Yao right-links.
-- **Correctness gates**: 12/12 differential regression
-  tests pass.  TAP harness for concurrency, streaming
-  replication, and crash recovery is in `tap/`.
-- **On-disk format**: v3 (multi-leaf posting trees).
-  Indexes built with v2 (single-leaf) need REINDEX after
-  upgrade.
-- **v1.1 followups**: parallel index scan, DNF positional
-  filter optimization, per-index reloptions for SIGHUP-only
-  GUCs, libFuzzer harness fidelity, 1M-row benchmark
-  refresh, ≥30-day external beta.  None are correctness
+- **Feature-complete**: build (serial and **parallel**), scan,
+  incremental writes, crash recovery (single-node), approximate
+  regex k≤2, UTF-8 (exact and fuzzy), DoS hardening, planner cost
+  model, sparsemap posting trees with Lehman-Yao right-links, KNN
+  `<@>` ordering with mark/restore.
+- **Correctness gates**: differential regression suite (index
+  vs. seq-scan ground truth) plus a TAP harness for concurrency,
+  streaming replication, and crash recovery in `tap/`.
+- **On-disk format**: v9 (min readable v6).  Indexes built by
+  pg_tre < 1.6 (below v6) need REINDEX after upgrade;
+  `pg_tre_upgrade_index()` does an in-place, no-REINDEX bump from
+  any v6–v8 index to v9.
+- **Parallel builds**: `CREATE INDEX` (and `CREATE INDEX
+  CONCURRENTLY`) use parallel workers by default
+  (`pg_tre.enable_parallel_build`, bounded by
+  `max_parallel_maintenance_workers`).
+- **Roadmap**: parallel index *scan*, and block-range skipping
+  via the range-bloom summary tier.  None are correctness
   blockers.
 
 Tag and release process documented in
@@ -647,8 +657,8 @@ pre-tag gate lives in `scripts/release-check.sh`.
 
 - **[doc/pg_tre.md](doc/pg_tre.md)** — user reference (types,
   operators, functions, GUCs, reloptions, cookbook).
-- **[doc/design.md](doc/design.md)** — architecture, three-tier
-  filter funnel, on-disk format decisions.
+- **[doc/design.md](doc/design.md)** — architecture, trigram
+  posting tier, on-disk format decisions.
 - **[doc/perf.md](doc/perf.md)** — measured numbers vs pg_trgm
   and seq scan, with the reproducer in `bench/bench.sql`.
 - **[doc/migration-from-0.1.0.md](doc/migration-from-0.1.0.md)** —

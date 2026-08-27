@@ -33,19 +33,22 @@
  */
 typedef struct SpineEntry
 {
-    uint8  trigram[3];
+    int32  trigram[3];   /* codepoints, not bytes (UTF-8 aware) */
     int32  pattern_offset;
 } SpineEntry;
 
 /*
- * Linearize an AST into a byte string of literal characters, tracking
- * positions.  Returns the number of bytes written.  Non-literal nodes
- * (ANY, CLASS, etc.) are treated as opaque breaks.
+ * Linearize an AST into a codepoint string of literal characters,
+ * tracking positions.  Returns the number of codepoints written.
+ * Non-literal nodes (ANY, CLASS, etc.) are treated as opaque breaks.
  *
  * This is a helper for extracting the trigram spine from literal runs.
+ * All Unicode codepoints (0x0000..0x10FFFF) are accumulated so the
+ * spine trigrams hash identically to how ambuild hashed them
+ * (pg_tre_hash_trigram_cp over codepoints), not as raw UTF-8 bytes.
  */
 static int
-linearize_literals(const RegexAst *ast, uint8 *buf, int buf_cap, int *pos)
+linearize_literals(const RegexAst *ast, int32 *buf, int buf_cap, int *pos)
 {
     int n = 0;
 
@@ -57,11 +60,11 @@ linearize_literals(const RegexAst *ast, uint8 *buf, int buf_cap, int *pos)
         case REGEX_AST_LITERAL:
         {
             int32 cp = ast->u.literal.codepoint;
-            if (cp >= 0 && cp <= 0xFF)
+            if (cp >= 0)
             {
                 if (n >= buf_cap)
                     return -1;
-                buf[n++] = (uint8) cp;
+                buf[n++] = cp;
                 (*pos)++;
             }
             break;
@@ -97,7 +100,7 @@ static int
 extract_spine_from_ast(const RegexAst *ast, SpineEntry *out, int max_out,
                        MemoryContext cxt)
 {
-    uint8 buf[1024];
+    int32 buf[1024];
     int buf_len, i, n = 0;
     int32 pos = 0;
 
@@ -105,7 +108,7 @@ extract_spine_from_ast(const RegexAst *ast, SpineEntry *out, int max_out,
     if (buf_len < 0)
         return -1;
 
-    /* Extract all trigrams from the linearized buffer */
+    /* Extract all codepoint trigrams from the linearized buffer */
     for (i = 0; i + 3 <= buf_len; i++)
     {
         if (n >= max_out)
@@ -182,14 +185,14 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
         {
             /* Allocate temporary buffer for expanded trigrams.
              * Each trigram can expand to ~hundreds (k=1) or thousands (k=2). */
-            uint8 expanded[4096][3];
+            int32 expanded[4096][3];
             int total_alts = 0;
 
             /* First pass: count total alternatives after expansion */
             for (i = 0; i < tile_len; i++)
             {
                 const SpineEntry *e = &spine[tile_start + i];
-                int n_expanded = pg_tre_uleven_expand(e->trigram, tile_k,
+                int n_expanded = pg_tre_uleven_expand_cp(e->trigram, tile_k,
                                                      expanded, 4096);
                 if (n_expanded < 0)
                 {
@@ -221,14 +224,14 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
             for (i = 0; i < tile_len; i++)
             {
                 const SpineEntry *e = &spine[tile_start + i];
-                int n_expanded = pg_tre_uleven_expand(e->trigram, tile_k,
+                int n_expanded = pg_tre_uleven_expand_cp(e->trigram, tile_k,
                                                      expanded, 4096);
                 int j;
 
                 for (j = 0; j < n_expanded; j++)
                 {
                     TrigramDisjunct *d = &out->conjuncts[t].alts[alt_idx++];
-                    d->trigram_hash = pg_tre_hash_trigram(expanded[j]);
+                    d->trigram_hash = pg_tre_hash_trigram_cp(expanded[j]);
                     /* Widen position range by +/- k for edit distance tolerance */
                     d->min_offset = (e->pattern_offset > k) ? (e->pattern_offset - k) : 0;
                     d->max_offset = e->pattern_offset + k;
@@ -246,7 +249,7 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
                 const SpineEntry *e = &spine[tile_start + i];
                 TrigramDisjunct *d = &out->conjuncts[t].alts[i];
 
-                d->trigram_hash = pg_tre_hash_trigram(e->trigram);
+                d->trigram_hash = pg_tre_hash_trigram_cp(e->trigram);
                 d->min_offset = e->pattern_offset;
                 d->max_offset = e->pattern_offset;
             }
