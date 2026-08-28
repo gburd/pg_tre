@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.1] - 2026-08-28 - at-scale stress qualification; sizing/maintenance findings
+
+Qualification + documentation release.  **No C, SQL-surface, WAL, or
+on-disk-format change**; `ALTER EXTENSION pg_tre UPDATE TO '3.2.1'` is a
+metadata-only bump (no REINDEX).
+
+The 3.2 line was put through a full adverse-conditions stress suite
+(`bench/stress/`) on an AWS i4i.8xlarge (32 vCPU, 256 GB, 2x3.75 TB Nitro
+NVMe RAID-0), PostgreSQL 18, at 250k-10M rows.  See
+`bench/stress/RESULTS-stress-3.2.0.md`.
+
+### Qualified
+
+- **Correctness**: the index-vs-sequential-scan accuracy oracle passed with
+  **zero mismatches** on every query in every scenario at every scale.
+- **Crash safety**: SIGKILL mid-(parallel-)build recovers cleanly via WAL
+  replay -- heap 100% intact, no corruption, no orphaned valid index.
+- **Graceful cliffs**: temp-disk exhaustion, NFA/compile/statement-timeout,
+  and cancellation all produce clean, cancellable errors -- never a PANIC or
+  hang.  Build memory stays bounded by `maintenance_work_mem` even at 10M
+  rows / 16 MB mwm.
+- **Parallel builds**: no stuck-spinlocks under saturation; parallel and
+  serial builds produce identical results.
+- **SuRF**: anchored-absent reject stays ~O(1) (sub-millisecond) regardless
+  of table size.
+
+### Documented (LIMITATIONS.md) -- non-blocking sizing/maintenance findings
+
+- **Build throughput is low and super-linear** at scale (2M medium rows
+  ~7 min, 10M >20 min): only the scan+sort phase parallelizes; posting/
+  upper/SuRF construction is serial and dominates.  Budget build time,
+  prefer the CONCURRENTLY variants, keep `maintenance_work_mem` generous.
+- **Posting-leaf bloat under sustained churn**: with row count held flat, a
+  delete+reinsert workload grew the index ~3.9x; VACUUM reclaims only
+  fully-emptied leaves (nbtree-style), so partially-empty leaves accumulate.
+  `REINDEX` returns to baseline.  Correctness is never affected; churn-heavy
+  deployments should schedule periodic `REINDEX INDEX CONCURRENTLY`.
+
+### Added
+
+- `bench/stress/` -- committed, reproducible at-scale stress harness
+  (provision NVMe EC2, generate scalable corpora, run scenarios A-J with an
+  accuracy oracle), so future releases can re-qualify verbatim.
+
 ## [3.2.0] - 2026-08-28 - SuRF range filter for anchored/prefix scans; range-bloom tier removed
 
 Feature release.  On-disk format bumps **v9 -> v10** but stays

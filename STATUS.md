@@ -1,8 +1,20 @@
 # pg_tre status
 
-Released: **3.2.0** (2026-08).  See `CHANGELOG.md` for full
+Released: **3.2.1** (2026-08).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+3.2.1 is a qualification + documentation release: no C, SQL, WAL,
+or on-disk-format change (metadata-only `UPDATE`, no REINDEX).
+The 3.2 line was put through a full at-scale adverse-conditions
+stress suite (`bench/stress/`, results in
+`bench/stress/RESULTS-stress-3.2.0.md`) on an AWS i4i.8xlarge with
+NVMe at 250k-10M rows: the accuracy oracle passed with zero
+mismatches everywhere, crash-recovery-mid-build was clean, the
+DoS guards held, and parallel builds had no deadlocks.  Two
+non-blocking findings (low super-linear build throughput at scale;
+posting-leaf bloat under sustained churn that REINDEX reclaims)
+are documented in `LIMITATIONS.md`.
 
 3.2.0 is a feature release on the 3.x lineage: on-disk format
 bumps v9 -> v10 but stays backward-readable (min v6), so no

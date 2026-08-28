@@ -1,0 +1,10 @@
+-- pg_tre 3.2.0 -> 3.2.1 migration.
+--
+-- 3.2.1 is a qualification + documentation release: no C, SQL-surface, WAL,
+-- or on-disk-format change.  It records the at-scale adverse-conditions
+-- stress qualification of the 3.2 line (bench/stress/, results in
+-- bench/stress/RESULTS-stress-3.2.0.md) and the resulting sizing/maintenance
+-- guidance in LIMITATIONS.md (build-throughput and churn-bloat findings).
+--
+-- ALTER EXTENSION pg_tre UPDATE TO '3.2.1' is a metadata-only bump; no
+-- REINDEX and no relation changes.
