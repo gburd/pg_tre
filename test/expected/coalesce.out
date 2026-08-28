@@ -126,7 +126,7 @@ SELECT CASE WHEN pg_relation_size('coalesce_on_idx')
 
 -- (3) Format v8: every page of the coalesced index is at format v9
 -- (no page is below the latest version in a from-scratch build).
-SELECT CASE WHEN min(format_version) = 9 THEN 'ok' ELSE 'bad' END
+SELECT CASE WHEN min(format_version) = 10 THEN 'ok' ELSE 'bad' END
          AS format_result
 FROM pg_tre_index_format_status('coalesce_on_idx'::regclass);
  format_result 

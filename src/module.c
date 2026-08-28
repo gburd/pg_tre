@@ -60,7 +60,8 @@ pg_tre_init_guc(void)
         4096, 64, INT_MAX, PGC_USERSET, GUC_UNIT_KB, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.range_size_blocks",
-        "Heap blocks summarized by each range-bloom entry.",
+        "Deprecated (3.2.0): the BRIN-style range-bloom tier was removed; "
+        "this GUC is accepted but ignored.",
         NULL,
         &pg_tre_range_size_blocks,
         128, 1, 131072, PGC_SIGHUP, 0, NULL, NULL, NULL);

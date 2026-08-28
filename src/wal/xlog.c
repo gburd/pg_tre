@@ -200,7 +200,7 @@ pg_tre_redo(XLogReaderState *record)
         case XLOG_PTRE_POSTING_INSERT:
         case XLOG_PTRE_PENDING_MERGE_B:
         case XLOG_PTRE_PENDING_MERGE_C:
-        case XLOG_PTRE_RANGE_UPDATE:      /* Phase 5: range tier FPI */
+        case XLOG_PTRE_SURF_UPDATE:       /* v10: SuRF filter FPI */
         case XLOG_PTRE_POSTING_DELETE:    /* Phase 7: not yet emitted */
         case XLOG_PTRE_POSTING_SPLIT:     /* Phase 7: not yet emitted */
         case XLOG_PTRE_VACUUM:            /* Phase 7: leaf repack FPI */
@@ -247,7 +247,7 @@ pg_tre_identify(uint8 info)
         case XLOG_PTRE_POSTING_INSERT:  return "POSTING_INSERT";
         case XLOG_PTRE_POSTING_DELETE:  return "POSTING_DELETE";
         case XLOG_PTRE_POSTING_SPLIT:   return "POSTING_SPLIT";
-        case XLOG_PTRE_RANGE_UPDATE:    return "RANGE_UPDATE";
+        case XLOG_PTRE_SURF_UPDATE:     return "SURF_UPDATE";
         case XLOG_PTRE_PENDING_INSERT:  return "PENDING_INSERT";
         case XLOG_PTRE_PENDING_MERGE_B: return "PENDING_MERGE_BEGIN";
         case XLOG_PTRE_PENDING_MERGE_C: return "PENDING_MERGE_COMMIT";

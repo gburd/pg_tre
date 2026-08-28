@@ -41,7 +41,6 @@ INSERT 0 500
 CREATE INDEX mr_idx ON mr_t USING tre (body);
 psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: collected 11750 trigram entries from 500 heap tuples
 psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: built 42 posting trees
-psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/amvalidate.sql:29: NOTICE:  pg_tre: build complete, indexed 500 heap tuples into 42 trigrams
 CREATE INDEX
 -- Nearest 5 by edit distance to 'connection refused'.

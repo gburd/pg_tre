@@ -23,7 +23,6 @@ INSERT 0 2000
 CREATE INDEX up_idx ON up_t USING tre (body);
 psql:test/sql/upgrade_online.sql:20: NOTICE:  pg_tre: collected 78660 trigram entries from 2000 heap tuples
 psql:test/sql/upgrade_online.sql:20: NOTICE:  pg_tre: built 4633 posting trees
-psql:test/sql/upgrade_online.sql:20: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/upgrade_online.sql:20: NOTICE:  pg_tre: build complete, indexed 2000 heap tuples into 4633 trigrams
 CREATE INDEX
 -- Baseline query result.
@@ -43,14 +42,14 @@ FROM pg_tre_index_format_status('up_idx')
 ORDER BY format_version;
  format_version | has_pages 
 ----------------+-----------
-              9 | t
+             10 | t
 (1 row)
 
 -- The min format version is the latest (nothing older present).
 SELECT pg_tre_index_min_format_version('up_idx') AS min_fmt;
  min_fmt 
 ---------
-       9
+      10
 (1 row)
 
 -- Run the in-place upgrade walk: must succeed with no error even though

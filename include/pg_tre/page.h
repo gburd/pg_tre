@@ -41,11 +41,12 @@ typedef enum PageTreKind
     PG_TRE_PAGE_UPPER_L   = 3,
     PG_TRE_PAGE_POSTING   = 4,
     PG_TRE_PAGE_POSTING_L = 5,
-    PG_TRE_PAGE_RANGE     = 6,
+    PG_TRE_PAGE_RANGE     = 6,     /* removed in 3.2.0; never emitted (reserved) */
     PG_TRE_PAGE_PENDING   = 7,
     PG_TRE_PAGE_RUN_CATALOG = 8,    /* format v7: run/level catalog (Phase B1) */
     PG_TRE_PAGE_POSTING_COALESCED = 9, /* format v8: multi-trigram posting page */
-    PG_TRE_PAGE_FREE_LOG = 10       /* Blocker 2: deferred page-free log (additive) */
+    PG_TRE_PAGE_FREE_LOG = 10,      /* Blocker 2: deferred page-free log (additive) */
+    PG_TRE_PAGE_SURF = 11           /* format v10: SuRF range-filter tier (additive) */
 } PageTreKind;
 
 /*
@@ -155,8 +156,21 @@ typedef struct PgTreMetaPageData
     BlockNumber free_log_head;
     uint32      _pad_free_log;
 
+    /*
+     * 3.2.0 (format v10): SuRF range-filter tier.  root_surf is the first
+     * page of the serialized SuRF over the order-preserving trigram keys
+     * (pg_tre_trigram_key_cp); a chain via PgTreSurfHeader.next_page holds
+     * images larger than one page.  Carved from the former reserved[]
+     * tail; zero on any pre-v10 index, normalized to InvalidBlockNumber by
+     * pg_tre_meta_read -> "no SuRF filter", so scans simply skip the
+     * prefilter (correctness unaffected, no acceleration).  surf_n_keys is
+     * kept for planner/EXPLAIN.
+     */
+    BlockNumber root_surf;
+    uint32      surf_n_keys;
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[20];
+    uint32      reserved[18];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;
@@ -373,6 +387,23 @@ typedef struct PgTreFreeLogEntry
     uint32      _pad0;
     uint64      del_xid_value;      /* FullTransactionId.value at free time */
 } PgTreFreeLogEntry;                /* 16 bytes, 8-aligned */
+
+/* ---- SuRF filter page header (format v10) ----
+ *
+ * The serialized SuRF image (see src/util/surf.c) is stored across a chain
+ * of SURF pages starting at meta.root_surf.  Each page begins its content
+ * area with this header, followed by up to (usable page) bytes of the
+ * image; next_page links the continuation (InvalidBlockNumber on the last
+ * page).  total_bytes (on the first page only) is the full image length so
+ * the reader can allocate once and concatenate chunk_bytes from each page.
+ */
+typedef struct PgTreSurfHeader
+{
+    BlockNumber next_page;          /* continuation, or InvalidBlockNumber */
+    uint32      chunk_bytes;        /* image bytes stored on THIS page */
+    uint32      total_bytes;        /* full image length (first page only; else 0) */
+    uint32      _pad0;
+} PgTreSurfHeader;                  /* 16 bytes, 8-aligned */
 
 /* ---- Range summary page header (format v5+) ----
  *

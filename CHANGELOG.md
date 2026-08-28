@@ -6,6 +6,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.0] - 2026-08-28 - SuRF range filter for anchored/prefix scans; range-bloom tier removed
+
+Feature release.  On-disk format bumps **v9 -> v10** but stays
+backward-readable (`PG_TRE_FORMAT_VERSION_MIN` = 6), so `ALTER EXTENSION
+pg_tre UPDATE TO '3.2.0'` needs **no REINDEX**: a v6-v9 index reads
+unchanged and simply runs without the new filter.  REINDEX (or a rebuild)
+populates the SuRF filter on an existing index.
+
+### Added
+
+- **SuRF (Succinct Range Filter) tier for anchored / prefix scans.**  A
+  from-scratch C reimplementation of SuRF-Base (Zhang et al., SIGMOD 2018)
+  as a LOUDS-Sparse succinct trie -- **no external dependency**, links only
+  libc/libm and PG's own popcount.  It indexes an *order-preserving* trigram
+  key (`pg_tre_trigram_key_cp`, 3 x 21-bit codepoints packed big-endian) so
+  that a `^`-anchored / `LIKE 'foo%'` pattern's leading trigram maps to a
+  contiguous key range.  When that range contains no indexed trigram, a
+  scan is rejected outright -- without descending the posting tier or
+  touching the heap.  Measured on a 500k-row index: an absent anchored
+  prefix returns in ~0.7 ms vs ~400 ms for a full anchored scan (~570x).
+  The filter has a one-sided error contract (no false negatives), and the
+  heap recheck remains authoritative, so it can never drop a true match.
+  Validated with a 2.4M-check property test plus crash-recovery, parallel
+  build, and differential (index vs seq-scan) tests on an assertion-enabled
+  build.
+- **`tre_surf_stats(regclass)`** introspection: SuRF key count, trie node
+  count, on-disk page count, and serialized image size.
+
+### Removed
+
+- **The BRIN-style per-block-range bloom tier.**  It was built on every
+  index but never consulted at scan time (the posting tier already yields
+  exact candidate TIDs), so it was pure build-time and space overhead.
+  The `pg_tre.range_size_blocks` GUC and the `range_size_blocks` reloption
+  are retained but ignored (deprecated) so existing DDL/config keeps
+  working.  `root_range` remains a reserved meta field (always
+  `InvalidBlockNumber`) to avoid a disruptive struct change.
+
+### Notes
+
+- The SuRF is a whole-index structure, so `pg_tre_upgrade_index()` (the
+  in-place page-stamp upgrade) does **not** synthesize it; REINDEX to
+  populate.  Format-version dispatch now covers v3-v10.
+- The order-preserving key rides through the build's coordinated
+  `tuplesort` (the sort tuple grew from 20 to 24 bytes, reusing the dead
+  position field), so serial and parallel builds produce an identical SuRF.
+
+---
+
 ## [3.1.0] - 2026-08-27 - recheck-cost fidelity, UTF-8 fuzzy correctness, AM hardening
 
 Correctness + robustness release on the 3.0 lineage.  On-disk format is

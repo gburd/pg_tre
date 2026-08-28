@@ -63,7 +63,8 @@
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/posting.h"
-#include "pg_tre/range.h"
+#include "pg_tre/surf.h"
+#include "pg_tre/surf_page.h"
 #include "pg_tre/upper.h"
 #include "pg_tre/utf8.h"
 
@@ -190,13 +191,20 @@ typedef struct UpperIterState
  *
  *   bytes  0..7  : trigram_hash          (uint64, big-endian)
  *   bytes  8..15 : pg_tre_pack_tid(tid)  (uint64, big-endian)
- *   bytes 16..19 : position              (uint32, big-endian)
+ *   bytes 16..23 : trigram_key           (uint64, big-endian; the
+ *                  order-preserving pg_tre_trigram_key_cp key, used to
+ *                  build the v10 SuRF filter -- carried through the sort
+ *                  so the merged distinct-trigram stream yields keys for
+ *                  both serial and parallel builds.  Sorting by
+ *                  (hash, tid) is unaffected: the trailing key only
+ *                  breaks ties between identical (hash,tid) pairs, which
+ *                  never occur, so grouping by hash is unchanged.)
  *
  * pg_tre_pack_tid() is (block << 16) | offset, so the numeric order
  * of the packed value equals ItemPointerCompare order, and big-endian
  * bytes preserve that under memcmp.
  */
-#define PG_TRE_SORTKEY_LEN 20
+#define PG_TRE_SORTKEY_LEN 24
 
 /*
  * Realistic temp-disk cost of one emitted trigram tuple inside
@@ -212,9 +220,19 @@ typedef struct UpperIterState
  */
 #define PG_TRE_SORT_TUPLE_TEMP_BYTES 64
 
+/* qsort comparator for the SuRF key array (ascending uint64). */
+static int
+cmp_uint64(const void *a, const void *b)
+{
+    uint64      x = *(const uint64 *) a;
+    uint64      y = *(const uint64 *) b;
+
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
 static inline void
 encode_entry(uint8 *buf, uint64 trigram_hash, uint64 packed_tid,
-             uint32 position)
+             uint64 trigram_key)
 {
     buf[0]  = (uint8) (trigram_hash >> 56);
     buf[1]  = (uint8) (trigram_hash >> 48);
@@ -232,15 +250,19 @@ encode_entry(uint8 *buf, uint64 trigram_hash, uint64 packed_tid,
     buf[13] = (uint8) (packed_tid >> 16);
     buf[14] = (uint8) (packed_tid >> 8);
     buf[15] = (uint8) (packed_tid);
-    buf[16] = (uint8) (position >> 24);
-    buf[17] = (uint8) (position >> 16);
-    buf[18] = (uint8) (position >> 8);
-    buf[19] = (uint8) (position);
+    buf[16] = (uint8) (trigram_key >> 56);
+    buf[17] = (uint8) (trigram_key >> 48);
+    buf[18] = (uint8) (trigram_key >> 40);
+    buf[19] = (uint8) (trigram_key >> 32);
+    buf[20] = (uint8) (trigram_key >> 24);
+    buf[21] = (uint8) (trigram_key >> 16);
+    buf[22] = (uint8) (trigram_key >> 8);
+    buf[23] = (uint8) (trigram_key);
 }
 
 static inline void
 decode_entry(const uint8 *buf, uint64 *trigram_hash, uint64 *packed_tid,
-             uint32 *position)
+             uint64 *trigram_key)
 {
     *trigram_hash =
           ((uint64) buf[0]  << 56) | ((uint64) buf[1]  << 48)
@@ -252,9 +274,11 @@ decode_entry(const uint8 *buf, uint64 *trigram_hash, uint64 *packed_tid,
         | ((uint64) buf[10] << 40) | ((uint64) buf[11] << 32)
         | ((uint64) buf[12] << 24) | ((uint64) buf[13] << 16)
         | ((uint64) buf[14] << 8)  | ((uint64) buf[15]);
-    *position =
-          ((uint32) buf[16] << 24) | ((uint32) buf[17] << 16)
-        | ((uint32) buf[18] << 8)  | ((uint32) buf[19]);
+    *trigram_key =
+          ((uint64) buf[16] << 56) | ((uint64) buf[17] << 48)
+        | ((uint64) buf[18] << 40) | ((uint64) buf[19] << 32)
+        | ((uint64) buf[20] << 24) | ((uint64) buf[21] << 16)
+        | ((uint64) buf[22] << 8)  | ((uint64) buf[23]);
 }
 
 /*
@@ -461,7 +485,7 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
              * (no per-emission palloc).
              */
             encode_entry(key, trigram_hash, pg_tre_pack_tid(tid),
-                         (uint32) ring_pos[0]);
+                         pg_tre_trigram_key_cp(ring));
             SET_VARSIZE(&wrap, VARHDRSZ + PG_TRE_SORTKEY_LEN);
             memcpy(wrap.data, key, PG_TRE_SORTKEY_LEN);
             tuplesort_putdatum(bstate->sortstate,
@@ -909,6 +933,13 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     PgTreCoalescedWriter *coalesce_writer = NULL;
     PgTreLeader *build_leader = NULL;
 
+    /* v10 SuRF: distinct order-preserving trigram keys, collected in
+     * ascending order from the merged sort stream (keys arrive grouped by
+     * hash, NOT by key, so we sort the collected array before building). */
+    uint64     *surf_keys = NULL;
+    uint32      surf_n = 0;
+    uint32      surf_cap = 0;
+
     /* Phase 2 real build starts here. */
 
     /* Step 1: initialize empty meta page. */
@@ -1091,7 +1122,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
             bytea  *kb = DatumGetByteaPP(sort_datum);
             uint64  dec_hash;
             uint64  dec_tid;
-            uint32  dec_pos;
+            uint64  dec_key;
             TrigramTidEntry *entry = &cur;
             uint64  tid_packed;
             bool    new_trigram;
@@ -1108,15 +1139,34 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
             Assert(!sort_isnull);
             Assert(VARSIZE_ANY_EXHDR(kb) == PG_TRE_SORTKEY_LEN);
             decode_entry((const uint8 *) VARDATA_ANY(kb),
-                         &dec_hash, &dec_tid, &dec_pos);
+                         &dec_hash, &dec_tid, &dec_key);
             cur.trigram_hash = dec_hash;
             pg_tre_unpack_tid(dec_tid, &cur.tid);
-            cur.position = dec_pos;
+            cur.position = 0;
 
             tid_packed = dec_tid;
             new_trigram = (current_builder == NULL ||
                            entry->trigram_hash != current_hash);
             new_tid = (new_trigram || tid_packed != current_tid_packed);
+
+            /*
+             * Collect the order-preserving key of each distinct trigram for
+             * the SuRF filter.  A trigram_hash uniquely identifies a
+             * trigram, so "new_trigram" (hash changed) marks a new distinct
+             * key.  Keys arrive grouped by hash (not sorted by key), so we
+             * append here and sort+dedup after the loop.
+             */
+            if (new_trigram)
+            {
+                if (surf_n >= surf_cap)
+                {
+                    surf_cap = surf_cap ? surf_cap * 2 : 1024;
+                    surf_keys = surf_keys
+                        ? (uint64 *) repalloc(surf_keys, surf_cap * sizeof(uint64))
+                        : (uint64 *) palloc(surf_cap * sizeof(uint64));
+                }
+                surf_keys[surf_n++] = dec_key;
+            }
 
             if (new_trigram)
             {
@@ -1318,18 +1368,52 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     root_upper = pg_tre_upper_bulkload(index, upper_iter, &iter_state);
 
-    /* Step 6.5: bulk-load range tier from postings.  The range bloom
-     * (per heap-block-range tier-1 skip) is always built; it is the
-     * coarse pre-filter the scan keeps. */
+    /*
+     * Step 6.5: build the v10 SuRF range filter over the order-preserving
+     * trigram keys.  (The BRIN-style range-bloom tier that used to live
+     * here was removed in 3.2.0 -- it was never consulted at scan time, so
+     * root_range is always InvalidBlockNumber now.)  Keys were collected
+     * from the merged stream grouped by hash; sort + dedup, build the SuRF,
+     * and persist it to a SURF page chain.  An empty index writes no SuRF
+     * (root_surf stays InvalidBlockNumber -> scans skip the prefilter).
+     */
     {
-        BlockNumber root_range;
+        BlockNumber root_surf = InvalidBlockNumber;
+        uint32      surf_distinct = 0;
 
-        iter_state.current = 0;
-        root_range = pg_tre_range_bulkload(index, upper_iter, &iter_state);
+        if (surf_n > 0)
+        {
+            PgTreSurf  *surf;
+            uint32      i,
+                        m;
+            Size        img_len;
+            uint8      *img;
+
+            qsort(surf_keys, surf_n, sizeof(uint64), cmp_uint64);
+            m = 0;
+            for (i = 0; i < surf_n; i++)
+                if (m == 0 || surf_keys[i] != surf_keys[m - 1])
+                    surf_keys[m++] = surf_keys[i];
+            surf_distinct = m;
+
+            surf = pg_tre_surf_build(surf_keys, m);
+            img_len = pg_tre_surf_serialized_size(surf);
+            img = (uint8 *) palloc(img_len);
+            pg_tre_surf_serialize(surf, img);
+            root_surf = pg_tre_surf_write_image(index, img, img_len);
+            pfree(img);
+            pg_tre_surf_free(surf);
+
+            ereport(DEBUG1,
+                    (errmsg("pg_tre: built SuRF filter over %u distinct "
+                            "trigram keys (%zu bytes)",
+                            surf_distinct, img_len)));
+        }
 
         /* Step 7: update meta page with roots and stats. */
-        pg_tre_meta_set_roots(index, root_upper, root_range,
+        pg_tre_meta_set_roots(index, root_upper, InvalidBlockNumber,
                               (uint64) n_accums, (uint64) bstate.heap_tuples);
+        pg_tre_meta_set_surf(index, root_surf, surf_distinct);
     }
 
     MemoryContextSwitchTo(oldcxt);

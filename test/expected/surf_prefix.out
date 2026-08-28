@@ -1,0 +1,96 @@
+-- test/sql/surf_prefix.sql
+-- Regression test for the v10 SuRF range-filter prefilter.
+--
+-- The SuRF indexes an order-preserving trigram key so that an anchored /
+-- prefix pattern (^foo, LIKE 'foo%') whose leading trigram key is absent
+-- from the whole index can be rejected without scanning the posting tier
+-- or the heap.  This test confirms:
+--
+--   1. A build produces a SuRF (tre_surf_stats reports keys/nodes/pages).
+--   2. Anchored queries whose prefix EXISTS return the same rows as a seq
+--      scan (SuRF must not drop true matches).
+--   3. Anchored queries whose prefix does NOT exist return zero rows
+--      (matching the seq-scan ground truth) -- exercising the reject path.
+--   4. Non-anchored queries are unaffected (no SuRF range applied).
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/surf_prefix.sql:16: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS surf_t CASCADE;
+psql:test/sql/surf_prefix.sql:18: NOTICE:  table "surf_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE surf_t (id serial, body text);
+CREATE TABLE
+INSERT INTO surf_t (body)
+SELECT 'error' || i || ' connection refused ' || md5(i::text)
+FROM generate_series(1, 3000) i;
+INSERT 0 3000
+CREATE INDEX surf_idx ON surf_t USING tre (body);
+psql:test/sql/surf_prefix.sql:24: NOTICE:  pg_tre: collected 175568 trigram entries from 3000 heap tuples
+psql:test/sql/surf_prefix.sql:24: NOTICE:  pg_tre: built 4607 posting trees
+psql:test/sql/surf_prefix.sql:24: NOTICE:  pg_tre: build complete, indexed 3000 heap tuples into 4607 trigrams
+CREATE INDEX
+-- The index has a SuRF filter with a positive key/node/page count.
+SELECT (n_keys > 0) AS has_keys,
+       (n_nodes > 0) AS has_nodes,
+       (n_pages > 0) AS has_pages
+FROM tre_surf_stats('surf_idx');
+ has_keys | has_nodes | has_pages 
+----------+-----------+-----------
+ t        | t         | t
+(1 row)
+
+SET enable_seqscan = off;
+SET
+-- (2) anchored prefix that EXISTS: index result == seq-scan ground truth.
+SELECT count(*) AS idx_exist FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
+ idx_exist 
+-----------
+      3000
+(1 row)
+
+-- (3) anchored prefix that does NOT exist: SuRF rejects; must be 0 and
+--     match the seq-scan ground truth.
+SELECT count(*) AS idx_absent FROM surf_t WHERE body %~~ tre_pattern('^zzqqxj', 0);
+ idx_absent 
+------------
+          0
+(1 row)
+
+-- (4) a non-anchored pattern still works (no SuRF range applied).
+SELECT count(*) AS idx_unanchored FROM surf_t WHERE body %~~ tre_pattern('refused', 0);
+ idx_unanchored 
+----------------
+           3000
+(1 row)
+
+RESET enable_seqscan;
+RESET
+-- Ground-truth via sequential scan.
+SET enable_indexscan = off;
+SET
+SET enable_bitmapscan = off;
+SET
+SELECT count(*) AS seq_exist FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
+ seq_exist 
+-----------
+      3000
+(1 row)
+
+SELECT count(*) AS seq_absent FROM surf_t WHERE body %~~ tre_pattern('^zzqqxj', 0);
+ seq_absent 
+------------
+          0
+(1 row)
+
+SELECT count(*) AS seq_unanchored FROM surf_t WHERE body %~~ tre_pattern('refused', 0);
+ seq_unanchored 
+----------------
+           3000
+(1 row)
+
+RESET enable_indexscan;
+RESET
+RESET enable_bitmapscan;
+RESET
+DROP TABLE surf_t CASCADE;
+DROP TABLE

@@ -59,7 +59,7 @@ pg_tre_init_reloptions(void)
                       3, 3, 3, AccessExclusiveLock);
 
     add_int_reloption(pg_tre_relopt_kind, "range_size_blocks",
-                      "Heap blocks summarized per range bloom entry",
+                      "Deprecated (3.2.0): range-bloom tier removed; accepted but ignored",
                       128, 1, 131072, AccessExclusiveLock);
 
     add_bool_reloption(pg_tre_relopt_kind, "fastupdate",

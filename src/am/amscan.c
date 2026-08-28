@@ -42,9 +42,11 @@
 #include "pg_tre/page.h"
 #include "pg_tre/pending.h"
 #include "pg_tre/posting.h"
-#include "pg_tre/range.h"
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/run_catalog.h"
+#include "pg_tre/meta.h"
+#include "pg_tre/surf.h"
+#include "pg_tre/surf_page.h"
 #include "pg_tre/sparsemap.h"
 #include "pg_tre/tre_match.h"
 
@@ -992,6 +994,48 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
     return (sm_t *) result;
 }
 
+/*
+ * v10 SuRF prefilter.  Returns true if the query carries a hard anchored
+ * trigram-key range (q.has_surf_range) AND the index has a SuRF filter that
+ * reports NO stored trigram key overlaps that range -- in which case no row
+ * can match and the scan can return an empty result immediately.
+ *
+ * Returns false (do the normal scan) whenever there is no range, no SuRF
+ * (old-format index, or built before v10), or the SuRF reports a possible
+ * overlap.  Because range_overlaps has no false negatives, a false-return
+ * never hides a real match; and because the range is only set for k=0
+ * anchored >=3-codepoint prefixes, a true-return is always sound.
+ */
+static bool
+pg_tre_surf_prefilter_rejects(IndexScanDesc scan, TreScanState *st)
+{
+    PgTreMetaPageData meta;
+    PgTreSurf  *surf;
+    bool        rejects;
+
+    if (!st->q.has_surf_range)
+        return false;
+
+    pg_tre_meta_read(scan->indexRelation, &meta);
+    if (meta.root_surf == InvalidBlockNumber)
+        return false;			/* no filter (pre-v10 or empty) */
+
+    surf = pg_tre_surf_read(scan->indexRelation, meta.root_surf);
+    if (surf == NULL)
+        return false;
+
+    rejects = !pg_tre_surf_range_overlaps(surf, st->q.surf_lo, st->q.surf_hi);
+    pg_tre_surf_free(surf);
+
+    if (rejects)
+        ereport(DEBUG1,
+                (errmsg("pg_tre: SuRF prefilter rejected scan "
+                        "(no trigram key in [%llu, %llu])",
+                        (unsigned long long) st->q.surf_lo,
+                        (unsigned long long) st->q.surf_hi)));
+    return rejects;
+}
+
 int64
 pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
@@ -1005,6 +1049,14 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: amgetbitmap called without amrescan")));
+
+    /*
+     * SuRF prefilter: an anchored-prefix pattern whose leading trigram key
+     * is absent from the whole index can be rejected without touching the
+     * posting tier or the heap.
+     */
+    if (pg_tre_surf_prefilter_rejects(scan, st))
+        return 0;
 
     /*
      * If extraction gave up (always_true), the index has no useful
@@ -1190,6 +1242,20 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: amgettuple called without amrescan")));
+
+    /*
+     * SuRF prefilter (same as amgetbitmap): if the anchored-prefix trigram
+     * key is absent from the whole index, no row can match -- leave the
+     * KNN result set empty.
+     */
+    if (pg_tre_surf_prefilter_rejects(scan, st))
+    {
+        st->knn_entries = NULL;
+        st->knn_n = 0;
+        st->knn_pos = 0;
+        st->knn_ready = true;
+        return;
+    }
 
     /*
      * Distance pattern: only relevant when an ORDER BY operator is

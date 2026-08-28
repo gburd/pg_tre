@@ -29,7 +29,7 @@
 #define XLOG_PTRE_POSTING_INSERT     0x40
 #define XLOG_PTRE_POSTING_DELETE     0x50
 #define XLOG_PTRE_POSTING_SPLIT      0x60
-#define XLOG_PTRE_RANGE_UPDATE       0x70
+#define XLOG_PTRE_SURF_UPDATE        0x70  /* v10: SuRF filter FPI (reuses freed RANGE slot) */
 #define XLOG_PTRE_PENDING_INSERT     0x80
 #define XLOG_PTRE_PENDING_MERGE_B    0x90
 #define XLOG_PTRE_PENDING_MERGE_C    0xA0

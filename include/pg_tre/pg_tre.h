@@ -81,7 +81,7 @@
  * release can fold this into a v9 LATEST bump once the format-version
  * regression assertions are reconciled.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 9
+#define PG_TRE_FORMAT_VERSION_LATEST 10
 #define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the
@@ -92,7 +92,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 3.1.0"
+#define PG_TRE_VERSION_STRING "pg_tre 3.2.0"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;

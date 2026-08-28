@@ -17,15 +17,18 @@ Delivered via a trigram-posting index over the text column:
 1. **Posting tier (authoritative)** -- per-trigram sparsemap
    postings, AND/OR-merged per query to produce a candidate TID set.
    This is the filter that drives the scan.
-2. **Range tier (build-time summary)** -- BRIN-style block-range
-   blooms are written at build time as a coarse per-heap-block-range
-   summary.  They are retained for future block-range skipping and
-   introspection but are **not** consulted on the current scan path
-   (the posting tier already yields exact candidate TIDs).
+2. **SuRF prefilter (v10, 3.2.0)** -- a Succinct Range Filter over an
+   order-preserving trigram key.  For a `^`-anchored / prefix /
+   `LIKE 'foo%'` pattern, the leading trigram maps to a contiguous
+   trigram-key range; if the SuRF reports no indexed trigram in that
+   range, the scan is rejected before the posting tier or the heap are
+   touched.  One-sided error (no false negatives); the heap recheck
+   stays authoritative.
 
 A per-tuple bloom tier existed through 2.x and was removed in 3.0.0
 (the executor recheck is authoritative, so it added size without
-changing results).
+changing results).  A BRIN-style per-block-range bloom tier was built
+through 3.1.x but never consulted at scan time; it was removed in 3.2.0.
 
 Recheck is always performed against the heap via TRE's
 `regaexec`.

@@ -2,16 +2,17 @@
 
 **PostgreSQL 18+ native index access method for approximate regex matching.**
 
-[![Status](https://img.shields.io/badge/status-3.1.0_released-green)](STATUS.md)
+[![Status](https://img.shields.io/badge/status-3.2.0_released-green)](STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
 
 pg_tre indexes text columns using sparsemap trigram postings, AND/OR-merged
 per query and backed by the [TRE
 library](https://github.com/laurikari/tre) for approximate-regex recheck.
-A BRIN-style per-block-range bloom tier is written at build time as a
-coarse summary; the authoritative candidate filter at scan time is the
-posting tier, and every candidate row is rechecked against the heap.
+The authoritative candidate filter is the posting tier, and every candidate
+row is rechecked against the heap.  A **SuRF** (Succinct Range Filter) tier
+(3.2.0) additionally lets an anchored / prefix / `LIKE 'foo%'` scan be
+rejected outright when no indexed trigram falls in the prefix's key range.
 
 It turns the classic `ripgrep`-over-data problem ("find text that looks like
 this, maybe with a typo") into a SQL-composable indexed query:
@@ -42,11 +43,15 @@ flowchart TD
     RC --> R
 ```
 
-> The build also writes a BRIN-style per-block-range bloom summary
-> (`pg_tre.range_size_blocks`); it is a coarse structure kept for
-> future block-range skipping and is not consulted on the current
-> scan path (the posting tier already yields exact candidate TIDs).
-> An earlier per-tuple bloom tier was removed in 3.0.0.
+> **SuRF prefilter (3.2.0).**  For a `^`-anchored / prefix / `LIKE 'foo%'`
+> pattern, pg_tre also consults a Succinct Range Filter over an
+> order-preserving trigram key before the posting tier: if no indexed
+> trigram falls in the anchored prefix's key range, the whole scan is
+> rejected without touching the posting tier or the heap (one-sided
+> error -- it never drops a true match).  `tre_surf_stats()` reports the
+> filter's size.  The BRIN-style per-block-range bloom tier that earlier
+> revisions built (but never read at scan time) was removed in 3.2.0, as
+> was the per-tuple bloom tier in 3.0.0.
 
 ---
 
@@ -643,9 +648,9 @@ text (on-disk format v9, backward-readable to v6).
   CONCURRENTLY`) use parallel workers by default
   (`pg_tre.enable_parallel_build`, bounded by
   `max_parallel_maintenance_workers`).
-- **Roadmap**: parallel index *scan*, and block-range skipping
-  via the range-bloom summary tier.  None are correctness
-  blockers.
+- **Roadmap**: parallel index *scan*, and extending the SuRF
+  prefilter to interior (non-anchored) required literals.  None are
+  correctness blockers.
 
 Tag and release process documented in
 [`doc/release-checklist.md`](doc/release-checklist.md). A

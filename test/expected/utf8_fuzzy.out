@@ -27,7 +27,6 @@ INSERT 0 7
 CREATE INDEX u8_idx ON u8_t USING tre (body);
 psql:test/sql/utf8_fuzzy.sql:25: NOTICE:  pg_tre: collected 71 trigram entries from 7 heap tuples
 psql:test/sql/utf8_fuzzy.sql:25: NOTICE:  pg_tre: built 61 posting trees
-psql:test/sql/utf8_fuzzy.sql:25: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/utf8_fuzzy.sql:25: NOTICE:  pg_tre: build complete, indexed 7 heap tuples into 61 trigrams
 CREATE INDEX
 -- Exact multibyte (k=0).

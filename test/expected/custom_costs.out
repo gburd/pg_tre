@@ -25,7 +25,6 @@ INSERT 0 5
 CREATE INDEX cost_idx ON cost_t USING tre (body);
 psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: collected 30 trigram entries from 5 heap tuples
 psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: built 17 posting trees
-psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/custom_costs.sql:23: NOTICE:  pg_tre: build complete, indexed 5 heap tuples into 17 trigrams
 CREATE INDEX
 -- Build a pattern with expensive substitution (cost_subst = 5) but a

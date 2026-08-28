@@ -363,6 +363,96 @@ accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
     MemoryContextSwitchTo(old);
 }
 
+/*
+ * Detect a required anchored leading literal and, if present, derive the
+ * closed trigram-key range its first trigram must occupy.  Returns true and
+ * fills lo/hi when the pattern begins with `^` (REGEX_ANCHOR_START)
+ * immediately followed by >= 3 literal codepoints; those three codepoints
+ * form an exact order-preserving key K, so the range is [K, K].
+ *
+ * We only walk the leftmost CONCAT spine and only accept LITERAL nodes, so
+ * this fires exactly for patterns like `^foobar`, `^error`, and the
+ * anchored-prefix form that LIKE 'foo%' lowers to.  Anything else (no
+ * anchor, a class/any/rep/alt before three literals, fewer than three
+ * leading literals) yields false and no SuRF range -- correctness is never
+ * affected, only the opportunity to prefilter.
+ *
+ * Soundness: for an anchored k=0 pattern, every matching string starts with
+ * these codepoints, so its first indexed trigram hashes/keys to exactly K.
+ * If the index contains no trigram with key K, no row can match -> safe to
+ * reject.  (At k>0 the leading bytes may be edited, so we do NOT set a range
+ * there; the tiling path leaves has_surf_range false.)
+ */
+static bool
+extract_anchored_prefix_key(const RegexAst *root, uint64 *lo, uint64 *hi)
+{
+    const RegexAst *node = root;
+    int32       cps[3];
+    int         ncp = 0;
+    bool        seen_anchor = false;
+
+    /*
+     * Walk the leftmost spine.  A pattern `^abc...` parses as nested
+     * CONCAT with the anchor as the deepest-left leaf, so we descend
+     * left children, visiting nodes in left-to-right order via an
+     * explicit stack of "pending right children".
+     */
+    const RegexAst *stack[64];
+    int         sp = 0;
+
+    for (;;)
+    {
+        if (node == NULL)
+        {
+            if (sp == 0)
+                break;
+            node = stack[--sp];
+            continue;
+        }
+
+        switch (node->kind)
+        {
+            case REGEX_AST_CONCAT:
+                /* visit left, then right */
+                if (sp < 64)
+                    stack[sp++] = node->u.concat.right;
+                node = node->u.concat.left;
+                continue;
+
+            case REGEX_AST_ANCHOR:
+                if (node->u.anchor.which == REGEX_ANCHOR_START && ncp == 0)
+                    seen_anchor = true;
+                else if (ncp < 3)
+                    return false;   /* mid-run anchor: not a clean prefix */
+                node = NULL;
+                continue;
+
+            case REGEX_AST_LITERAL:
+                if (!seen_anchor)
+                    return false;   /* not anchored: no hard prefix */
+                if (ncp < 3)
+                    cps[ncp] = node->u.literal.codepoint;
+                ncp++;
+                if (ncp >= 3)
+                {
+                    /* Got three leading literals: exact first-trigram key. */
+                    uint64 k = pg_tre_trigram_key_cp(cps);
+
+                    *lo = k;
+                    *hi = k;
+                    return true;
+                }
+                node = NULL;
+                continue;
+
+            default:
+                /* Any non-literal before 3 literals breaks the prefix. */
+                return false;
+        }
+    }
+    return false;
+}
+
 bool
 regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
 {
@@ -411,5 +501,25 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
 
     accum_to_query(&acc, max_cost, out, ctx->mcxt);
     out->mode = TRIGRAM_QUERY_CNF;  /* k=0 uses CNF */
+
+    /*
+     * v10 SuRF prefilter: if the pattern pins an anchored >= 3-codepoint
+     * leading literal, record the exact first-trigram key range so the
+     * scan can reject the whole index when no such trigram exists.  Only
+     * at k=0 (leading bytes are not editable).
+     */
+    if (max_cost == 0)
+    {
+        uint64  lo,
+                hi;
+
+        if (extract_anchored_prefix_key(ctx->root, &lo, &hi))
+        {
+            out->has_surf_range = true;
+            out->surf_lo = lo;
+            out->surf_hi = hi;
+        }
+    }
+
     return true;
 }

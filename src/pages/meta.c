@@ -74,6 +74,14 @@ pg_tre_meta_init(Page page)
     meta->_pad_free_log      = 0;
 
     /*
+     * v10 SuRF filter: a fresh index has none until the build writes it.
+     * Stamp InvalidBlockNumber explicitly; a pre-v10 page has zero here,
+     * normalized to InvalidBlockNumber on read -> "no SuRF".
+     */
+    meta->root_surf          = InvalidBlockNumber;
+    meta->surf_n_keys        = 0;
+
+    /*
      * Place the lower/upper pointers past the meta struct so PageAddItem
      * (which we don't use on this page, but which PageInit expects to be
      * valid) remains self-consistent.
@@ -136,6 +144,13 @@ pg_tre_meta_read(Relation index, PgTreMetaPageData *out)
      */
     if (out->free_log_head == 0)
         out->free_log_head = InvalidBlockNumber;
+
+    /*
+     * v10 SuRF root.  Pre-v10 pages have zero here; block 0 is the meta
+     * page and can never be a SuRF page, so zero means "no SuRF filter".
+     */
+    if (out->root_surf == 0)
+        out->root_surf = InvalidBlockNumber;
 
     UnlockReleaseBuffer(buf);
 }
@@ -242,6 +257,37 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
         PageSetLSN(metapage, recptr);
     }
 
+    END_CRIT_SECTION();
+
+    UnlockReleaseBuffer(metabuf);
+}
+
+void
+pg_tre_meta_set_surf(Relation index, BlockNumber root_surf, uint32 surf_n_keys)
+{
+    Buffer metabuf;
+    Page   metapage;
+    PgTreMetaPage meta;
+
+    metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
+                          BUFFER_LOCK_EXCLUSIVE);
+    metapage = BufferGetPage(metabuf);
+    meta = PgTreMetaPageGet(metapage);
+
+    meta->root_surf = root_surf;
+    meta->surf_n_keys = surf_n_keys;
+
+    START_CRIT_SECTION();
+    MarkBufferDirty(metabuf);
+    if (RelationNeedsWAL(index))
+    {
+        XLogRecPtr recptr;
+
+        XLogBeginInsert();
+        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
+        PageSetLSN(metapage, recptr);
+    }
     END_CRIT_SECTION();
 
     UnlockReleaseBuffer(metabuf);

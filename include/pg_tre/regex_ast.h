@@ -133,6 +133,21 @@ typedef struct TrigramQuery
     int32             global_max_cost;
     bool              always_true;  /* extraction gave up */
     TrigramQueryMode  mode;         /* CNF or DNF */
+
+    /*
+     * v10 SuRF prefilter (3.2.0).  When the pattern pins a required,
+     * anchored leading literal, has_surf_range is set and [surf_lo,
+     * surf_hi] is the closed range of order-preserving trigram keys
+     * (pg_tre_trigram_key_cp) that a matching row's first trigram MUST
+     * fall in.  A whole-index scan can reject the index outright when the
+     * SuRF reports no stored trigram key overlaps this range.  This is a
+     * HARD requirement of the pattern (only set for k=0 anchored literals
+     * with >= 3 leading codepoints), never a heuristic -- so applying it
+     * can never drop a true match.
+     */
+    bool              has_surf_range;
+    uint64            surf_lo;
+    uint64            surf_hi;
 } TrigramQuery;
 
 extern bool regex_extract_query(TreParseCtx *ctx, int32 max_cost,

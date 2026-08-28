@@ -100,7 +100,7 @@ SELECT CASE WHEN pg_relation_size('density_on_idx')
             THEN 'ok' ELSE 'bad' END AS density_result;
 
 -- (4) Format v8: every page of the ON index is at format v9.
-SELECT CASE WHEN min(format_version) = 9 THEN 'ok' ELSE 'bad' END
+SELECT CASE WHEN min(format_version) = 10 THEN 'ok' ELSE 'bad' END
          AS format_result
 FROM pg_tre_index_format_status('density_on_idx'::regclass);
 

@@ -15,7 +15,6 @@ INSERT 0 1000
 CREATE INDEX ftr_idx ON ftr_t USING tre (body);
 psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: collected 30179 trigram entries from 1000 heap tuples
 psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: built 4150 posting trees
-psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: built range tier with 1 ranges across 1 pages
 psql:test/sql/flush_to_run.sql:12: NOTICE:  pg_tre: build complete, indexed 1000 heap tuples into 4150 trigrams
 CREATE INDEX
 SET pg_tre.flush_to_run = on;

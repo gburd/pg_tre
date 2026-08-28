@@ -11,6 +11,21 @@ standard `PageHeaderData` at offset 0 and end with a
 
 ## Format version history
 
+- **v10 (3.2.0)**: SuRF (Succinct Range Filter) tier.  Adds a new page
+  kind `PG_TRE_PAGE_SURF` holding the serialized SuRF-Base image (a
+  LOUDS-Sparse trie over the order-preserving trigram key
+  `pg_tre_trigram_key_cp`) across a chain of pages, each led by a
+  `PgTreSurfHeader` (`next_page`, `chunk_bytes`, `total_bytes`), rooted
+  at the new meta field `root_surf` (with `surf_n_keys`).  Purely
+  ADDITIVE: no existing page kind changes layout, `PG_TRE_FORMAT_VERSION_MIN`
+  stays 6, and a v6-v9 index has `root_surf = InvalidBlockNumber` so it
+  reads unchanged with NO REINDEX (the scan simply runs without the
+  prefilter).  Because the SuRF is a whole-index structure it is NOT
+  synthesized by the in-place page-stamp upgrade; REINDEX populates it.
+  The same version REMOVES the never-read BRIN-style range-bloom tier:
+  `PG_TRE_PAGE_RANGE` is no longer emitted and `root_range` is a reserved
+  meta field pinned to `InvalidBlockNumber`.  The freed WAL opcode
+  `XLOG_PTRE_RANGE_UPDATE` (0x70) is reused as `XLOG_PTRE_SURF_UPDATE`.
 - **v8 (2.0.0-dev)**: Posting-page coalescing.  Adds a new page kind
   `PG_TRE_PAGE_POSTING_COALESCED` that packs the postings of multiple
   trigrams onto one page, addressed by a slot index carried in the
@@ -135,12 +150,25 @@ Access by TID:
    index; multiply by sizeof(payload record) -- or walk the variable-
    length region via per-entry offset table -- to locate payload.
 
-## Range summary tree
+## Range summary tree (REMOVED in 3.2.0)
 
-BRIN-style B-tree where each leaf entry is `PgTreRangeLeafEntry`
-followed inline by a bloom-filter byte vector of `bloom_bytes`
-length.  Internal nodes behave like a standard B-tree keyed on
-`range_start_blk`.
+Historical (v5-v9): a BRIN-style tree of `PgTreRangeLeafEntry` +
+inline bloom vectors, keyed on `range_start_blk`.  It was built on
+every index but never consulted at scan time, so 3.2.0 stopped
+emitting it.  `PG_TRE_PAGE_RANGE` is no longer written and
+`meta.root_range` is a reserved field pinned to `InvalidBlockNumber`.
+
+## SuRF filter tier (v10)
+
+The serialized SuRF-Base image (a LOUDS-Sparse succinct trie over the
+order-preserving trigram key) is stored across a chain of
+`PG_TRE_PAGE_SURF` pages, rooted at `meta.root_surf`.  Each page begins
+with `PgTreSurfHeader` (`next_page`, `chunk_bytes`, `total_bytes`)
+followed by that page's slice of the image; the reader concatenates the
+slices and deserializes.  Point queries are exact (SuRF-Base indexes the
+full 8-byte key); range queries have a one-sided error (no false
+negatives).  Consulted only for `^`-anchored / prefix / `LIKE 'foo%'`
+patterns to reject a scan when the prefix's trigram-key range is empty.
 
 ## Pending list
 

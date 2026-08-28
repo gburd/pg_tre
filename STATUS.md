@@ -1,10 +1,26 @@
 # pg_tre status
 
-Released: **3.1.0** (2026-08).  See `CHANGELOG.md` for full
+Released: **3.2.0** (2026-08).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-3.1.0 is a correctness + robustness release on the 3.0 lineage:
+3.2.0 is a feature release on the 3.x lineage: on-disk format
+bumps v9 -> v10 but stays backward-readable (min v6), so no
+re-index is required (REINDEX populates the new filter on an
+existing index).  Headline changes: (1) a **SuRF (Succinct
+Range Filter)** tier -- a from-scratch, dependency-free C
+reimplementation of SuRF-Base as a LOUDS-Sparse trie over an
+order-preserving trigram key -- rejects `^`-anchored / prefix /
+`LIKE 'foo%'` scans whose leading trigram is absent from the
+whole index, without descending the posting tier or touching
+the heap (~570x faster on an absent anchored prefix over a
+500k-row index; one-sided error, never drops a true match);
+(2) the vestigial BRIN-style range-bloom tier -- built on every
+index but never read at scan time -- was **removed** (its GUC
+and reloption are retained but ignored).  `tre_surf_stats()`
+exposes the filter's size.
+
+3.1.0 was a correctness + robustness release on the 3.0 lineage:
 on-disk format unchanged (v9, min readable v6), no re-index
 required.  Headline changes: (1) the `%~~` and `<@>` recheck now
 honors a pattern's per-edit cost weights (`cost_ins`/`cost_del`/

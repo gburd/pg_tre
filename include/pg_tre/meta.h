@@ -51,6 +51,10 @@ extern void pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
                                   BlockNumber root_range, uint64 n_trigrams,
                                   uint64 n_tuples_indexed);
 
+/* v10: record the SuRF filter root (or InvalidBlockNumber for none). */
+extern void pg_tre_meta_set_surf(Relation index, BlockNumber root_surf,
+                                 uint32 surf_n_keys);
+
 /*
  * Planner selectivity estimate for a lowered TrigramQuery against an
  * open pg_tre index (Phase A / A3).  Uses real per-trigram posting

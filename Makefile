@@ -16,7 +16,8 @@
 
 EXTENSION    = pg_tre
 MODULE_big   = pg_tre
-DATA         = sql/pg_tre--3.1.0.sql sql/pg_tre--3.0.2.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql sql/pg_tre--1.5.4.sql sql/pg_tre--1.5.3.sql sql/pg_tre--1.5.2.sql sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+DATA         = sql/pg_tre--3.2.0.sql sql/pg_tre--3.1.0.sql sql/pg_tre--3.0.2.sql sql/pg_tre--1.5.6.sql sql/pg_tre--1.5.5.sql sql/pg_tre--1.5.4.sql sql/pg_tre--1.5.3.sql sql/pg_tre--1.5.2.sql sql/pg_tre--1.5.0.sql sql/pg_tre--1.3.0.sql sql/pg_tre--1.1.1--1.2.1.sql sql/pg_tre--1.1.0--1.1.1.sql sql/pg_tre--1.1.0.sql sql/pg_tre--1.0.0--1.1.0.sql sql/pg_tre--1.0.0.sql sql/pg_tre--0.1.0--1.0.0.sql \
+       sql/pg_tre--3.1.0--3.2.0.sql \
        sql/pg_tre--3.0.2--3.1.0.sql \
        sql/pg_tre--3.0.1--3.0.2.sql \
        sql/pg_tre--3.0.0--3.0.1.sql \
@@ -54,7 +55,7 @@ DATA         = sql/pg_tre--3.1.0.sql sql/pg_tre--3.0.2.sql sql/pg_tre--1.5.6.sql
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density density_scaling vacuum_repack reloptions testregex custom_costs utf8_fuzzy amvalidate parallel_build upgrade_online
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density density_scaling vacuum_repack reloptions testregex custom_costs utf8_fuzzy amvalidate parallel_build upgrade_online surf_prefix
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -85,6 +86,7 @@ OBJS = \
     src/util/sparsemap.o \
     src/util/bloom.o \
     src/util/hash.o \
+    src/util/surf.o \
     src/util/utf8.o \
     src/util/type_pattern.o \
     src/util/upgrade.o \
@@ -102,7 +104,7 @@ OBJS = \
     src/pages/posting.o \
     src/pages/coalesced.o \
     src/pages/pending.o \
-    src/pages/range.o \
+    src/pages/surf_page.o \
     src/pages/run_catalog.o \
     src/pages/free_log.o \
     src/wal/xlog.o \
@@ -412,7 +414,7 @@ coverage-report:
 # ------------------------------------------------------------------
 # Release tarball
 # ------------------------------------------------------------------
-PG_TRE_VERSION = 3.1.0
+PG_TRE_VERSION = 3.2.0
 DIST_NAME      = pg_tre-$(PG_TRE_VERSION)
 
 dist:
