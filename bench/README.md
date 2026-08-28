@@ -41,6 +41,12 @@ This produces `doc/perf.md` with real benchmark numbers.
           --corpus <csv> --work <scratch dir> [--make gmake] [--old-version X]
 
   Latest run: see `RESULTS-v2.0-ab.md`.
+- **stress/** — at-scale, under-load, adverse-conditions test harness for a
+  large EC2 instance with local NVMe (10M–100M rows, temp-disk cliffs,
+  cold-cache, crash recovery, VACUUM churn, DoS patterns, parallel-build
+  saturation, SuRF at scale). This is the heavy sibling of `ab-bench.sh`;
+  see `stress/STRESS-PLAN.md` and `stress/README.md`. Committed so future
+  releases can re-run it verbatim and diff results.
 - **gen_corpus_realistic.py** — Deterministic corpus with realistic selectivity
   (planted tokens at ~5% / ~1% / ~0.08%): `python3 gen_corpus_realistic.py N out.csv`.
   Use this for ab-bench; the older fetch-corpus.sh generates pathologically

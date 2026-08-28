@@ -1,0 +1,5 @@
+# raw stress-run outputs are not committed; promote a SUMMARY.md to
+# RESULTS-<version>.md to keep a baseline.
+stress-results/
+results/
+*.pem

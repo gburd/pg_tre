@@ -239,6 +239,10 @@ q6_nonselective_the|t_new|body %~~ tre_pattern('the', 0)|on
 q6_nonselective_the|t_trgm|body ~ 'the'|on
 q7_rare_nomatch|t_new|body %~~ tre_pattern('zzqxby', 0)|off
 q7_rare_nomatch|t_trgm|body ~ 'zzqxby'|off
+q8_anchored_absent|t_new|body %~~ tre_pattern('^zzqxby', 0)|off
+q8_anchored_absent|t_trgm|body ~ '^zzqxby'|off
+q9_anchored_present|t_new|body %~~ tre_pattern('^government', 0)|off
+q9_anchored_present|t_trgm|body ~ '^government'|off
 Q
 
 # Pick the DB that owns a table (t_trgm -> pg_trgm DB, else pg_tre DB).
