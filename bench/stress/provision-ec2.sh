@@ -103,6 +103,7 @@ setup_nvme() {
     log "striping instance-store NVMe into /mnt/nvme"
     ssh -F "$SSHCFG" stress 'sudo bash -s' <<'REMOTE'
 set -e
+sudo dnf install -y -q mdadm >/dev/null 2>&1 || true
 # instance-store NVMe devices are the ones WITHOUT a partition table / not the root.
 # On Nitro, the root EBS is /dev/nvme0n1; instance-store are nvme1n1, nvme2n1, ...
 mapfile -t STORE < <(lsblk -dn -o NAME,MODEL | awk '/Instance Storage|Amazon EC2 NVMe Instance/{print "/dev/"$1}')

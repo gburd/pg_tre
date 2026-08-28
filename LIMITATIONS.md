@@ -193,3 +193,48 @@ that lets large body corpora build within `maintenance_work_mem`.
 Until 1.8.0 ships and qualifies on a real >500k-row body corpus,
 plan as if pg_tre is small/medium-corpus territory for long-text
 columns, per the table at the top.
+
+## At-scale stress qualification (3.2.0, 2026-08)
+
+A full adverse-conditions suite (`bench/stress/`, see
+`bench/stress/RESULTS-stress-3.2.0.md`) was run on an AWS i4i.8xlarge
+(32 vCPU, 256 GB, NVMe RAID-0) against 250k–10M-row corpora. Every
+correctness oracle (index result set == sequential-scan result set) passed
+with **zero mismatches**, crash recovery after SIGKILL-mid-build was clean
+(heap intact, no corruption, no orphaned valid index), the DoS guards bound
+pathological patterns, and parallel builds showed no deadlocks. Two
+non-correctness findings that affect **sizing and maintenance**:
+
+### Build throughput is low and super-linear
+
+Medium-text (~400 B rows) `CREATE INDEX USING tre` build times, 8 workers,
+1 GB `maintenance_work_mem`:
+
+| rows | heap | build |
+|------|------|-------|
+| 50k  | 8 MB   | ~3.4 s |
+| 250k | 49 MB  | ~15–40 s |
+| 2M   | 385 MB | >7 min |
+| 10M  | 1.9 GB | >20 min |
+
+Only the scan + trigram-extraction + sort phase parallelizes; the
+posting-tree / upper-tree / SuRF construction runs serially in the leader
+and dominates once emissions are large. Constraining `maintenance_work_mem`
+makes it far worse (merge-pass count explodes) though RSS stays bounded
+(~100 MB). **Budget build time generously at scale, prefer the CONCURRENTLY
+variants, keep `maintenance_work_mem` generous, and treat pg_tre as
+small/medium-corpus territory for long-text columns** (consistent with the
+sizing table at the top of this file).
+
+### Posting-leaf bloat under sustained churn — REINDEX to reclaim
+
+Under a delete+reinsert churn workload with the **row count held flat**, the
+index grew ~3.9× (276 MB → 1070 MB over 6 rounds) and VACUUM did **not**
+shrink it; a `REINDEX` returned it to baseline (278 MB). The growth is in
+`posting_leaf` pages held at ~88 % fill: VACUUM removes dead TIDs and
+recycles *fully emptied* leaves (nbtree-style deferred reclaim) but does not
+merge/compact *partially*-empty leaves, so a churn pattern that never fully
+empties a leaf accumulates allocated pages. This mirrors nbtree (which also
+needs REINDEX to reclaim half-empty pages) and never affects correctness.
+**Churn-heavy deployments should schedule periodic
+`REINDEX INDEX CONCURRENTLY`.**

@@ -3,3 +3,4 @@
 stress-results/
 results/
 *.pem
+__pycache__/

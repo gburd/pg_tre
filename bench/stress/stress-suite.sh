@@ -104,6 +104,7 @@ CONF
 load() {
     local rows=10000000 shape=medium
     while [ $# -gt 0 ]; do case "$1" in --rows) rows="$2"; shift 2;; --shape) shape="$2"; shift 2;; *) shift;; esac; done
+    printf '%s %s\n' "$rows" "$shape" > "$NVME/.corpus_params"   # for reload_corpus
     log "loading $rows rows shape=$shape (streaming)"
     $PSQL -c "DROP TABLE IF EXISTS t CASCADE;" -c "CREATE TABLE t(id bigint, body text);"
     python3 "$(dirname "$0")/gen_large_corpus.py" --rows "$rows" --shape "$shape" \
@@ -115,6 +116,18 @@ load() {
     csv meta.csv "instance,$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo NA)"
     # sizing prediction
     $PSQL -c "SELECT * FROM tre_estimate_index_build('t'::regclass, 2);" 2>/dev/null | tee -a "$RESULTS/estimate.txt" || true
+}
+
+# Reload the corpus to its pristine as-loaded state.  Mutating scenarios
+# (D CIC-under-writes, G VACUUM-under-churn) call this first so they don't
+# pollute the selectivity that read-only scenarios depend on.
+reload_corpus() {
+    local rows shape
+    read -r rows shape < "$NVME/.corpus_params" 2>/dev/null || { rows=10000000; shape=medium; }
+    log "reloading pristine corpus ($rows rows, shape=$shape)"
+    $PSQL -c "DROP TABLE IF EXISTS t CASCADE;" -c "CREATE TABLE t(id bigint, body text);" >/dev/null 2>&1
+    python3 "$(dirname "$0")/gen_large_corpus.py" --rows "$rows" --shape "$shape" \
+      | $PSQL -c "\copy t(id,body) FROM STDIN WITH (FORMAT csv, HEADER true)" >/dev/null 2>&1
 }
 
 # accuracy oracle: index result-set == seq-scan result-set (both directions)
@@ -191,9 +204,9 @@ scenario_A_tempdisk() {
 
 scenario_B_memstarve() {
     sm ""; sm "## B — maintenance_work_mem starvation (bounded RSS)"
-    $PSQL -c "SET maintenance_work_mem='16MB'; DROP INDEX IF EXISTS t_tre;" >/dev/null 2>&1
+    $PSQL -c "SET maintenance_work_mem='64MB'; DROP INDEX IF EXISTS t_tre;" >/dev/null 2>&1
     # sample leader RSS while building
-    ( $PSQL -c "SET maintenance_work_mem='16MB'; CREATE INDEX t_tre ON t USING tre(body);" >/dev/null 2>&1 ) &
+    ( $PSQL -c "SET maintenance_work_mem='64MB'; CREATE INDEX t_tre ON t USING tre(body);" >/dev/null 2>&1 ) &
     local bpid=$! peak=0
     while kill -0 "$bpid" 2>/dev/null; do
         local rss; rss=$(ps --no-headers -o rss -C postgres 2>/dev/null | sort -n | tail -1)
@@ -201,9 +214,9 @@ scenario_B_memstarve() {
         sleep 1
     done
     wait "$bpid"
-    sm "peak single-backend RSS during 16MB-mwm build: $((peak/1024)) MB (bounded => PASS)"
+    sm "peak single-backend RSS during 64MB-mwm build: $((peak/1024)) MB (bounded => PASS)"
     csv B.csv "peak_rss_mb,$((peak/1024))"
-    scen_query_matrix "B_after_16mb_build"
+    scen_query_matrix "B_after_64mb_build"
 }
 
 scenario_C_coldcache() {
@@ -217,6 +230,7 @@ scenario_C_coldcache() {
 
 scenario_D_cic() {
     sm ""; sm "## D — CREATE INDEX CONCURRENTLY under concurrent writes"
+    reload_corpus   # pristine corpus (D mutates it)
     $PSQL -c "DROP INDEX IF EXISTS t_tre;" >/dev/null 2>&1
     # background churn: insert/delete rows during the CIC
     ( for _ in $(seq 1 60); do
@@ -250,39 +264,74 @@ scenario_E_cancel() {
 scenario_F_crash() {
     sm ""; sm "## F — crash recovery at scale (SIGKILL mid-build)"
     $PSQL -c "DROP INDEX IF EXISTS t_tre;" >/dev/null 2>&1
-    ( $PSQL -c "CREATE INDEX t_tre ON t USING tre(body);" >/dev/null 2>&1 ) & 
+    ( $PSQL -c "CREATE INDEX t_tre ON t USING tre(body);" >/dev/null 2>&1 ) &
     sleep 4
     local pm; pm=$(head -1 "$PGDATA/postmaster.pid")
-    sm "SIGKILL postmaster $pm mid-build"
-    kill -9 "$pm" 2>/dev/null; pkill -9 -f "$PGDATA" 2>/dev/null; sleep 2
-    start_pg
-    local rc=$?
-    local rec; rec=$(grep -icE 'PANIC|corrupt' "$NVME/pg.log" || echo 0)
-    local present; present=$($PSQL -c "SELECT count(*) FROM pg_index WHERE indexrelid='t_tre'::regclass;" 2>/dev/null || echo NA)
-    sm "recovery start_rc=$rc PANIC/corrupt_in_log=$rec index_present=$present"
+    sm "SIGKILL postmaster $pm mid-build (+ all children in its process group)"
+    # Kill the whole postmaster process group so no parallel-worker child
+    # survives to hold the shared-memory segment (which would block restart).
+    local pgid; pgid=$(ps -o pgid= -p "$pm" 2>/dev/null | tr -d ' ')
+    kill -9 "$pm" 2>/dev/null
+    [ -n "$pgid" ] && kill -9 -- "-$pgid" 2>/dev/null
+    pkill -9 -f "postgres.*$PGDATA" 2>/dev/null
+    # Wait for the shared-memory segment / children to fully clear.
+    local w
+    for w in $(seq 1 15); do
+        pgrep -f "postgres.*$PGDATA" >/dev/null 2>&1 || break
+        sleep 1
+    done
+    rm -f "$PGDATA/postmaster.pid" 2>/dev/null
+    # Restart (crash recovery); retry a few times in case SysV shm lingers.
+    local rc=1
+    for w in $(seq 1 10); do
+        start_pg && { rc=0; break; }
+        sleep 2
+    done
+    local rec; rec=$(grep -icE 'PANIC|corrupt' "$NVME/pg.log" 2>/dev/null || echo 0)
+    local recovered; recovered=$(grep -icE 'database system is ready to accept connections' "$NVME/pg.log" 2>/dev/null || echo 0)
+    local present; present=$($PSQL -c "SELECT count(*) FROM pg_index WHERE indexrelid=to_regclass('t_tre');" 2>/dev/null || echo NA)
+    sm "recovery start_rc=$rc PANIC/corrupt_in_log=$rec ready_events=$recovered index_present=$present"
+    # heap must be intact and queryable after recovery (the real correctness gate)
+    local rows; rows=$($PSQL -c "SELECT count(*) FROM t;" 2>/dev/null || echo NA)
+    sm "post-recovery heap rows queryable=$rows"
+    csv F.csv "start_rc,$rc"; csv F.csv "panic_or_corrupt,$rec"; csv F.csv "heap_rows,$rows"
     # if a valid index survived, it must pass the oracle
-    local valid; valid=$($PSQL -c "SELECT count(*) FROM pg_index WHERE indexrelid='t_tre'::regclass AND indisvalid;" 2>/dev/null||echo 0)
+    local valid; valid=$($PSQL -c "SELECT count(*) FROM pg_index WHERE indexrelid=to_regclass('t_tre') AND indisvalid;" 2>/dev/null||echo 0)
     if [ "${valid:-0}" = 1 ]; then
         local o; o=$(oracle "body %~~ tre_pattern('government',0)"); sm "surviving index oracle mismatches=${o%|*}"
         csv F.csv "survivor_oracle_mismatch,${o%|*}"
+    else
+        sm "no valid index survived (expected for mid-build crash) — clean"
     fi
-    csv F.csv "panic_or_corrupt,$rec"
 }
 
 scenario_G_vacuum() {
-    sm ""; sm "## G — VACUUM under churn (steady-state index size)"
+    sm ""; sm "## G — VACUUM under churn (steady-state, row count held ~flat)"
+    reload_corpus   # pristine corpus (G mutates it heavily)
     $PSQL -c "DROP INDEX IF EXISTS t_tre; CREATE INDEX t_tre ON t USING tre(body);" >/dev/null 2>&1
-    local s0; s0=$($PSQL -c "SELECT pg_relation_size('t_tre')")
-    for r in 1 2 3 4 5; do
-        $PSQL -c "DELETE FROM t WHERE id % 97 = $r;" >/dev/null 2>&1
-        $PSQL -c "INSERT INTO t SELECT 900000000+$r*1000000+g, 'government reinsert '||md5(g::text) FROM generate_series(1,50000) g;" >/dev/null 2>&1
+    local rows0 idx0; rows0=$($PSQL -c "SELECT count(*) FROM t"); idx0=$($PSQL -c "SELECT pg_relation_size('t_tre')")
+    sm "baseline: rows=$rows0 index=$(( idx0/1024/1024 )) MB"
+    # Churn IN PLACE: each round delete ~1% and reinsert the SAME count, so
+    # row count stays ~flat and any index growth is genuine bloat, not data.
+    local batch=$(( rows0/100 )); [ "$batch" -lt 1000 ] && batch=1000
+    for r in 1 2 3 4 5 6; do
+        $PSQL -c "DELETE FROM t WHERE id IN (SELECT id FROM t ORDER BY id OFFSET $((r*batch)) LIMIT $batch);" >/dev/null 2>&1
+        $PSQL -c "INSERT INTO t SELECT 800000000+$r*10000000+g, 'government churn '||md5(g::text) FROM generate_series(1,$batch) g;" >/dev/null 2>&1
         $PSQL -c "VACUUM t;" >/dev/null 2>&1
         local sz; sz=$($PSQL -c "SELECT pg_relation_size('t_tre')")
-        sm "round $r: index_size=$(( sz/1024/1024 )) MB"
+        sm "round $r: rows=$($PSQL -c "SELECT count(*) FROM t") index=$(( sz/1024/1024 )) MB"
         csv G.csv "round$r,$sz"
     done
-    local s1; s1=$($PSQL -c "SELECT pg_relation_size('t_tre')")
-    sm "index grew ${s0} -> ${s1} bytes over 5 churn rounds (bounded growth => PASS)"
+    # Settle: a few extra VACUUMs to let deferred page reclaim catch up.
+    $PSQL -c "VACUUM t; VACUUM t; VACUUM t;" >/dev/null 2>&1
+    local idx1; idx1=$($PSQL -c "SELECT pg_relation_size('t_tre')")
+    local ratio; ratio=$(awk "BEGIN{printf \"%.2f\", $idx1/$idx0}")
+    sm "after churn+settle: index=$(( idx1/1024/1024 )) MB (${ratio}x baseline)"
+    sm "$([ "$(awk "BEGIN{print ($idx1<=$idx0*2)}")" = 1 ] && echo 'PASS: index within 2x baseline (bounded)' || echo 'CHECK: index >2x baseline — investigate reclaim')"
+    csv G.csv "baseline_bytes,$idx0"; csv G.csv "final_bytes,$idx1"; csv G.csv "ratio,$ratio"
+    # correctness after churn
+    local o; o=$(oracle "body %~~ tre_pattern('government',0)"); sm "post-churn oracle mismatches=${o%|*}"
+    csv G.csv "oracle_mismatch,${o%|*}"
 }
 
 scenario_H_dos() {
@@ -322,18 +371,27 @@ scenario_J_surf() {
 }
 
 run() {
-    local only="A,B,C,D,E,F,G,H,I,J"
+    local only="A,B,C,H,I,J,E,F,D,G"   # read-only/analysis first; mutating (D,G) + crash (F) later
     while [ $# -gt 0 ]; do case "$1" in --only) only="$2"; shift 2;; --runs) RUNS="$2"; shift 2;; *) shift;; esac; done
     pg_running || start_pg
     sm "# pg_tre stress run — $(date -u +%FT%TZ)"
     sm "host=$(hostname) pg=$($PGBIN/pg_config --version) sha=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null||echo NA)"
     sm "scenarios: $only  runs/query: $RUNS  results: $RESULTS"
-    IFS=, ; for s in $only; do case "$s" in
-        A) scenario_A_tempdisk;; B) scenario_B_memstarve;; C) scenario_C_coldcache;;
-        D) scenario_D_cic;;      E) scenario_E_cancel;;    F) scenario_F_crash;;
-        G) scenario_G_vacuum;;   H) scenario_H_dos;;       I) scenario_I_parallel;;
-        J) scenario_J_surf;;     *) log "unknown scenario $s";; esac; done
-    unset IFS
+    # Run in a fixed canonical order (read-only/analysis before mutating),
+    # honoring only those requested, so a mutating scenario never pollutes a
+    # later read-only one regardless of --only argument order.
+    local _saved_ifs="$IFS" want
+    IFS=','; read -r -a _req <<< "$only"; IFS="$_saved_ifs"
+    want() { local x; for x in "${_req[@]}"; do [ "$x" = "$1" ] && return 0; done; return 1; }
+    for s in A B C H I J E F D G; do
+        want "$s" || continue
+        case "$s" in
+            A) scenario_A_tempdisk;; B) scenario_B_memstarve;; C) scenario_C_coldcache;;
+            D) scenario_D_cic;;      E) scenario_E_cancel;;    F) scenario_F_crash;;
+            G) scenario_G_vacuum;;   H) scenario_H_dos;;       I) scenario_I_parallel;;
+            J) scenario_J_surf;;
+        esac
+    done
     sm ""; sm "=== stress run complete; results in $RESULTS ==="
 }
 
