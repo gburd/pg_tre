@@ -220,9 +220,20 @@ fi
 # STATUS.md and CHANGELOG.md need contextual handling: the bump
 # script updates the version markers but leaves the prose alone.
 # Authors fill in the release notes themselves.
-if [[ -f STATUS.md ]]; then
-    perl -i -pe "s/Released:\s*\*\*\Q$OLD\E\*\*/Released: **$NEW**/g" STATUS.md
+#
+# A dev version is not released, so a dev bump must leave the
+# `Released:` marker naming the last actual release.  That means a
+# release bump cannot substitute OLD (=NEW-dev) here -- the marker
+# holds the *previous* release -- so it rewrites whatever is there.
+if [[ -f STATUS.md && $MODE == release ]]; then
+    perl -i -pe "s/^Released:\s*\*\*[^*]+\*\*/Released: **$NEW**/" STATUS.md
 fi
+
+# test/expected/pg_tre.out no longer pins the version string: the test
+# asserts tre_version()'s *shape* via a regex, so no bump touches it.
+# (It used to pin the literal string, which went stale on every bump --
+# and "just substitute it" is not enough, because psql's column ruler
+# widens with the version string too.)
 
 # --- straggler check -----------------------------------------------
 
@@ -231,7 +242,6 @@ fi
 # common_files above.
 stragglers=$(git grep --fixed-strings "$OLD" -- \
     ':!scripts/bump-version.sh' \
-    ':!test/expected/' \
     ':!sql/pg_tre--*--*.sql' \
     ':!RELEASING.md' \
     ':!CHANGELOG.md' \

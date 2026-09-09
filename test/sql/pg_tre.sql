@@ -26,8 +26,8 @@ SELECT tre_amatch('colour', 'color', 2, 1, 1, 1);
 -- Detail function shows cost breakdown
 SELECT * FROM tre_amatch_detail('colour', 'color', 3);
 
--- Version string
-SELECT tre_version();
+-- Version string: shape, not literal (a pinned version goes stale on bump).
+SELECT tre_version() ~ '^pg_tre [0-9]+\.[0-9]+\.[0-9]+(-dev)? \(TRE [0-9]+\.[0-9]+\.[0-9]+\)$' AS version_string_well_formed;
 
 -- Edge cases: empty strings
 SELECT tre_amatch('', '', 0);
