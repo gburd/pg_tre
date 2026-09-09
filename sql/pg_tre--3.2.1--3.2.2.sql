@@ -1,0 +1,9 @@
+-- pg_tre 3.2.1 -> 3.2.2 upgrade.
+--
+-- No catalog changes.  3.2.2 refreshes the vendored sparsemap library
+-- (v5.1.1 -> v5.5.0, a correctness release) and changes no SQL-visible
+-- object: `diff sql/pg_tre--3.2.1.sql sql/pg_tre--3.2.2.sql` differs
+-- only in the header comment's version string.
+--
+-- The sparsemap wire format is unchanged (still version 2), so existing
+-- indexes remain readable and no REINDEX is required.

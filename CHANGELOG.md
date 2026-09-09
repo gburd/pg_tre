@@ -6,6 +6,110 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.2] - 2026-09-09 - vendored sparsemap v5.5.0 (upstream correctness release)
+
+Library-refresh release.  The vendored sparsemap goes from **v5.1.1 to
+v5.5.0**, an upstream correctness release.  **No SQL-surface, WAL, or
+on-disk-format change**: the sparsemap wire format is unchanged (still
+version 2), so `ALTER EXTENSION pg_tre UPDATE TO '3.2.2'` is a
+metadata-only bump and **no REINDEX is required**.  Existing indexes
+remain readable byte-for-byte.
+
+The vendoring is verbatim: the only local delta is the include path
+(`sm.h` -> `pg_tre/sparsemap.h`).  All seventeen `sm_*` entry points
+pg_tre consumes keep their v5.1.1 signatures, so no call site changed.
+
+### Fixed
+
+Upstream fixed seven bugs, three of them data loss or corruption on
+ordinary inputs.  Reachability from pg_tre's own usage, honestly scoped:
+
+- **`sm_select` returned an index that was not set** at every
+  multiple-of-64 rank on a dense range -- the skip-ahead guard tested
+  `n > 64` instead of `n >= 64`, so `n = 64` returned a position one past
+  the slot it had just declined to leave.  pg_tre does not call
+  `sm_select` on the read path today, so no shipped query was affected.
+- **`sm_offset` produced structurally corrupt maps**: five independent
+  append sites each chose their own chunk start, so maps could carry
+  duplicate chunk starts, breaking the ascending-start invariant every
+  reader assumes.  Such a map failed `sm_validate`, could not be
+  deserialized from its own serialized bytes, and a related defect could
+  widen an RLE run over a later one, turning a gap into spurious set
+  bits.  pg_tre does not call `sm_offset`; the fix matters because
+  "survives its own serialize/deserialize round trip" is exactly the
+  property the on-page posting format depends on.
+- **`sm_difference` silently discarded every surviving bit when both
+  chunks were RLE** (union and intersection each had an explicit
+  both-RLE branch; difference did not).  pg_tre uses `sm_union` and
+  `sm_intersection`, not `sm_difference`, so no shipped result set was
+  wrong -- but this is the defect class a future posting-set subtraction
+  would have inherited.
+- **Big-endian hosts computed wrong answers for every counting and
+  navigation operation** since sparsemap v1.0.0.  Ten sites read a
+  packed 64-bit chunk descriptor by aliasing it with a `uint8_t *` and
+  incrementing, which walks the 2-bit flags in reverse on big-endian.
+  `sm_contains` was unaffected (it shifts the word directly), so the bug
+  hid behind a working membership test while `sm_cardinality`,
+  `sm_minimum`, `sm_maximum`, `sm_rank`, `sm_select` and `sm_scan` were
+  all wrong.  This does not affect pg_tre's supported x86_64/aarch64
+  targets, but pg_tre leans on `sm_cardinality` and `sm_next_member`, so
+  it removes a latent blocker for any big-endian port.
+- Also fixed upstream: `sm_split` overflowed a too-small destination
+  instead of returning `ENOSPC`; `sm_locator_rank` / `sm_locator_select`
+  crashed on a NULL locator; and `sm_minimum` / `sm_maximum` /
+  `sm_select` disagreed with `sm_contains` about where a
+  `SM_PAYLOAD_NONE` slot sits on maps opened from a foreign buffer.
+
+### Qualified
+
+Re-qualified on an AWS **i4i.8xlarge** (32 vCPU, 256 GB, 2x3.75 TB Nitro
+NVMe RAID-0), Amazon Linux 2023, PostgreSQL 18.0 (`-O2`, no cassert).
+See `bench/stress/RESULTS-stress-3.2.2.md`.
+
+- **Regression suite**: 41/41 pass.
+- **Upstream sparsemap suite run against pg_tre's vendored copy**: 44/44
+  API/scale tests pass, plus 175,530 coverage expectations with zero
+  failures, and clean under ASan + UBSan.  Targeted checks confirm all
+  three data-loss fixes are present in the vendored file and absent in
+  v5.1.1.
+- **Accuracy oracle** (index result set `EXCEPT` seq-scan result set,
+  both directions): **zero mismatches** on every query in every
+  scenario, including all 8 planted-token queries cold and warm against
+  a 10M-row / 12 GB index with `shared_buffers` at 4 GB.
+- **Adverse conditions**: clean build-limit error (no PANIC), CIC under
+  concurrent writes valid with 0 mismatches, cancellation honored in
+  0.08 s with no orphaned valid index, SIGKILL mid-build recovers via
+  WAL replay with 0 PANIC/corruption and the heap fully intact,
+  compile-bomb rejected in 0.01 s, and parallel vs serial builds
+  returning identical hit counts (59167) with zero stuck spinlocks.
+- **Upgrade path verified end-to-end**, not just assumed: an index built
+  under 3.2.1 (sparsemap v5.1.1) was read after `ALTER EXTENSION pg_tre
+  UPDATE TO '3.2.2'` with no REINDEX, returning identical counts and
+  **zero oracle mismatches** against a sequential scan, and then written
+  to (insert + delete + VACUUM) with correct results.  A clean
+  from-source build produced **zero warnings**.
+
+The two non-blocking findings from 3.2.1 (super-linear build throughput
+at scale; posting-leaf bloat under sustained churn that REINDEX
+reclaims) reproduce unchanged and remain documented in `LIMITATIONS.md`.
+They are pre-existing and unrelated to sparsemap.
+
+### Acknowledgements
+
+- The sparsemap project for the v5.5.0 correctness release.
+
+### Also in this release
+
+- `bench/stress/stress-suite.sh`: scenario F (SIGKILL mid-build) cleaned
+  up orphaned processes by matching `postgres.*$PGDATA`, which misses
+  parallel workers -- they retitle to `postgres: ... CREATE INDEX` and
+  carry no data-directory path.  A surviving worker held the
+  shared-memory segment and blocked the restart, so F reported a bogus
+  recovery failure and every scenario ordered after it saw a refused
+  socket.  Cleanup is now by process group, and F runs last.
+
+---
+
 ## [3.2.1] - 2026-08-28 - at-scale stress qualification; sizing/maintenance findings
 
 Qualification + documentation release.  **No C, SQL-surface, WAL, or

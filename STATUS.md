@@ -1,8 +1,23 @@
 # pg_tre status
 
-Released: **3.2.2-dev** (2026-08).  See `CHANGELOG.md` for full
+Released: **3.2.2** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+3.2.2 refreshes the vendored sparsemap from v5.1.1 to v5.5.0, an
+upstream correctness release (seven bugs; three data-loss or
+corruption on ordinary inputs, chiefly `sm_difference` dropping
+all surviving bits when both chunks were RLE, `sm_offset` emitting
+structurally invalid maps, and `sm_select` returning an unset
+index at multiple-of-64 ranks; plus a big-endian defect dating to
+v1.0.0).  Vendoring is verbatim apart from the include path, no
+consumed signature changed, and the wire format is unchanged, so
+the upgrade is metadata-only with no REINDEX.  Re-qualified on an
+i4i.8xlarge: 41/41 regression tests, upstream's own suite against
+the vendored copy (44/44 plus 175,530 coverage expectations, clean
+under ASan/UBSan), and zero accuracy-oracle mismatches across all
+stress scenarios including a 10M-row cold-cache matrix.  Results
+in `bench/stress/RESULTS-stress-3.2.2.md`.
 
 3.2.1 is a qualification + documentation release: no C, SQL, WAL,
 or on-disk-format change (metadata-only `UPDATE`, no REINDEX).

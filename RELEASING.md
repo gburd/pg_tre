@@ -180,6 +180,7 @@ restart:
 | 0.1.0   | 1.0.0   | ❌ No        | UDF-only → native AM; recreate |
 | 1.0.0   | 1.1.0   | ✅ Yes       | Same on-disk format           |
 | 1.1.0   | 1.1.1   | ✅ Yes       | sparsemap hardening only      |
+| 3.2.1   | 3.2.2   | ✅ Yes       | sparsemap v5.5.0 refresh; wire format unchanged. Verified end-to-end: index built under 3.2.1, read after `ALTER EXTENSION UPDATE` with zero oracle mismatches, then written to |
 
 When releasing a version with breaking changes:
 

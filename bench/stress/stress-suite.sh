@@ -274,10 +274,19 @@ scenario_F_crash() {
     kill -9 "$pm" 2>/dev/null
     [ -n "$pgid" ] && kill -9 -- "-$pgid" 2>/dev/null
     pkill -9 -f "postgres.*$PGDATA" 2>/dev/null
-    # Wait for the shared-memory segment / children to fully clear.
+    # Wait for the shared-memory segment / children to fully clear.  Match by
+    # process GROUP, not by command line: a parallel worker retitles itself to
+    # "postgres: ... CREATE INDEX" and does NOT carry the $PGDATA path, so a
+    # name-based pattern misses exactly the children that hold the shm segment
+    # and block restart with "pre-existing shared memory block ... in use".
     local w
-    for w in $(seq 1 15); do
-        pgrep -f "postgres.*$PGDATA" >/dev/null 2>&1 || break
+    for w in $(seq 1 30); do
+        if [ -n "$pgid" ]; then
+            pgrep -g "$pgid" >/dev/null 2>&1 || break
+            kill -9 -- "-$pgid" 2>/dev/null
+        else
+            pgrep -f "postgres.*$PGDATA" >/dev/null 2>&1 || break
+        fi
         sleep 1
     done
     rm -f "$PGDATA/postmaster.pid" 2>/dev/null
@@ -379,11 +388,14 @@ run() {
     sm "scenarios: $only  runs/query: $RUNS  results: $RESULTS"
     # Run in a fixed canonical order (read-only/analysis before mutating),
     # honoring only those requested, so a mutating scenario never pollutes a
-    # later read-only one regardless of --only argument order.
+    # later read-only one regardless of --only argument order.  F (SIGKILL)
+    # runs LAST: it is the only scenario that can leave the cluster down, and
+    # anything after it would then see a refused socket and report empty
+    # results as if it had failed.
     local _saved_ifs="$IFS" want
     IFS=','; read -r -a _req <<< "$only"; IFS="$_saved_ifs"
     want() { local x; for x in "${_req[@]}"; do [ "$x" = "$1" ] && return 0; done; return 1; }
-    for s in A B C H I J E F D G; do
+    for s in A B C H I J E D G F; do
         want "$s" || continue
         case "$s" in
             A) scenario_A_tempdisk;; B) scenario_B_memstarve;; C) scenario_C_coldcache;;
