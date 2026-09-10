@@ -63,6 +63,40 @@ SELECT count(*) AS idx_unanchored FROM surf_t WHERE body %~~ tre_pattern('refuse
            3000
 (1 row)
 
+-- (5) REGRESSION: case-insensitive anchored patterns must NOT be rejected by
+--     the SuRF prefilter.  The prefix key is derived from the pattern's
+--     literal codepoints with NO case folding, while the index stores
+--     trigrams case-sensitively, so '^ERROR' carries a key the index does not
+--     contain even though ~* genuinely matches every row.  Extraction marks
+--     these always_true (the recheck decides); the prefilter ignored that and
+--     returned ZERO rows, silently, with no error.  Reported against 3.2.2;
+--     the defect dates to the v10 SuRF tier in 3.2.0.  Each must equal its
+--     seq-scan ground truth below.
+SELECT count(*) AS idx_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+ idx_iregex_upper 
+------------------
+             3000
+(1 row)
+
+SELECT count(*) AS idx_iregex_lower FROM surf_t WHERE body ~* '^error';
+ idx_iregex_lower 
+------------------
+             3000
+(1 row)
+
+SELECT count(*) AS idx_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+ idx_ilike_upper 
+-----------------
+            3000
+(1 row)
+
+-- ...and a case-insensitive prefix that genuinely matches nothing stays 0.
+SELECT count(*) AS idx_iregex_absent FROM surf_t WHERE body ~* '^ZZQQXJ';
+ idx_iregex_absent 
+-------------------
+                 0
+(1 row)
+
 RESET enable_seqscan;
 RESET
 -- Ground-truth via sequential scan.
@@ -86,6 +120,30 @@ SELECT count(*) AS seq_unanchored FROM surf_t WHERE body %~~ tre_pattern('refuse
  seq_unanchored 
 ----------------
            3000
+(1 row)
+
+SELECT count(*) AS seq_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+ seq_iregex_upper 
+------------------
+             3000
+(1 row)
+
+SELECT count(*) AS seq_iregex_lower FROM surf_t WHERE body ~* '^error';
+ seq_iregex_lower 
+------------------
+             3000
+(1 row)
+
+SELECT count(*) AS seq_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+ seq_ilike_upper 
+-----------------
+            3000
+(1 row)
+
+SELECT count(*) AS seq_iregex_absent FROM surf_t WHERE body ~* '^ZZQQXJ';
+ seq_iregex_absent 
+-------------------
+                 0
 (1 row)
 
 RESET enable_indexscan;

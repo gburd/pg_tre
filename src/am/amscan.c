@@ -1005,6 +1005,18 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
  * overlap.  Because range_overlaps has no false negatives, a false-return
  * never hides a real match; and because the range is only set for k=0
  * anchored >=3-codepoint prefixes, a true-return is always sound.
+ *
+ * MUST also refuse to reject whenever q.always_true is set.  always_true
+ * means "the index has no usable filter information for this pattern; emit
+ * a fully-lossy bitmap and let the executor's recheck decide".  It is set
+ * for case-insensitive operators (ILIKE / ~*) -- whose matching is case
+ * folded while the index stores trigrams case-sensitively -- and by
+ * extraction when a pattern defeats tiling.  The anchored-prefix range is
+ * derived from the pattern's literal codepoints with NO case folding, so
+ * for `name ~* '^GIT'` it carries the key for "GIT" while the index
+ * legitimately stores only "git".  Rejecting on that basis returned ZERO
+ * rows for a pattern with real matches, silently and with no error.
+ * Reported against 3.2.2; the defect dates to the v10 SuRF tier in 3.2.0.
  */
 static bool
 pg_tre_surf_prefilter_rejects(IndexScanDesc scan, TreScanState *st)
@@ -1014,6 +1026,13 @@ pg_tre_surf_prefilter_rejects(IndexScanDesc scan, TreScanState *st)
     bool        rejects;
 
     if (!st->q.has_surf_range)
+        return false;
+
+    /*
+     * Never prefilter a query whose extraction is not authoritative:
+     * always_true and has_surf_range can both be set, and always_true wins.
+     */
+    if (st->q.always_true)
         return false;
 
     pg_tre_meta_read(scan->indexRelation, &meta);

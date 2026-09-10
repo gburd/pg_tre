@@ -41,6 +41,21 @@ SELECT count(*) AS idx_absent FROM surf_t WHERE body %~~ tre_pattern('^zzqqxj', 
 -- (4) a non-anchored pattern still works (no SuRF range applied).
 SELECT count(*) AS idx_unanchored FROM surf_t WHERE body %~~ tre_pattern('refused', 0);
 
+-- (5) REGRESSION: case-insensitive anchored patterns must NOT be rejected by
+--     the SuRF prefilter.  The prefix key is derived from the pattern's
+--     literal codepoints with NO case folding, while the index stores
+--     trigrams case-sensitively, so '^ERROR' carries a key the index does not
+--     contain even though ~* genuinely matches every row.  Extraction marks
+--     these always_true (the recheck decides); the prefilter ignored that and
+--     returned ZERO rows, silently, with no error.  Reported against 3.2.2;
+--     the defect dates to the v10 SuRF tier in 3.2.0.  Each must equal its
+--     seq-scan ground truth below.
+SELECT count(*) AS idx_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+SELECT count(*) AS idx_iregex_lower FROM surf_t WHERE body ~* '^error';
+SELECT count(*) AS idx_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+-- ...and a case-insensitive prefix that genuinely matches nothing stays 0.
+SELECT count(*) AS idx_iregex_absent FROM surf_t WHERE body ~* '^ZZQQXJ';
+
 RESET enable_seqscan;
 
 -- Ground-truth via sequential scan.
@@ -49,6 +64,10 @@ SET enable_bitmapscan = off;
 SELECT count(*) AS seq_exist FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
 SELECT count(*) AS seq_absent FROM surf_t WHERE body %~~ tre_pattern('^zzqqxj', 0);
 SELECT count(*) AS seq_unanchored FROM surf_t WHERE body %~~ tre_pattern('refused', 0);
+SELECT count(*) AS seq_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+SELECT count(*) AS seq_iregex_lower FROM surf_t WHERE body ~* '^error';
+SELECT count(*) AS seq_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+SELECT count(*) AS seq_iregex_absent FROM surf_t WHERE body ~* '^ZZQQXJ';
 RESET enable_indexscan;
 RESET enable_bitmapscan;
 

@@ -377,6 +377,36 @@ pg_tre_upgrade_index(PG_FUNCTION_ARGS)
 
     pg_tre_meta_set_min_format_version(index, observed_min);
 
+    /*
+     * Be explicit about what this did NOT do.  A per-page walk can flip
+     * format stamps and initialise meta fields, but it cannot synthesise
+     * whole-index structures -- notably the v10 SuRF filter, which is
+     * derived from the complete set of distinct trigram keys and so only
+     * exists after a real build.  An operator who runs this expecting
+     * "upgrade" to mean "now equivalent to a v10 index" gets a uniform
+     * format report and no filter, which looks like success.  Say so, and
+     * name the remedy, rather than letting a clean return imply more than
+     * it means.
+     */
+    {
+        PgTreMetaPageData meta;
+
+        pg_tre_meta_read(index, &meta);
+        if (meta.root_surf == InvalidBlockNumber)
+            ereport(NOTICE,
+                    (errmsg("pg_tre: index \"%s\" upgraded to page format v%u "
+                            "but has no SuRF range filter",
+                            RelationGetRelationName(index),
+                            (uint32) PG_TRE_FORMAT_VERSION_LATEST),
+                     errdetail("An in-place upgrade rewrites page headers; it "
+                               "cannot derive whole-index structures such as "
+                               "the v10 SuRF filter."),
+                     errhint("Run REINDEX INDEX CONCURRENTLY %s to build it; "
+                             "scans are correct without it, only slower for "
+                             "anchored-prefix patterns.",
+                             RelationGetRelationName(index))));
+    }
+
     index_close(index, ShareUpdateExclusiveLock);
 
     PG_RETURN_VOID();

@@ -507,8 +507,15 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
      * leading literal, record the exact first-trigram key range so the
      * scan can reject the whole index when no such trigram exists.  Only
      * at k=0 (leading bytes are not editable).
+     *
+     * Never claim a range when the extraction is already always_true: the
+     * recheck is then the only authority on matching, and the key range --
+     * derived from raw literal codepoints with NO case folding -- may not
+     * describe what the index legitimately stores.  amscan's prefilter
+     * enforces this too; both sides matter, because a range that exists is
+     * a range some future caller may consult.
      */
-    if (max_cost == 0)
+    if (max_cost == 0 && !out->always_true)
     {
         uint64  lo,
                 hi;
