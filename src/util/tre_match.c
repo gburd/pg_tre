@@ -219,3 +219,19 @@ tre_errmsg(int errcode_val)
     tre_regerror(errcode_val, NULL, buf, sizeof(buf));
     return buf;
 }
+
+/*
+ * Vendored TRE's own version, straight from the library.  Keeping this at
+ * arm's length from module.c avoids pulling <tre.h> into the SQL-facing
+ * translation unit, and asking the library beats a literal that silently
+ * goes stale when the submodule moves (as "TRE 0.9.0" did).
+ */
+const char *
+pg_tre_tre_version(void)
+{
+    char *version = NULL;
+
+    if (tre_config(TRE_CONFIG_VERSION, &version) != REG_OK || version == NULL)
+        return "unknown";
+    return version;
+}

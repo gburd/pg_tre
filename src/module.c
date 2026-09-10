@@ -809,5 +809,13 @@ PG_FUNCTION_INFO_V1(pg_tre_version);
 Datum
 pg_tre_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text(PG_TRE_VERSION_STRING " (TRE 0.9.0)"));
+    /*
+     * Report the TRE version the library actually reports, not a literal:
+     * this string read "TRE 0.9.0" for as long as it took the submodule to
+     * move 18 commits past that tag, which is exactly the sort of quiet
+     * drift an operator uses this function to rule out.
+     */
+    PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s (TRE %s)",
+                                              PG_TRE_VERSION_STRING,
+                                              pg_tre_tre_version())));
 }

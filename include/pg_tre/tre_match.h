@@ -91,4 +91,13 @@ TreMatchResult tre_do_match(void *compiled, const char *str, int str_len,
 /* Return a human-readable error message for a TRE error code. */
 const char *tre_errmsg(int errcode);
 
+/*
+ * Return the vendored TRE library's own version string (e.g. "0.9.0").
+ * Read from the library at runtime via tre_config(TRE_CONFIG_VERSION) so it
+ * cannot drift from what is actually linked -- pg_tre_version() previously
+ * hard-coded "TRE 0.9.0" and kept reporting it after the submodule moved
+ * past that tag.
+ */
+const char *pg_tre_tre_version(void);
+
 #endif /* TRE_FUNCS_H */

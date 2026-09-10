@@ -1,5 +1,5 @@
 diff --git a/lib/tre-compile.c b/lib/tre-compile.c
-index 81e9ec1..bdf8730 100644
+index 302efae..1acf411 100644
 --- a/lib/tre-compile.c
 +++ b/lib/tre-compile.c
 @@ -28,6 +28,28 @@
@@ -31,18 +31,20 @@ index 81e9ec1..bdf8730 100644
  /*
    Algorithms to setup tags so that submatch addressing can be done.
  */
-@@ -202,6 +224,10 @@ tre_add_tags(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *tree,
-       if (status != REG_OK)
- 	break;
+@@ -199,6 +221,12 @@ tre_add_tags(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *tree,
  
-+      /* pg_tre: enforce the wall-clock compile deadline. */
+   while (status == REG_OK && tre_stack_num_items(stack) > bottom)
+     {
++      /* pg_tre: enforce the wall-clock compile deadline.  Upstream now
++	 carries `status == REG_OK` in the loop condition, so the
++	 redundant inner status check this patch used to add is gone. */
 +      if (tre_compile_progress_check())
 +	{ status = REG_ESPACE; break; }
 +
        symbol = (tre_addtags_symbol_t)tre_stack_pop_int(stack);
        switch (symbol)
  	{
-@@ -674,6 +700,10 @@ tre_copy_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+@@ -671,6 +699,10 @@ tre_copy_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
        if (status != REG_OK)
  	break;
  
@@ -53,7 +55,7 @@ index 81e9ec1..bdf8730 100644
        symbol = (tre_copyast_symbol_t)tre_stack_pop_int(stack);
        switch (symbol)
  	{
-@@ -830,6 +860,12 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+@@ -827,6 +859,12 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
        tre_ast_node_t *node;
        tre_expand_ast_symbol_t symbol;
  
@@ -66,7 +68,7 @@ index 81e9ec1..bdf8730 100644
        if (status != REG_OK)
  	break;
  
-@@ -909,6 +945,10 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+@@ -906,6 +944,10 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
  		for (j = 0; j < iter->min; j++)
  		  {
  		    tre_ast_node_t *copy;
@@ -77,7 +79,7 @@ index 81e9ec1..bdf8730 100644
  		    /* Remove tags from all but the last copy. */
  		    int flags = ((j + 1 < iter->min)
  				 ? COPY_REMOVE_TAGS
-@@ -945,6 +985,9 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
+@@ -942,6 +984,9 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
  		    for (j = iter->min; j < iter->max; j++)
  		      {
  			tre_ast_node_t *copy;
@@ -87,9 +89,9 @@ index 81e9ec1..bdf8730 100644
  			pos_add_save = pos_add;
  			status = tre_copy_ast(mem, stack, iter->arg, 0,
  					      &pos_add, NULL, &copy, &max_pos);
-@@ -1210,6 +1253,10 @@ tre_match_empty(tre_stack_t *stack, tre_ast_node_t *node, int *tags,
+@@ -1207,6 +1252,10 @@ tre_match_empty(tre_stack_t *stack, tre_ast_node_t *node, int *tags,
    /* Walk through the tree recursively. */
-   while (status == REG_OK && tre_stack_num_objects(stack) > bottom)
+   while (status == REG_OK && tre_stack_num_items(stack) > bottom)
      {
 +      /* pg_tre: enforce the wall-clock compile deadline. */
 +      if (tre_compile_progress_check())
@@ -98,7 +100,7 @@ index 81e9ec1..bdf8730 100644
        node = tre_stack_pop_voidptr(stack);
  
        switch (node->type)
-@@ -1323,6 +1370,10 @@ tre_compute_npfl(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *tree,
+@@ -1320,6 +1369,10 @@ tre_compute_npfl(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *tree,
        tre_npfl_stack_symbol_t symbol;
        tre_ast_node_t *node;
  
@@ -110,7 +112,7 @@ index 81e9ec1..bdf8730 100644
        node = tre_stack_pop_voidptr(stack);
        switch (symbol)
 diff --git a/lib/tre-match-approx.c b/lib/tre-match-approx.c
-index 50664ce..2d79c52 100644
+index 837e753..4edc043 100644
 --- a/lib/tre-match-approx.c
 +++ b/lib/tre-match-approx.c
 @@ -48,6 +48,29 @@ char *alloca ();
@@ -143,7 +145,7 @@ index 50664ce..2d79c52 100644
  #define TRE_M_COST	0
  #define TRE_M_NUM_INS	1
  #define TRE_M_NUM_DEL	2
-@@ -321,6 +344,17 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, int len,
+@@ -331,6 +354,18 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
  
    while (/*CONSTCOND*/(void)1,1)
      {
@@ -158,11 +160,12 @@ index 50664ce..2d79c52 100644
 +      if (tre_progress_check())
 +	break;
 +
-       DPRINT(("%03d:%2lc/%05d\n", pos, (tre_cint_t)next_c, (int)next_c));
++      /* NB: upstream widened `pos` to ssize_t (%03zd) -- keep their format. */
+       DPRINT(("%03zd:%2lc/%05d\n", pos, (tre_cint_t)next_c, (int)next_c));
  
        /* Add initial states to `reach_next' if an exact match has not yet
 diff --git a/lib/tre-match-backtrack.c b/lib/tre-match-backtrack.c
-index 7b41e9f..c683a1f 100644
+index 7e18492..b49ae30 100644
 --- a/lib/tre-match-backtrack.c
 +++ b/lib/tre-match-backtrack.c
 @@ -72,6 +72,10 @@ char *alloca ();
@@ -176,7 +179,7 @@ index 7b41e9f..c683a1f 100644
  typedef struct {
    int pos;
    const char *str_byte;
-@@ -376,6 +380,16 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+@@ -385,6 +389,16 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
        tre_tnfa_transition_t *next_state;
        int empty_br_match;
  
@@ -194,7 +197,7 @@ index 7b41e9f..c683a1f 100644
        if (state == tnfa->final)
  	{
 diff --git a/lib/tre-match-parallel.c b/lib/tre-match-parallel.c
-index ffc7819..82e5267 100644
+index f062057..69da1a8 100644
 --- a/lib/tre-match-parallel.c
 +++ b/lib/tre-match-parallel.c
 @@ -64,6 +64,10 @@ char *alloca ();
@@ -208,7 +211,7 @@ index ffc7819..82e5267 100644
  
  
  typedef struct {
-@@ -270,6 +274,12 @@ tre_tnfa_run_parallel(const tre_tnfa_t *tnfa, const void *string, int len,
+@@ -280,6 +284,12 @@ tre_tnfa_run_parallel(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
    reach_next_i = reach_next;
    while (/*CONSTCOND*/(void)1,1)
      {
