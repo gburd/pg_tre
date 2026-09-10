@@ -6,7 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [3.2.3] - 2026-09-10 - SuRF prefilter returned zero rows for `~*` / `ILIKE`
+
+**Correctness release. Upgrade if you use `~*` or `ILIKE` with an
+anchored pattern.**  No on-disk format change and **no REINDEX
+required**: the bug is entirely in the scan path, so loading the 3.2.3
+`.so` is what corrects the answers.  If you already REINDEXed to work
+around it, that index is fine as-is.
 
 ### Fixed
 
@@ -58,6 +64,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tre_version()` now reads the TRE version from the library at runtime
   instead of a hard-coded literal, which had kept reporting "TRE 0.9.0"
   as the submodule moved past that tag.
+
+### Qualified
+
+Qualified on an AWS **i4i.8xlarge** (32 vCPU, 256 GB, NVMe RAID-0),
+PostgreSQL 18.0, built from a clean recursive clone of the tag.  Full
+results in `bench/stress/RESULTS-stress-3.2.3.md`.
+
+The primary gate is the reported scenario itself, not a synthetic test:
+an index was built with the **actual released 3.2.2** (cloned from
+Codeberg at `v3.2.2`), the bug confirmed live on it (`name ~* '^GIT'`
+returned **0** via index vs **3** via sequential scan), then the 3.2.3
+`.so` loaded and `ALTER EXTENSION ... UPDATE` run **with no REINDEX**
+against that same on-disk index: **0 -> 3, matching the sequential scan**,
+with subsequent writes into the still-old-format index also correct.
+
+- **41/41** regression tests; clean build with **zero warnings**.
+- Every case-insensitive anchored shape agrees exactly with sequential
+  scan at 1M rows (`~* '^GOVERNMENT'`, `~* '^GoVeRnMeNt'`, `ILIKE
+  'GOVERNMENT%'` all 71,968; a genuinely-absent prefix still 0 -- the fix
+  is not "stop filtering").
+- **The acceleration is preserved, not disabled**: anchored-absent reject
+  p50 stays **0.060 ms** at 1M rows, identical to the 3.2.2 baseline, and
+  case-*sensitive* absent prefixes still short-circuit.
+- Stress C/D/E/G/H/I/J: **zero accuracy-oracle mismatches** throughout,
+  identical parallel-vs-serial hit counts (59,167), 0 stuck spinlocks,
+  compile bomb rejected in 0.00 s.
+- TRE's timeout hooks counted rather than assumed (a silently orphaned
+  hook would disable `pg_tre.compile_timeout_ms` while leaving every test
+  green): compile abort honored, both matchers reached at 200,000
+  calls, abort short-circuits 200,000 -> 1.  Upstream TRE's own suite
+  passes with our patch applied: **107,091/107,091**, no leaks.
+
+Note: `ILIKE 'GIT%'` did *not* reproduce the failure on 3.2.2 -- its
+extraction reaches the prefilter differently -- so an operator
+smoke-testing only with `ILIKE` would have seen a clean bill of health on
+a broken build.
+
+The two pre-existing findings (super-linear build throughput; posting-leaf
+bloat under churn that REINDEX reclaims) reproduce unchanged and are
+unrelated to this release.
 
 ---
 

@@ -180,7 +180,8 @@ restart:
 | 0.1.0   | 1.0.0   | ❌ No        | UDF-only → native AM; recreate |
 | 1.0.0   | 1.1.0   | ✅ Yes       | Same on-disk format           |
 | 1.1.0   | 1.1.1   | ✅ Yes       | sparsemap hardening only      |
-| 3.2.1   | 3.2.2   | ✅ Yes       | sparsemap v5.5.0 refresh; wire format unchanged. Verified end-to-end: index built under 3.2.1, read after `ALTER EXTENSION UPDATE` with zero oracle mismatches, then written to |
+| 3.2.1   | 3.2.2   | ⚠️ Yes, but  | sparsemap wire format unchanged and no REINDEX needed, but `~*`/`ILIKE` anchored queries return zero rows on this version (pre-existing 3.2.0 defect) — go straight to 3.2.3 |
+| 3.2.2   | 3.2.3   | ✅ Yes       | Read-path fix only; no on-disk change, no REINDEX. Loading the new `.so` corrects the answers |
 
 When releasing a version with breaking changes:
 

@@ -1,0 +1,11 @@
+-- pg_tre 3.2.2 -> 3.2.3 upgrade.
+--
+-- No catalog changes.  3.2.3 is a correctness release: it fixes an index
+-- read-path bug (the v10 SuRF prefilter rejected case-insensitive
+-- anchored patterns, returning zero rows) and bumps the vendored TRE
+-- library.  `diff sql/pg_tre--3.2.2.sql sql/pg_tre--3.2.3.sql` differs
+-- only in the header comment's version string.
+--
+-- No on-disk format change and NO REINDEX required.  The fix is entirely
+-- in the scan path: loading the 3.2.3 .so is what corrects the answers.
+-- If you REINDEXed to work around the bug, that index is also fine as-is.
