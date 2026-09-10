@@ -144,6 +144,22 @@ typedef struct TrigramQuery
      * HARD requirement of the pattern (only set for k=0 anchored literals
      * with >= 3 leading codepoints), never a heuristic -- so applying it
      * can never drop a true match.
+     *
+     * ...with one precondition, learned the hard way: the range describes
+     * the pattern's literal codepoints VERBATIM, with no case folding, so
+     * it only characterises the index's contents when the comparison
+     * itself is case-sensitive.  A consumer MUST therefore ignore this
+     * range whenever always_true is set -- which is how amrescan marks
+     * the case-insensitive strategies (ILIKE / IREGEX), precisely because
+     * their matching is case-folded while the index stores trigrams as
+     * written.  Both invariants are enforced (extraction refuses to
+     * publish a range once always_true, and the prefilter re-checks), but
+     * any new consumer of these fields owes the same check:
+     *
+     *     if (q.always_true) -> the range says NOTHING; do not reject.
+     *
+     * Skipping it made `name ~* '^GIT'` return zero rows against an index
+     * legitimately holding "git" -- silently, for two releases.
      */
     bool              has_surf_range;
     uint64            surf_lo;

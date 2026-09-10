@@ -6,6 +6,61 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Index scans could silently return ZERO rows for case-insensitive
+  anchored patterns** (`~*` / `ILIKE` on a `^prefix`).  No error, no
+  warning -- just an empty result set for a query with real matches.
+  Reported by the solnix.io infra team against 3.2.2; the defect dates to
+  the **v10 SuRF tier in 3.2.0** and affected every release since.
+
+  `amrescan` marks the case-insensitive strategies `always_true` (the
+  index stores trigrams case-sensitively, so these cannot be
+  trigram-accelerated and must fall through to a lossy bitmap plus the
+  executor's recheck), but it does so *after* extraction has already
+  recorded an anchored-prefix trigram-key range -- and the SuRF prefilter
+  consulted only that range.  The range is built from the pattern's
+  literal codepoints with no case folding, so `name ~* '^GIT'` carried
+  the key for `"GIT"` while the index legitimately stored only `"git"`;
+  the filter correctly answered "no such key" and the scan returned
+  nothing.  Fixed in the shared prefilter, so both the bitmap and KNN
+  paths are covered by one guard; extraction also no longer publishes a
+  range it cannot justify.  Read-path only: **no on-disk change, no
+  REINDEX**.
+
+  The acceleration is preserved rather than disabled -- case-*sensitive*
+  absent prefixes still short-circuit in ~0.06 ms.
+
+  `test/sql/surf_prefix.sql` only ever exercised `%~~` (case-sensitive),
+  which is why CI stayed green through two releases; it now checks every
+  `~*` / `ILIKE` variant against its sequential-scan ground truth.
+
+- `pg_tre_upgrade_index()` now emits a **NOTICE** when it completes with
+  no SuRF filter, explaining that a per-page walk cannot derive
+  whole-index structures and pointing at `REINDEX INDEX CONCURRENTLY`.
+  It previously returned cleanly and reported a uniform v10 format while
+  leaving the filter unbuilt, which reasonably reads as "fully upgraded".
+
+### Changed
+
+- Vendored **TRE bumped to upstream master `f864ed0`**, 18 commits past
+  v0.9.0 (still the newest tag), for upstream's hardening work: integer
+  overflow on inputs past `INT_MAX` that could crash or return incorrect
+  results, a hard regex-length limit and exponential stack growth, a
+  backref backtracking-restart fix, and a bad `xcalloc` element size.
+  `patches/tre-progress-hook.patch` -- which *is* pg_tre's compile/match
+  timeout enforcement -- was rebased onto the rewritten tree and its
+  hooks verified still live (a silently orphaned hook would defang the
+  DoS guards while leaving every test green).  Upstream's own suite
+  passes with the patch applied: 107,091/107,091, no leaks.
+- `tre_version()` now reads the TRE version from the library at runtime
+  instead of a hard-coded literal, which had kept reporting "TRE 0.9.0"
+  as the submodule moved past that tag.
+
+---
+
 ## [3.2.2] - 2026-09-09 - vendored sparsemap v5.5.0 (upstream correctness release)
 
 Library-refresh release.  The vendored sparsemap goes from **v5.1.1 to
@@ -88,6 +143,21 @@ See `bench/stress/RESULTS-stress-3.2.2.md`.
   **zero oracle mismatches** against a sequential scan, and then written
   to (insert + delete + VACUUM) with correct results.  A clean
   from-source build produced **zero warnings**.
+
+> **CORRECTION (2026-09-10).** The "no REINDEX required / readable
+> byte-for-byte" statement above is accurate *about the sparsemap wire
+> format*, and the upgrade verification really was run -- but it did not
+> cover case-insensitive queries, and a pre-existing bug made `~*` /
+> `ILIKE` on an anchored prefix return **zero rows** on any index whose
+> SuRF filter lacked the (unfolded) prefix key.  Operators upgrading to
+> 3.2.2 could therefore see silently empty results, which is what the
+> claim was meant to rule out.  The bug is a **read-path defect dating to
+> 3.2.0**, not a format change: 3.2.2 neither introduced nor worsened it,
+> and REINDEX "fixed" it only by building a SuRF containing the queried
+> keys.  See the Unreleased `### Fixed` entry.  The verification gap was
+> mine: I A/B'd the sparsemap wire format thoroughly and treated "the
+> upgrade" as synonymous with it, when the release's actual risk surface
+> was every query shape against an old index.
 
 The two non-blocking findings from 3.2.1 (super-linear build throughput
 at scale; posting-leaf bloat under sustained churn that REINDEX
