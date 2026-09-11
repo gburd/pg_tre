@@ -56,6 +56,17 @@ typedef struct TokenizerState
 	TokenizerMode mode;
 	int         bracket_depth;
 	int         brace_depth;
+	/*
+	 * Byte offset of the first member position of the current bracket
+	 * expression, i.e. just past '[' and any leading '^'.  POSIX makes '-'
+	 * a literal (not a range operator) when it is the FIRST or LAST member
+	 * of a bracket expression, so `[-_]`, `[abc-]` and `[-]` are all valid
+	 * and mean a literal dash.  Emitting TOK_DASH unconditionally left the
+	 * grammar unable to reduce them and the whole pattern was rejected as
+	 * "invalid regex pattern" -- which took out a caller's word-boundary
+	 * pattern `(^|[-_.])git([-_.0-9]|$)` entirely.
+	 */
+	int         bracket_first;
 } TokenizerState;
 
 /*
@@ -70,6 +81,7 @@ init_tokenizer(TokenizerState *ts, const char *input, int len)
 	ts->mode = MODE_NORMAL;
 	ts->bracket_depth = 0;
 	ts->brace_depth = 0;
+	ts->bracket_first = -1;
 }
 
 /*
@@ -227,12 +239,32 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 		}
 		else if (c == '-')
 		{
+			/*
+			 * POSIX: '-' is a range operator only BETWEEN two members.
+			 * First or last in the bracket expression it is a literal, so
+			 * `[-_.]`, `[abc-]` and `[-]` are legal.  ts->pos already points
+			 * past this '-', so "last" means the next char closes the
+			 * expression.
+			 */
+			bool at_first = (ts->bracket_first >= 0 &&
+			                 ts->pos - 1 == ts->bracket_first);
+			bool at_last = (ts->pos < ts->len && ts->input[ts->pos] == ']');
+
+			if (at_first || at_last)
+			{
+				out->cp = '-';
+				return TOK_LITERAL;
+			}
 			return TOK_DASH;
 		}
 		else if (c == '^')
 		{
 			/* ^ is CARET only at the start of the bracket expression */
 			/* We'll let the parser handle the context */
+			/* A negating '^' shifts where the first member begins, so a
+			 * following '-' is still "first" (POSIX: `[^-x]`). */
+			if (ts->bracket_first >= 0 && ts->pos - 1 == ts->bracket_first)
+				ts->bracket_first = ts->pos;
 			return TOK_CARET;
 		}
 		else if (c == '\\')
@@ -325,6 +357,7 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 		case '[':
 			ts->bracket_depth++;
 			ts->mode = MODE_BRACKET;
+			ts->bracket_first = ts->pos;   /* first member starts here */
 			return TOK_LBRACKET;
 
 		case '{':

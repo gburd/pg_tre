@@ -1046,6 +1046,22 @@ pg_tre_surf_prefilter_rejects(IndexScanDesc scan, TreScanState *st)
     rejects = !pg_tre_surf_range_overlaps(surf, st->q.surf_lo, st->q.surf_hi);
     pg_tre_surf_free(surf);
 
+    /*
+     * Guard the invariant that makes a rejection sound.  A rejection is only
+     * valid if the key range genuinely characterises what the index stores,
+     * and the only thing establishing that is the always_true check above.
+     * Assert it so a future change letting an unfoldable pattern through
+     * fails loudly in an assert-enabled build (CI, the sanitizer job) rather
+     * than silently returning an empty result set in production -- the
+     * failure mode that cost this caller three rounds.
+     *
+     * Deliberately NOT ereport(ERROR): a genuinely-absent prefix must still
+     * return zero rows, so erroring here would break correct queries.  The
+     * honest split is that "empty" is right when the range is trustworthy;
+     * the bug was ever trusting it for a case-folded comparison.
+     */
+    Assert(!st->q.always_true);
+
     if (rejects)
         ereport(DEBUG1,
                 (errmsg("pg_tre: SuRF prefilter rejected scan "

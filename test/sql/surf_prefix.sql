@@ -50,11 +50,33 @@ SELECT count(*) AS idx_unanchored FROM surf_t WHERE body %~~ tre_pattern('refuse
 --     returned ZERO rows, silently, with no error.  Reported against 3.2.2;
 --     the defect dates to the v10 SuRF tier in 3.2.0.  Each must equal its
 --     seq-scan ground truth below.
+--
+--     Parameterised over pattern CASING, per the 3.2.4 field report: an
+--     all-lowercase pattern exercises a different route than one containing
+--     an uppercase byte, so testing only '^error' (or only '^ERROR') leaves
+--     half the matrix uncovered.  All four spellings must agree.
 SELECT count(*) AS idx_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
 SELECT count(*) AS idx_iregex_lower FROM surf_t WHERE body ~* '^error';
+SELECT count(*) AS idx_iregex_title FROM surf_t WHERE body ~* '^Error';
+SELECT count(*) AS idx_iregex_mixed FROM surf_t WHERE body ~* '^eRrOr';
 SELECT count(*) AS idx_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+SELECT count(*) AS idx_ilike_lower  FROM surf_t WHERE body ILIKE 'error%';
+SELECT count(*) AS idx_ilike_title  FROM surf_t WHERE body ILIKE 'Error%';
 -- ...and a case-insensitive prefix that genuinely matches nothing stays 0.
 SELECT count(*) AS idx_iregex_absent FROM surf_t WHERE body ~* '^ZZQQXJ';
+SELECT count(*) AS idx_iregex_absent_up FROM surf_t WHERE body ~* '^ZzQqXj';
+
+-- (6) REGRESSION: a literal '-' first or last in a bracket expression is a
+--     POSIX literal, not a range operator.  The tokenizer emitted TOK_DASH
+--     unconditionally, so the grammar could not reduce `[-_.]` and the whole
+--     pattern was rejected with "invalid regex pattern" -- which took out a
+--     caller's word-boundary pattern `(^|[-_.])git([-_.0-9]|$)` entirely.
+--     These must return rows, not ERROR, and match the seq-scan truth.
+SELECT count(*) AS idx_dash_lead  FROM surf_t WHERE body ~ '[-_.]error';
+SELECT count(*) AS idx_dash_trail FROM surf_t WHERE body ~ '[error-]';
+SELECT count(*) AS idx_dash_only  FROM surf_t WHERE body ~ '[-]';
+SELECT count(*) AS idx_dash_neg   FROM surf_t WHERE body ~ '[^-x]error';
+SELECT count(*) AS idx_wordbound  FROM surf_t WHERE body ~* '(^|[-_.])error([-_.0-9]|$)';
 
 RESET enable_seqscan;
 
@@ -66,8 +88,18 @@ SELECT count(*) AS seq_absent FROM surf_t WHERE body %~~ tre_pattern('^zzqqxj', 
 SELECT count(*) AS seq_unanchored FROM surf_t WHERE body %~~ tre_pattern('refused', 0);
 SELECT count(*) AS seq_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
 SELECT count(*) AS seq_iregex_lower FROM surf_t WHERE body ~* '^error';
+SELECT count(*) AS seq_iregex_title FROM surf_t WHERE body ~* '^Error';
+SELECT count(*) AS seq_iregex_mixed FROM surf_t WHERE body ~* '^eRrOr';
 SELECT count(*) AS seq_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+SELECT count(*) AS seq_ilike_lower  FROM surf_t WHERE body ILIKE 'error%';
+SELECT count(*) AS seq_ilike_title  FROM surf_t WHERE body ILIKE 'Error%';
 SELECT count(*) AS seq_iregex_absent FROM surf_t WHERE body ~* '^ZZQQXJ';
+SELECT count(*) AS seq_iregex_absent_up FROM surf_t WHERE body ~* '^ZzQqXj';
+SELECT count(*) AS seq_dash_lead  FROM surf_t WHERE body ~ '[-_.]error';
+SELECT count(*) AS seq_dash_trail FROM surf_t WHERE body ~ '[error-]';
+SELECT count(*) AS seq_dash_only  FROM surf_t WHERE body ~ '[-]';
+SELECT count(*) AS seq_dash_neg   FROM surf_t WHERE body ~ '[^-x]error';
+SELECT count(*) AS seq_wordbound  FROM surf_t WHERE body ~* '(^|[-_.])error([-_.0-9]|$)';
 RESET enable_indexscan;
 RESET enable_bitmapscan;
 
