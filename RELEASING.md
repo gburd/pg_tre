@@ -195,6 +195,7 @@ restart:
 | 3.2.1   | 3.2.2   | ⚠️ Yes, but  | sparsemap wire format unchanged and no REINDEX needed, but `~*`/`ILIKE` anchored queries return zero rows on this version (pre-existing 3.2.0 defect) — go straight to 3.2.3 |
 | 3.2.2   | 3.2.3   | ⚠️ Yes, but  | Read-path fix, no REINDEX — but v3.2.3 cannot be built via the Nix flake; go straight to 3.2.4 |
 | 3.2.3   | 3.2.4   | ✅ Yes       | Packaging fix only; no C/SQL/on-disk change, no REINDEX |
+| 3.2.4   | 3.2.5   | ✅ Yes       | Tokenizer fix; no on-disk change, no REINDEX |
 
 When releasing a version with breaking changes:
 

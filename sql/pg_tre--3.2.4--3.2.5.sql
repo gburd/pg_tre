@@ -1,0 +1,10 @@
+-- pg_tre 3.2.4 -> 3.2.5 upgrade.
+--
+-- No catalog changes.  3.2.5 fixes a regex-tokenizer bug: a literal '-'
+-- first or last in a bracket expression (`[-_.]`, `[abc-]`, `[-]`,
+-- `[^-x]` -- all valid POSIX) was rejected with "invalid regex pattern"
+-- instead of matching.  Scan-path only; `diff sql/pg_tre--3.2.4.sql
+-- sql/pg_tre--3.2.5.sql` differs only in the header comment.
+--
+-- No on-disk format change and NO REINDEX required.  Patterns that
+-- previously ERRORed simply start working once the new .so is loaded.

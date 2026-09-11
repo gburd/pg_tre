@@ -6,6 +6,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.5] - 2026-09-11 - literal '-' in a bracket expression was rejected
+
+Scan-path fix.  No on-disk format change, **no REINDEX**: patterns that
+previously ERRORed start working once the new `.so` is loaded.
+
+### Fixed
+
+- **A literal `-` first or last in a bracket expression was rejected** with
+  `pg_tre: invalid regex pattern` instead of matching.  POSIX makes `-` a
+  range operator only *between* two members; first or last it is a
+  literal, so `[-_.]`, `[abc-]`, `[-]` and `[^-x]` are all valid.  The
+  tokenizer emitted `TOK_DASH` unconditionally inside a bracket, leaving
+  the grammar unable to reduce them.
+
+  Found while reproducing a field report about casing: the reporter's
+  production word-boundary pattern is `(^|[-_.])git([-_.0-9]|$)`, which
+  contains two such classes, so **every query in their regex ranking tier
+  ERRORed on the index path**.  They had not isolated this and their report
+  was about something else -- it is a distinct bug, and the one actually
+  affecting them on 3.2.4.
+
+  Fixed in the tokenizer, where the positional context lives; a leading
+  negating `^` is accounted for, and ranges are unaffected.
+
+### Changed
+
+- `test/sql/surf_prefix.sql` now parameterises the `~*` / `ILIKE` cases over
+  pattern **casing** (lower / UPPER / Title / mIxEd), per the reporter's
+  ask.  The prior cases used only `'^error'` and `'^ERROR'`; their point
+  that a casing-blind suite could stay green while a casing bug survives is
+  correct in general, and cheap to close.
+- `Assert(!st->q.always_true)` added in the SuRF prefilter.  A rejection is
+  only sound because `always_true` was checked, so asserting it makes a
+  future regression fail loudly in an assert-enabled build instead of
+  silently returning an empty result set.
+
+  Deliberately **not** an `ereport(ERROR)` (their ask #3): a genuinely
+  absent prefix must still return zero rows, so erroring there would break
+  correct queries.  "Empty" is the right answer when the range is
+  trustworthy; the bug was ever trusting it for a case-folded comparison.
+
+### Not a bug in 3.2.4
+
+The reported symptom -- `~* '^GIT'` returning zero rows while `~* '^git'`
+works -- **does not reproduce on 3.2.4**, and the guard that prevents it has
+been present since 3.2.3.  Reproduced their full index history (built and
+REINDEXed under a real 3.2.2 build, then `ALTER EXTENSION` to 3.2.4) and all
+four casings agree with sequential scan.  Removing the 3.2.3 guard from the
+source reproduces their matrix exactly -- lowercase OK, uppercase MISMATCH
+-- which identifies what they are running: **a binary without the fix.**
+
+Their `infra/k8s/pg18-image/flake.nix` pins pg_tre as
+`git+https://codeberg.org/gregburd/pg_tre?submodules=1` with no `ref`, and
+its `flake.lock` holds `b8bb8bb` -- **pg_tre 3.0.1**, from before the SuRF
+tier existed.  Their `pg18-exts-image` correctly pins `v3.2.4`
+(`686d84b`).  Two images, two versions; the stale one serves the queries
+they tested.  `nix flake update pg_tre` in that image, or pin it to a tag,
+resolves it.
+
+---
+
 ## [3.2.4] - 2026-09-11 - v3.2.3 could not be built via the flake
 
 **Packaging fix. Take this instead of 3.2.3.**  v3.2.3 fails to build via

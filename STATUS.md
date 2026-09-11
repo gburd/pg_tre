@@ -1,8 +1,19 @@
 # pg_tre status
 
-Released: **3.2.4** (2026-09).  See `CHANGELOG.md` for full
+Released: **3.2.5** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+3.2.5 fixes a regex-tokenizer bug: a literal `-` first or last in
+a bracket expression (`[-_.]`, `[abc-]`, `[-]`, `[^-x]` -- all
+valid POSIX) was rejected as an invalid pattern instead of
+matching, so any query using such a class ERRORed on the index
+path.  Found while reproducing a field report about casing; it is
+a distinct bug and the one actually affecting that reporter.
+Scan-path only: no on-disk change, no REINDEX.  The casing symptom
+they reported does not reproduce on 3.2.4 -- the guard has been in
+since 3.2.3, and their deployment is running a stale pin (3.0.1)
+from a second container image.  See `CHANGELOG.md`.
 
 3.2.4 is a packaging fix: v3.2.3 could not be built via the Nix
 flake at all (flake.nix pinned a TRE rev older than the vendored
