@@ -77,17 +77,17 @@
     "tre-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1726831540,
-        "narHash": "sha256-5O8yqzv+SR8x0X7GtC2Pjo94gp0799M2Va8wJ4EKyf8=",
+        "lastModified": 1778148365,
+        "narHash": "sha256-VCt2p6KodeBywPJTHSaUBZSSMDQoLy3ZhGIMZzrukE0=",
         "owner": "laurikari",
         "repo": "tre",
-        "rev": "d0e0c997336b3210f05b3e1daa7bb5cb9900d274",
+        "rev": "f864ed08a7499865c75b8b59c0cf39a9d59133fe",
         "type": "github"
       },
       "original": {
         "owner": "laurikari",
         "repo": "tre",
-        "rev": "d0e0c997336b3210f05b3e1daa7bb5cb9900d274",
+        "rev": "f864ed08a7499865c75b8b59c0cf39a9d59133fe",
         "type": "github"
       }
     }

@@ -81,6 +81,30 @@ if git ls-files | grep -E '\.(o|so|dylib)$'; then
     exit 1
 fi
 
+echo "==> Checking flake pins match the submodules"
+# The flake pins vendored sources as its own inputs instead of using
+# ?submodules=1, so every vendored rev has two sources of truth.  When they
+# diverged, `make` built fine and passed 41/41 while `nix build` died in
+# patchPhase -- v3.2.3 shipped that way.  A release must not.
+if ! bash scripts/flake-check-revs.sh; then
+    echo "FAIL: flake.nix and the submodules disagree" >&2
+    exit 1
+fi
+
+echo "==> Flake build (the path consumers actually use)"
+# Building via PGXS is not evidence that the flake builds: they take
+# different routes to the vendored TRE tree and apply the patch differently
+# (git apply vs patch(1)).  Skip only if nix is unavailable.
+if command -v nix >/dev/null 2>&1; then
+    if ! nix build ".#pg18" --no-link 2>&1 | tail -20; then
+        echo "FAIL: nix build .#pg18 failed" >&2
+        exit 1
+    fi
+    echo "    nix build .#pg18 ok"
+else
+    echo "    Skipped (nix not found) -- CI's nix job is then the only gate"
+fi
+
 echo "==> Checking STATUS.md is up to date"
 if ! grep -qE "Released:|## What ships" STATUS.md; then
     echo "WARN: STATUS.md may be stale"

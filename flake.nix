@@ -12,7 +12,14 @@
     # failed for downstream deployers.  Update these revs in lockstep
     # with the submodules.
     tre-src = {
-      url = "github:laurikari/tre/d0e0c997336b3210f05b3e1daa7bb5cb9900d274";
+      # MUST match vendor/tre exactly: patches/tre-progress-hook.patch is
+      # generated against a specific TRE tree, so a tre-src that lags the
+      # submodule makes the patch fail in patchPhase and the flake build
+      # dies -- while `make` from a git checkout (which uses the real
+      # submodule) still succeeds.  That split shipped a flake-unbuildable
+      # v3.2.3.  `make flake-check-revs` compares them; CI runs it.
+      # Currently: upstream master, 18 commits past v0.9.0.
+      url = "github:laurikari/tre/f864ed08a7499865c75b8b59c0cf39a9d59133fe";
       flake = false;
     };
     lime-src = {
@@ -47,7 +54,21 @@
           in
           pkgs.stdenv.mkDerivation {
             pname = "pg_tre";
-            version = "3.0.2";
+            # Read the version from pg_tre.control rather than duplicating it
+            # here.  A literal drifted silently from 3.0.2 through three
+            # releases, so `nix build` produced a derivation named
+            # pg_tre-3.0.2 for 3.2.3 -- which sent a downstream deployer
+            # hunting a 3.0.2 problem that did not exist.  Parsed from the
+            # file PostgreSQL itself treats as authoritative.
+            version =
+              let
+                control = builtins.readFile ./pg_tre.control;
+                m = builtins.match
+                  ".*default_version[[:space:]]*=[[:space:]]*'([^']+)'.*" control;
+              in
+              if m == null
+              then throw "pg_tre: cannot parse default_version from pg_tre.control"
+              else builtins.head m;
 
             # The vendored submodules (vendor/tre, vendor/lime) are pinned
             # as flake inputs and copied in during postPatch, so this build

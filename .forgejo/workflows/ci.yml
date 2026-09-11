@@ -168,6 +168,20 @@ jobs:
               exit 1
           fi
 
+      - name: Verify flake pins match the submodule gitlinks
+        run: |
+          # The flake pins vendor/tre and vendor/lime as its own inputs
+          # rather than using ?submodules=1, so every vendored rev has two
+          # sources of truth.  When they diverged, `make` built fine and
+          # passed 41/41 tests while `nix build .#pg18` died in patchPhase
+          # (the TRE progress-hook patch is generated against one specific
+          # TRE tree).  v3.2.3 shipped exactly that way.
+          #
+          # The GitHub mirror had this check, but GitHub is a push-mirror of
+          # Codeberg and mirror syncs do not fire push events -- so it never
+          # ran on the release.  It belongs here, where CI actually runs.
+          bash scripts/flake-check-revs.sh
+
       - name: Verify STATUS.md is populated
         run: |
           test -s STATUS.md && grep -qE "Released:|## What ships" STATUS.md
