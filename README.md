@@ -2,7 +2,7 @@
 
 **PostgreSQL 18+ native index access method for approximate regex matching.**
 
-[![Status](https://img.shields.io/badge/status-3.2.3_released-green)](STATUS.md)
+[![Status](https://img.shields.io/badge/status-3.2.4_released-green)](STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
 

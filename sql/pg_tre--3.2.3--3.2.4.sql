@@ -1,0 +1,14 @@
+-- pg_tre 3.2.3 -> 3.2.4 upgrade.
+--
+-- No catalog changes.  3.2.4 is a packaging fix: v3.2.3 could not be built
+-- via the Nix flake at all (flake.nix pinned a TRE rev older than the
+-- vendored submodule, so the progress-hook patch failed to apply), and its
+-- derivation carried a stale "3.0.2" version string.  No C, SQL, WAL, or
+-- on-disk change: `diff sql/pg_tre--3.2.3.sql sql/pg_tre--3.2.4.sql`
+-- differs only in the header comment's version string.
+--
+-- If you are already running 3.2.3 (built from a git checkout via `make`,
+-- which was unaffected), this upgrade changes nothing functionally.  If you
+-- could not install 3.2.3 because the flake build failed, 3.2.4 is that
+-- same release plus a buildable package -- including the ~* / ILIKE
+-- SuRF-prefilter correctness fix.  No REINDEX required.

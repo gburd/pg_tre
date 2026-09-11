@@ -105,8 +105,20 @@ PG_CONFIG=$HOME/.pgrx/18.3/pgrx-install/bin/pg_config \
 ```
 
 Verifies a clean build with zero warnings, the regression suite
-passes, the bench smoke completes, and no committed binaries
-landed.
+passes, the bench smoke completes, no committed binaries landed,
+the flake's vendored-source pins match the submodules, and
+**`nix build .#pg18` succeeds**.
+
+The flake build is not redundant with the PGXS build. The flake
+pins `vendor/tre` and `vendor/lime` as its own inputs (it does not
+use `?submodules=1`), so each vendored rev has two sources of
+truth, and it applies `patches/tre-progress-hook.patch` with
+`patch(1)` rather than the Makefile's `git apply`. v3.2.3 shipped
+unbuildable-by-flake while passing 41/41 tests twice under `make`,
+because a TRE submodule bump was not mirrored into `flake.nix`.
+If you change anything under `vendor/`, `patches/`, or
+`flake.nix`, run the flake build before tagging even if the test
+suite is green.
 
 ### 6. Open the PR and tag
 
@@ -181,7 +193,8 @@ restart:
 | 1.0.0   | 1.1.0   | ✅ Yes       | Same on-disk format           |
 | 1.1.0   | 1.1.1   | ✅ Yes       | sparsemap hardening only      |
 | 3.2.1   | 3.2.2   | ⚠️ Yes, but  | sparsemap wire format unchanged and no REINDEX needed, but `~*`/`ILIKE` anchored queries return zero rows on this version (pre-existing 3.2.0 defect) — go straight to 3.2.3 |
-| 3.2.2   | 3.2.3   | ✅ Yes       | Read-path fix only; no on-disk change, no REINDEX. Loading the new `.so` corrects the answers |
+| 3.2.2   | 3.2.3   | ⚠️ Yes, but  | Read-path fix, no REINDEX — but v3.2.3 cannot be built via the Nix flake; go straight to 3.2.4 |
+| 3.2.3   | 3.2.4   | ✅ Yes       | Packaging fix only; no C/SQL/on-disk change, no REINDEX |
 
 When releasing a version with breaking changes:
 

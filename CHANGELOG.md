@@ -6,6 +6,70 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.4] - 2026-09-11 - v3.2.3 could not be built via the flake
+
+**Packaging fix. Take this instead of 3.2.3.**  v3.2.3 fails to build via
+the Nix flake, so the correctness fix it shipped could not be consumed at
+all by Nix-based deployments.  A `make` build from a git checkout was
+unaffected -- which is exactly why it got past me.
+
+No C, SQL, WAL, or on-disk change from 3.2.3; no REINDEX.  If you are
+already running 3.2.3 this changes nothing functionally.  If you could not
+install it, this is that release plus a buildable package.
+
+### Fixed
+
+- **`nix build .#pg18` failed in patchPhase on v3.2.3**: the vendored TRE
+  progress-hook patch no longer applied (`lib/tre-compile.c` hunk #2,
+  `lib/tre-match-approx.c` hunk #2).  Reported by the solnix.io infra
+  team, who established it was our bug rather than their packaging by
+  building our flake standalone.
+
+  The patch was not stale -- refreshing it, the obvious reading of the
+  symptom, would have been the wrong fix.  The flake avoids
+  `?submodules=1` by pinning each vendored source as its own flake input,
+  so every vendored rev has **two** sources of truth.  The 3.2.3 TRE bump
+  moved `vendor/tre` to upstream master and rebased the patch onto it, but
+  left `tre-src` at the old v0.9.0 rev -- so `make` used the real
+  submodule and built fine while the flake fed the patch a tree the patch
+  was never generated against.  Now synced (and `flake.lock` updated).
+
+- **The derivation was named `pg_tre-3.0.2` on every release since 3.0.2.**
+  `flake.nix` hard-coded the version, so a failing 3.2.3 build reported
+  `pg_tre-3.0.2.drv` and sent the reporter hunting a 3.0.2 problem that did
+  not exist; it also made store paths collide across releases.  The version
+  is now parsed from `pg_tre.control`, so it cannot drift again.
+
+### Added
+
+- `scripts/flake-check-revs.sh` compares every flake input against the
+  submodule gitlink it shadows and rejects a hard-coded version literal.
+  Verified to **fail on v3.2.3** and pass here -- a check that cannot fail
+  on the bug it targets is not a check.
+- `scripts/release-check.sh` now runs that comparison **and `nix build
+  .#pg18`**.  Building via PGXS is not evidence the flake builds: the two
+  take different routes to the vendored tree and apply the patch with
+  different tools (`git apply` vs `patch(1)`).  This is the gate that was
+  missing, and its absence is the whole reason 3.2.3 shipped broken.
+- The Codeberg (Forgejo) CI gained the flake-drift check.  The GitHub
+  mirror already had an equivalent one that would have caught this, but
+  GitHub is a push-mirror and mirror syncs do not fire `push` events, so it
+  never ran on the release -- a limitation documented in that workflow's
+  own comments.  The check now lives where CI actually executes.
+
+### Qualified
+
+- `nix build .#pg18` and `.#pg17` both succeed and produce
+  `pg_tre-3.2.4`; `nix flake check` passes.
+- The reporter's own reproducer was run against the **nix-built artifact**
+  in an overlay-`pkglibdir` cluster: the extension loads
+  (`tre_version()` -> `pg_tre 3.2.4`), and `name ~* '^GIT'` returns 3 via
+  `Index Scan using packages_name_tre`, matching the forced sequential
+  scan.  Verifying the package builds *and* that the shipped fix works
+  through that package is the step 3.2.3 lacked.
+
+---
+
 ## [3.2.3] - 2026-09-10 - SuRF prefilter returned zero rows for `~*` / `ILIKE`
 
 **Correctness release. Upgrade if you use `~*` or `ILIKE` with an

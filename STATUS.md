@@ -1,8 +1,18 @@
 # pg_tre status
 
-Released: **3.2.3** (2026-09).  See `CHANGELOG.md` for full
+Released: **3.2.4** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+3.2.4 is a packaging fix: v3.2.3 could not be built via the Nix
+flake at all (flake.nix pinned a TRE rev older than the vendored
+submodule, so the progress-hook patch failed to apply), and its
+derivation carried a stale "3.0.2" version string.  A `make` build
+from a git checkout was unaffected, which is why it got past
+qualification -- `scripts/release-check.sh` now runs `nix build
+.#pg18` and a flake/submodule rev comparison.  No C, SQL, WAL, or
+on-disk change from 3.2.3; no REINDEX.  **Take 3.2.4 rather than
+3.2.3.**
 
 3.2.3 is a correctness release.  The v10 SuRF prefilter could
 reject a case-insensitive anchored query (`~*` / `ILIKE` on a
