@@ -15,10 +15,10 @@
  *     rebuild; page reuse lands with the Lehman-Yao insert in Phase 8.
  *
  * WAL records emitted:
- *   - XLOG_PTRE_PENDING_INSERT (FPI on the tail page + meta page; when
+ *   - a generic WAL record (FPI on the tail page + meta page; when
  *     a full tail page was just linked to a new one, the old tail is
  *     carried as a third FPI block so the next_page link replays)
- *   - XLOG_PTRE_PENDING_MERGE_BEGIN / _COMMIT (FPI framing)
+ *   - a generic WAL record / _COMMIT (FPI framing)
  * Merge-produced posting / upper pages use the Phase 2 INSERT records.
  */
 
@@ -49,7 +49,6 @@
 #include "pg_tre/run_catalog.h"
 #include "pg_tre/sparsemap.h"
 #include "pg_tre/upper.h"
-#include "pg_tre/xlog.h"
 
 /*
  * Local mirror of upper.c's internal-page entry layout (the struct is
@@ -1906,29 +1905,3 @@ pg_tre_hanoi_merge(Relation index)
     return passes;
 }
 
-/* --------------------------------------------------------------------
- * WAL redo helper (called from src/wal/xlog.c)
- * -------------------------------------------------------------------- */
-
-bool
-pg_tre_pending_redo_apply_delta(Page page,
-                                uint16 prev_n_entries,
-                                uint16 take,
-                                const PgTrePendingEntry *src_entries)
-{
-    PgTrePendingHeader *hdr     = pending_header(page);
-    PgTrePendingEntry  *entries = pending_entries(page);
-
-    if (hdr->n_entries != prev_n_entries)
-        return false;
-
-    memcpy(&entries[prev_n_entries], src_entries,
-           (size_t) take * sizeof(PgTrePendingEntry));
-
-    hdr->n_entries  += take;
-    hdr->used_bytes  = hdr->n_entries * sizeof(PgTrePendingEntry);
-    ((PageHeader) page)->pd_lower =
-        (char *) &entries[hdr->n_entries] - (char *) page;
-
-    return true;
-}

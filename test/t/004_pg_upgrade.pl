@@ -20,7 +20,6 @@ my $node_old = PostgreSQL::Test::Cluster->new('upgrade_old');
 $node_old->init;
 $node_old->append_conf(
 	'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
 });
 $node_old->start;
 
@@ -52,7 +51,6 @@ my $node_new = PostgreSQL::Test::Cluster->new('upgrade_new');
 $node_new->init;
 $node_new->append_conf(
 	'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
 });
 $node_new->start;
 

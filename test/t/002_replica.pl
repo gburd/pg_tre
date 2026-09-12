@@ -17,9 +17,8 @@ $node_primary->init(allows_streaming => 1);
 $node_primary->append_conf(
 	'postgresql.conf', qq{
 wal_level = 'replica'
+wal_consistency_checking = 'all'
 max_wal_senders = 4
-shared_preload_libraries = 'pg_tre'
-wal_consistency_checking = 'pg_tre'
 });
 $node_primary->start;
 
@@ -43,8 +42,7 @@ my $node_standby = PostgreSQL::Test::Cluster->new('standby');
 $node_standby->init_from_backup($node_primary, $backup_name, has_streaming => 1);
 $node_standby->append_conf(
 	'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
-wal_consistency_checking = 'pg_tre'
+wal_consistency_checking = 'all'
 });
 $node_standby->start;
 
@@ -109,8 +107,7 @@ my $node_standby_2 = PostgreSQL::Test::Cluster->new('standby_2');
 $node_standby_2->init_from_backup($node_standby, $backup_name, has_streaming => 1);
 $node_standby_2->append_conf(
 	'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
-wal_consistency_checking = 'pg_tre'
+wal_consistency_checking = 'all'
 });
 $node_standby_2->start;
 

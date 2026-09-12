@@ -59,8 +59,6 @@ jobs:
       - name: Start PostgreSQL
         run: |
           service postgresql start
-          su - postgres -c "psql -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';\""
-          service postgresql restart
           su - postgres -c "createdb $(whoami)" || true
 
       - name: Run regression tests (3x for flake detection)

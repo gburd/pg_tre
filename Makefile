@@ -113,7 +113,6 @@ OBJS = \
     src/pages/surf_page.o \
     src/pages/run_catalog.o \
     src/pages/free_log.o \
-    src/wal/xlog.o \
     src/query/tre_grammar.o \
     src/query/tokens.o \
     src/query/parser.o \

@@ -80,7 +80,6 @@ init() {
 port = $PORT
 unix_socket_directories = '$SOCK'
 listen_addresses = ''
-shared_preload_libraries = 'pg_tre'
 shared_buffers = $SHARED_BUFFERS
 maintenance_work_mem = $MWM
 max_parallel_maintenance_workers = 8

@@ -39,10 +39,14 @@ Clone with `--recurse-submodules` or run `git submodule update --init`.
 
 ## Running
 
-Add `shared_preload_libraries = 'pg_tre'` to `postgresql.conf`
-before `CREATE EXTENSION pg_tre;`.  Without preload, only legacy
-UDFs (`tre_amatch*`, `tre_version`) are available; the AM's rmgr
-isn't registered.
+Simply:
+
+```bash
+make clean
+make
+sudo make install
+pg_ctl restart -D /path/to/data  # only if you changed C code
+```
 
 ## Status / roadmap
 

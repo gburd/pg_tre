@@ -17,7 +17,6 @@ $node->init;
 $node->append_conf(
 	'postgresql.conf', qq{
 wal_level = 'replica'
-shared_preload_libraries = 'pg_tre'
 });
 $node->start;
 

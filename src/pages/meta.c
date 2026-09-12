@@ -24,7 +24,6 @@
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
-#include "pg_tre/xlog.h"
 
 void
 pg_tre_meta_init(Page page)

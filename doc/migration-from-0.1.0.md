@@ -10,7 +10,7 @@ This guide covers upgrading from the UDF-only 0.1.0 release to the 1.0.0 native 
 
 **1.0.0:** Native index access method. Adds the `tre` AM, `tre_pattern` type, `%~~` operator, and indexing support. Legacy UDFs preserved for backward compatibility.
 
-**Key change:** `shared_preload_libraries = 'pg_tre'` now required for index AM functionality (rmgr registration).
+**Key change:** As of v4.0.0, `shared_preload_libraries` is no longer required. Previous versions (1.x-3.x) required it for custom rmgr registration; v4.0.0 uses PostgreSQL's generic WAL facility instead.
 
 ---
 
@@ -18,7 +18,6 @@ This guide covers upgrading from the UDF-only 0.1.0 release to the 1.0.0 native 
 
 - PostgreSQL 18 or newer
 - Existing database with pg_tre 0.1.0 installed
-- Superuser access for `shared_preload_libraries` modification
 
 ---
 
@@ -42,30 +41,9 @@ ls -l $(pg_config --pkglibdir)/pg_tre.so
 # Should show recent timestamp
 ```
 
-### 2. Enable Preload (Required for Index AM)
+### 2. Run the Upgrade Script
 
-Edit `postgresql.conf`:
-```ini
-shared_preload_libraries = 'pg_tre'
-```
-
-**If you have other preloaded libraries:**
-```ini
-shared_preload_libraries = 'pg_stat_statements,pg_tre'
-```
-
-Restart PostgreSQL:
-```bash
-pg_ctl restart -D /path/to/datadir
-# OR
-systemctl restart postgresql
-```
-
-**Without preload:**
-- Legacy UDFs (`tre_amatch*`) continue to work
-- `CREATE INDEX USING tre` will fail with: `ERROR: custom rmgr not registered`
-
-### 3. Run the Upgrade Script
+**Note:** v4.0.0+ no longer requires `shared_preload_libraries`. If you're currently running v1.x-3.x, you can remove the preload setting after upgrading.
 
 Connect to each database using pg_tre:
 ```sql
@@ -90,7 +68,7 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_tre';
 --   Handler: tre_handler
 ```
 
-### 4. Verify Legacy UDFs Still Work
+### 3. Verify Legacy UDFs Still Work
 
 ```sql
 SELECT tre_amatch('hello', 'helo', 1);
@@ -102,7 +80,7 @@ SELECT tre_version();
 
 **No changes required to existing application queries using legacy UDFs.**
 
-### 5. Optionally Create Indexes
+### 4. Optionally Create Indexes
 
 ```sql
 CREATE INDEX docs_body_tre_idx ON documents USING tre (body);
@@ -237,16 +215,7 @@ DROP EXTENSION pg_tre CASCADE;
 CREATE EXTENSION pg_tre VERSION '0.1.0';
 ```
 
-### 3. Remove Preload
-
-Edit `postgresql.conf`:
-```ini
-# shared_preload_libraries = 'pg_tre'  # comment out or remove
-```
-
-Restart PostgreSQL.
-
-### 4. Verify
+### 3. Verify
 
 ```sql
 SELECT tre_amatch('test', 'test', 0);
@@ -259,14 +228,6 @@ CREATE INDEX test_idx ON test USING tre (col);
 ---
 
 ## Troubleshooting
-
-### Error: "custom rmgr not registered"
-
-**Cause:** `shared_preload_libraries` not set or PostgreSQL not restarted.
-
-**Fix:**
-1. Verify `postgresql.conf` has `shared_preload_libraries = 'pg_tre'`
-2. Restart PostgreSQL (reload is insufficient)
 
 ### Error: "could not access file pg_tre"
 

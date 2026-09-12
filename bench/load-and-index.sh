@@ -60,7 +60,6 @@ psql_clean -d postgres -c "CREATE DATABASE ${PGDATABASE}"
 # Create extensions
 psql_clean -c "CREATE EXTENSION IF NOT EXISTS pg_tre" || {
     echo "ERROR: Failed to create pg_tre extension"
-    echo "Ensure shared_preload_libraries = 'pg_tre' in postgresql.conf"
     exit 1
 }
 psql_clean -c "CREATE EXTENSION IF NOT EXISTS pg_trgm" || {

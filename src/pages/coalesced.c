@@ -13,7 +13,7 @@
  * the additive (v7 -> v8, no REINDEX) format strategy.
  *
  * WAL: each page is written once, fully, and logged as a full-page
- * image under XLOG_PTRE_POSTING_INSERT (the same op code and generic
+ * image under a generic WAL record (the same generic
  * pg_tre_redo_fpi path the dedicated posting leaves use).  We follow
  * the validated run-catalog writer discipline: REGBUF_FORCE_IMAGE
  * (NEVER REGBUF_WILL_INIT -- it implies NO_IMAGE and PANICs the generic
@@ -38,7 +38,6 @@
 #include "pg_tre/coalesced.h"
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
-#include "pg_tre/xlog.h"
 
 /* Max slots per page given the budget and a minimum per-slot blob. */
 #define COALESCED_MAX_SLOTS \

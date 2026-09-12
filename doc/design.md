@@ -137,10 +137,9 @@ open cleanly but will not match UTF-8 queries correctly.
 
 ### 3.5 WAL
 
-Custom rmgr RM_PG_TRE_ID (140 by default).  Record types declared in
-`include/pg_tre/xlog.h`.  Registered only when the extension is
-loaded via `shared_preload_libraries`; the legacy UDFs work
-regardless.
+**As of v4.0.0:** Uses PostgreSQL's generic WAL facility (`access/generic_xlog.h`). No custom rmgr, no `shared_preload_libraries` required. 
+
+**Historical:** v3.x used custom rmgr RM_PG_TRE_ID (140), which required preload. Removed in 4.0.0 for simpler deployment.
 
 ## 4. Phase table
 

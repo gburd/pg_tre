@@ -19,7 +19,6 @@ my $node = PostgreSQL::Test::Cluster->new('soak_test');
 $node->init;
 $node->append_conf(
 	'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
 log_min_messages = WARNING
 });
 $node->start;

@@ -16,7 +16,6 @@ A clear and concise description of the bug.
 - **pg_tre version**: (`SELECT tre_version();`)
 - **Operating system**: (e.g. Ubuntu 24.04, macOS 14, NixOS 24.05)
 - **Build flavor**: (from source, distro package, etc.)
-- **`shared_preload_libraries`**: (the line from `postgresql.conf`)
 
 ## Steps to Reproduce
 

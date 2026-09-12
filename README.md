@@ -93,7 +93,6 @@ flowchart TD
 ## Quick Start
 
 ```sql
--- Requires shared_preload_libraries = 'pg_tre' in postgresql.conf
 CREATE EXTENSION pg_tre;
 
 CREATE TABLE documents (id serial, body text);
@@ -579,14 +578,13 @@ PG_CONFIG=/path/to/pg_config make
 sudo make install
 ```
 
-Then, in `postgresql.conf`:
+Then:
 
 ```
-shared_preload_libraries = 'pg_tre'
+CREATE EXTENSION pg_tre;
 ```
 
-Restart PG and `CREATE EXTENSION pg_tre;` in each database that
-needs it.
+in each database that needs it.
 
 ### Nix / flake
 
@@ -612,8 +610,7 @@ is ABI-portable into an official `postgres:18` Docker image. A common
 container-deploy pattern is to overlay those three files into the
 image's `$(pg_config --pkglibdir)` and
 `$(pg_config --sharedir)/extension/` (e.g. via a ConfigMap +
-initContainer on Kubernetes), then set
-`shared_preload_libraries = 'pg_tre'`.  Match the extension's PG major
+initContainer on Kubernetes). Match the extension's PG major
 to the image's PG major.
 
 Packaging templates for Debian (`debian/`), RPM

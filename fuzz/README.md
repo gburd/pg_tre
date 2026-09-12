@@ -98,8 +98,8 @@ out-of-bounds bugs on individual allocations are detected.  What this
 harness *cannot* detect is cross-context UAF -- a use-after-free that
 only manifests when the chunk's owning MemoryContext is freed.  For
 that you would need to link the harness as a backend extension and run
-it inside a real backend (`shared_preload_libraries`), where AllocSet
-provides real per-context cleanup and `MemoryChunk` headers.
+it inside a real backend, where AllocSet provides real per-context
+cleanup and `MemoryChunk` headers.
 
 ### Frontend / backend split
 

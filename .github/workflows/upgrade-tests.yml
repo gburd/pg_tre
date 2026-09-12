@@ -97,7 +97,6 @@ jobs:
           export PGDATA=/tmp/pgdata_upgrade
           initdb -D "$PGDATA" --auth-local=trust --auth-host=trust
           {
-              echo "shared_preload_libraries = 'pg_tre'"
               echo "shared_buffers = 256MB"
               echo "port = 5432"
               echo "unix_socket_directories = '/tmp'"

@@ -28,7 +28,7 @@ extern void pg_tre_meta_read(Relation index, PgTreMetaPageData *out);
 
 /*
  * Build an empty index: meta page (block 0) only.  Invoked by
- * ambuildempty.  Emits WAL record XLOG_PTRE_META_UPDATE if the index
+ * ambuildempty.  Emits WAL record a generic WAL record if the index
  * is WAL-logged (standard nbtree pattern).
  */
 extern void pg_tre_build_empty(Relation index);

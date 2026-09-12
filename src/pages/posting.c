@@ -8,7 +8,7 @@
  *     we return it as an inline blob (palloc'd in CurrentMemoryContext
  *     so it outlives the builder).
  *   - Otherwise we allocate a single leaf page, copy the sparsemap
- *     bytes into it, WAL-log an FPI XLOG_PTRE_POSTING_INSERT, and
+ *     bytes into it, WAL-log an FPI a generic WAL record, and
  *     return the leaf's block number as the posting root.
  *
  * Multi-leaf posting trees (B-tree-of-leaves with right-links for
@@ -52,7 +52,6 @@
 #include "pg_tre/posting.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/sparsemap.h"
-#include "pg_tre/xlog.h"
 
 /* Usable bytes per posting leaf for the sparsemap blob. */
 static inline Size
@@ -1121,7 +1120,7 @@ typedef struct PgTreVacUpperInternalEntry
  * the callback reports dead are stripped from the leaf sparsemap and
  * their parallel payload entries are dropped.  Surviving TIDs (and
  * their payload) are repacked in place and the leaf is WAL-logged as a
- * full-page image (XLOG_PTRE_VACUUM, which routes through the generic
+ * full-page image (a generic WAL record, which routes through the generic
  * FPI redo path in src/wal/xlog.c).
  *
  * Enumeration: posting roots live in the upper-tree leaf entries
@@ -1139,7 +1138,7 @@ typedef struct PgTreVacUpperInternalEntry
  * repacked (dead TIDs stripped from its sparsemap and parallel payload),
  * the entry array's inline_bytes fields are refreshed, the whole inline
  * region is rewritten in place (it only ever shrinks), and the page is
- * WAL-logged as a full-page image (XLOG_PTRE_VACUUM).
+ * WAL-logged as a full-page image (a generic WAL record).
  */
 
 /*
@@ -1517,7 +1516,7 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
                  * leaf, inline_bytes = 0).  The blob contributes 0 bytes
                  * to the inline region now.  The new leaf is WAL'd by
                  * write_single_leaf; the entry rewrite is WAL'd by the
-                 * XLOG_PTRE_VACUUM FPI below.  A crash between leaves the
+                 * a generic WAL record FPI below.  A crash between leaves the
                  * leaf orphaned (harmless leak) and the entry still
                  * inline (correct), so re-vacuum migrates again.
                  *

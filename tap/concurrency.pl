@@ -22,7 +22,6 @@ my $node = PostgreSQL::Test::Cluster->new('pg_tre_concurrency');
 $node->init;
 $node->append_conf(
     'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
 max_connections = 30
 maintenance_work_mem = '64MB'
 checkpoint_timeout = '1h'

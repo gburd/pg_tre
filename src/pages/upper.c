@@ -37,7 +37,6 @@
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
 #include "pg_tre/upper.h"
-#include "pg_tre/xlog.h"
 
 /* Upper-tree internal page entry: (first_key, child_blk). */
 typedef struct PgTreUpperInternalEntry

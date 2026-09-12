@@ -85,7 +85,9 @@ pg_tre_amoptions(Datum reloptions, bool validate)
     if (pg_tre_relopt_kind == 0)
     {
         if (reloptions != (Datum) 0)
-            elog(WARNING, "pg_tre: reloptions requested but not initialized (need shared_preload_libraries)");
+            elog(WARNING,
+                 "pg_tre: reloptions requested but the option kind is not "
+                 "registered; falling back to GUC defaults");
         return NULL;
     }
 

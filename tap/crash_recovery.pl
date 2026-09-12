@@ -29,7 +29,6 @@ my $N_CYCLES      = 2;     # repeat to surface compounding state
 my $node = PostgreSQL::Test::Cluster->new('pg_tre_crash');
 $node->init;
 $node->append_conf('postgresql.conf', q{
-shared_preload_libraries = 'pg_tre'
 checkpoint_timeout = '1h'
 max_wal_size = '512MB'
 fsync = on

@@ -4,7 +4,7 @@
 #   - colored log/warn/error output
 #   - port allocation in a private range
 #   - one-shot SQL helpers via `psql_check`
-#   - cluster setup/teardown with shared_preload_libraries='pg_tre'
+#   - cluster setup/teardown
 #   - LSN-based catchup wait between primary and standby
 #   - a FIFO-managed long-lived backend session for tests that
 #     need the same backend across multiple primary writes
@@ -74,8 +74,7 @@ TEST_TMPDIR="$TEST_TMPDIR_ROOT/pg_tre_$TEST_NAME"
 
 # pg_initcluster <name> <port> [data_dir]
 #
-# Creates a fresh data directory, configures it with
-# shared_preload_libraries='pg_tre', and starts the postmaster.
+# Creates a fresh data directory and starts the postmaster.
 # The data directory is cluster-specific so multiple clusters can
 # co-exist within a single test (primary + standby).
 pg_initcluster() {
@@ -97,7 +96,6 @@ pg_initcluster() {
     {
         echo "port = $port"
         echo "unix_socket_directories = '$TEST_TMPDIR'"
-        echo "shared_preload_libraries = 'pg_tre'"
         echo "shared_buffers = 64MB"
         echo "max_connections = 30"
         echo "log_destination = 'stderr'"
@@ -224,7 +222,7 @@ pg_init_primary() {
         # follow-up; until then, set TRE_WAL_CONSISTENCY=1 to
         # opt in for redo-callback debugging.
         if [ "${TRE_WAL_CONSISTENCY:-0}" = "1" ]; then
-            echo "wal_consistency_checking = 'pg_tre'"
+            echo "wal_consistency_checking = 'all'"
         fi
     } >> "$data_dir/postgresql.conf"
     {

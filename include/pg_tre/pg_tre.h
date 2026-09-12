@@ -124,7 +124,6 @@ extern double pg_tre_similarity_threshold;
 
 /* Initialization entry points. */
 extern void pg_tre_init_guc(void);
-extern void pg_tre_init_rmgr(void);
 
 /*
  * Match-timeout enforcement (defined in src/module.c).

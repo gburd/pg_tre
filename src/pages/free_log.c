@@ -12,7 +12,7 @@
  * posting leaves.
  *
  * WAL: both the append and the per-block reclaim are full-page-image
- * records under XLOG_PTRE_FREE_LOG, replayed by the generic FPI redo.
+ * records under a generic WAL record, replayed by the generic FPI redo.
  * Each reclaim bundles the freed block's blank reinit AND the log-page
  * entry removal in ONE record, so replay and a re-run after a crash are
  * idempotent (a half-done reclaim cannot leave a freed-but-still-logged
@@ -42,7 +42,6 @@
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
-#include "pg_tre/xlog.h"
 
 /*
  * Local mirror of upper.c's file-private internal-page entry layout

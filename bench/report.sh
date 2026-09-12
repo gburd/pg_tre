@@ -266,7 +266,7 @@ cd bench/
 ```
 
 **Environment requirements:**
-- PostgreSQL 18+ with `shared_preload_libraries = 'pg_tre'`
+- PostgreSQL 18+
 - pg_tre and pg_trgm extensions installed
 - ~500 MB disk space for corpus + indexes
 

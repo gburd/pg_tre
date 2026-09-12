@@ -161,7 +161,6 @@ cat >> "$PGDATA/postgresql.conf" <<CONF
 port = $PGPORT
 unix_socket_directories = '$SOCK'
 listen_addresses = ''
-shared_preload_libraries = '$LIBDST/pg_tre'
 dynamic_library_path = '$LIBDST:\$libdir'
 extension_control_path = '$EXTDIR:\$system'
 shared_buffers = 256MB

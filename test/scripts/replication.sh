@@ -12,10 +12,10 @@
 #   2. Subsequent INSERTs on the primary stream to the standby
 #      and the index on the standby reflects the new rows.
 #
-#   3. wal_consistency_checking = 'pg_tre' is enabled on the
-#      primary; if our redo callback produced a different page
-#      from the primary's WAL record, the standby would log a
-#      FATAL.  We grep the standby log for any such message.
+#   3. wal_consistency_checking = 'all' is enabled on the
+#      primary (if TRE_WAL_CONSISTENCY=1); generic WAL records
+#      are checked for consistency. We grep the standby log for
+#      any FATAL message.
 #
 #   4. Stop the standby cleanly, re-start, verify catchup is
 #      complete and the index still answers correctly.
@@ -112,10 +112,10 @@ fi
 log "  OK: primary=$p_count, standby=$s_count"
 
 # ------------------------------------------------------------------
-# Test 3: wal_consistency_checking=pg_tre passes (no FATAL on standby).
+# Test 3: wal_consistency_checking=all passes (no FATAL on standby).
 # ------------------------------------------------------------------
 
-log "Test 3: wal_consistency_checking = 'pg_tre' clean"
+log "Test 3: wal_consistency_checking = 'all' clean"
 
 # Only meaningful if the script was run with TRE_WAL_CONSISTENCY=1
 # (off by default; see lib.sh for the rationale).

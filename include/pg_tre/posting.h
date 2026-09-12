@@ -239,11 +239,11 @@ extern uint64 pg_tre_posting_cardinality(Relation index, BlockNumber root,
 /*
  * Walk every posting tree reachable from the upper tree and strip the
  * heap TIDs that `callback` reports dead, repacking each affected leaf
- * in place and WAL-logging the change (XLOG_PTRE_VACUUM full-page
+ * in place and WAL-logging the change (a generic WAL record full-page
  * image).  Surviving TIDs are preserved.
  *
  * Emptied non-head leaves are unlinked from their right-link chain and
- * marked deleted (XLOG_PTRE_POSTING_UNLINK); they are physically
+ * marked deleted (a generic WAL record); they are physically
  * reclaimed into the index FSM by a later call to
  * pg_tre_posting_recycle_deleted() once safe (deferred-recycle).
  *
@@ -268,7 +268,7 @@ extern uint64 pg_tre_posting_bulk_delete(Relation index,
  * by pg_tre_posting_bulk_delete, once their deletion XID is old enough
  * that no snapshot could still be traversing the pre-unlink chain
  * (nbtree-style XID-gated recycle).  Re-initializes each reclaimable page
- * (XLOG_PTRE_POSTING_RECYCLE) and records it free in the index FSM.
+ * (a generic WAL record) and records it free in the index FSM.
  *
  * `heaprel` is the heap relation the index belongs to (IndexVacuumInfo
  * .heaprel); it is the relation passed to GlobalVisCheckRemovableFullXid

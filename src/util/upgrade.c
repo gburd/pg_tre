@@ -22,7 +22,7 @@
  *
  *   - pg_tre_upgrade_index() walks every block in EXCLUSIVE mode (one
  *     at a time, brief lock per page), rewrites pages whose format_version
- *     is below LATEST, WAL-logs each rewrite as XLOG_PTRE_PAGE_FORMAT_UPGRADE
+ *     is below LATEST, WAL-logs each rewrite as a generic WAL record
  *     (FORCE_IMAGE / one record per page), and at the end of the sweep
  *     bumps min_page_format_version on the meta page if every page is now
  *     at LATEST.
@@ -58,7 +58,6 @@
 #include "pg_tre/page.h"
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/upgrade.h"
-#include "pg_tre/xlog.h"
 
 /*
  * Verify that 'rel' is a pg_tre index.  Errors out otherwise.

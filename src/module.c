@@ -22,7 +22,6 @@
 #include "pg_tre/amapi.h"
 #include "pg_tre/tre_match.h"
 #include "pg_tre/pattern_cache.h"
-#include "pg_tre/xlog.h"
 
 PG_MODULE_MAGIC;
 
@@ -447,25 +446,6 @@ pg_tre_match_guarded(void *compiled, const char *str, int str_len,
     return result;
 }
 
-/* ---- rmgr registration ---- */
-
-static RmgrData pg_tre_rmgr = {
-    .rm_name          = RM_PG_TRE_NAME,
-    .rm_redo          = pg_tre_redo,
-    .rm_desc          = pg_tre_desc,
-    .rm_identify      = pg_tre_identify,
-    .rm_startup       = pg_tre_startup,
-    .rm_cleanup       = pg_tre_cleanup,
-    .rm_mask          = pg_tre_mask,
-    .rm_decode        = NULL,
-};
-
-void
-pg_tre_init_rmgr(void)
-{
-    RegisterCustomRmgr(RM_PG_TRE_ID, &pg_tre_rmgr);
-}
-
 /* ---- _PG_init ---- */
 
 void _PG_init(void);
@@ -486,14 +466,12 @@ _PG_init(void)
     pg_tre_init_reloptions();
 
     /*
-     * Custom resource managers must be registered during preload.
-     * When pg_tre is loaded on demand (CREATE EXTENSION without
-     * shared_preload_libraries), skip the rmgr registration: the
-     * legacy UDFs still work, but the AM's write path will reject
-     * index mutations until a preload-enabled restart.
+     * No preload requirement.  pg_tre used to need
+     * shared_preload_libraries purely so RegisterCustomRmgr could run
+     * during preload; the write path now uses PostgreSQL's generic WAL
+     * facility (access/generic_xlog.h), which needs no registration, so
+     * CREATE EXTENSION alone is sufficient -- as for any other index AM.
      */
-    if (process_shared_preload_libraries_in_progress)
-        pg_tre_init_rmgr();
 
     tre_cache_init();
 }

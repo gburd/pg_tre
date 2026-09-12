@@ -36,7 +36,7 @@ pg_tre has three test suites:
 
 - PostgreSQL 18+ built and installed (via PG_CONFIG)
 - pg_tre extension compiled and installed
-- Running PostgreSQL instance with `shared_preload_libraries = 'pg_tre'`
+- Running PostgreSQL instance
 
 ### For TAP Tests
 

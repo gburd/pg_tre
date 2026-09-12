@@ -1,18 +1,6 @@
-# pg_tre Benchmark Harness
+# pg_tre Benchmarking Harness
 
-This benchmark compares pg_tre against pg_trgm (closest existing alternative) with measured numbers for doc/perf.md.
-
-## Quick Start
-
-```bash
-# 1. Ensure PostgreSQL 18+ is running with pg_tre and pg_trgm loaded
-# postgresql.conf must have: shared_preload_libraries = 'pg_tre'
-
-# 2. Set your pg_config path
-export PG_CONFIG=~/.pgrx/18.3/pgrx-install/bin/pg_config
-
-# 3. Generate corpus
-./fetch-corpus.sh
+See each script for usage.
 
 # 4. Load data and build indexes
 ./load-and-index.sh

@@ -84,24 +84,12 @@ git submodule update --init --recursive
 
 ### Enable the Extension
 
-**Critical:** pg_tre requires `shared_preload_libraries` for its custom WAL resource manager:
-
-```ini
-# postgresql.conf
-shared_preload_libraries = 'pg_tre'
-```
-
-Restart PostgreSQL:
-```bash
-pg_ctl restart -D /path/to/datadir
-```
-
-Then in your database:
+Simply run:
 ```sql
 CREATE EXTENSION pg_tre;
 ```
 
-**Without preload:** The legacy UDFs (`tre_amatch*`, `tre_version`) work, but `CREATE INDEX USING tre` will fail.
+**Note:** As of v4.0.0, `shared_preload_libraries` is no longer required. pg_tre now uses PostgreSQL's generic WAL facility instead of a custom resource manager.
 
 ---
 
@@ -670,6 +658,5 @@ When filing bugs:
 1. Include `SELECT version();` output
 2. Provide minimal reproducer (SQL only)
 3. Attach `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output
-4. Note whether `shared_preload_libraries = 'pg_tre'` is set
 
 Patches welcome via Codeberg PR or email to the author.

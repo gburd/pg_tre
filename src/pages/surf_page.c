@@ -33,7 +33,6 @@
 #include "pg_tre/pg_tre.h"
 #include "pg_tre/surf.h"
 #include "pg_tre/surf_page.h"
-#include "pg_tre/xlog.h"
 
 /* Usable image bytes per SURF page (content area minus the header). */
 static inline Size

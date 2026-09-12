@@ -29,7 +29,6 @@ my $primary = PostgreSQL::Test::Cluster->new('primary');
 $primary->init(allows_streaming => 1);
 $primary->append_conf(
     'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
 max_wal_senders = 4
 wal_level = 'replica'
 checkpoint_timeout = '1h'
@@ -55,7 +54,6 @@ $primary->backup($backup);
 my $replica = PostgreSQL::Test::Cluster->new('replica');
 $replica->init_from_backup($primary, $backup, has_streaming => 1);
 $replica->append_conf('postgresql.conf', q{
-shared_preload_libraries = 'pg_tre'
 });
 $replica->start;
 

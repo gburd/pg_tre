@@ -48,7 +48,6 @@ init_cluster() {
     cat >> "$PGDATA/postgresql.conf" <<EOF
 port = $PGPORT
 unix_socket_directories = '$PGHOST'
-shared_preload_libraries = 'pg_tre'
 wal_level = replica
 max_wal_senders = 4
 log_min_messages = WARNING
@@ -122,7 +121,7 @@ test_wal_consistency() {
     log "=== TEST 2: WAL Consistency Checking ==="
     
     init_cluster
-    echo "wal_consistency_checking = 'pg_tre'" >> "$PGDATA/postgresql.conf"
+    echo "wal_consistency_checking = 'all'" >> "$PGDATA/postgresql.conf"
     start_pg
     
     psql -c "CREATE EXTENSION pg_tre;"

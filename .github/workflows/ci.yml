@@ -91,8 +91,6 @@ jobs:
           done < <(pg_lsclusters -h)
           sudo pg_createcluster ${{ matrix.pg }} main -p 5432 -- --auth-local=trust
           sudo pg_ctlcluster ${{ matrix.pg }} main start
-          sudo -u postgres psql -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_tre';"
-          sudo pg_ctlcluster ${{ matrix.pg }} main restart
           # Wait for the server to accept connections before createdb.
           for i in $(seq 1 30); do
               pg_isready -p 5432 -q && break
@@ -272,7 +270,6 @@ jobs:
           # planner_auto's EXPLAIN that the optimized expected files lack.
           {
             echo "port = 5432"
-            echo "shared_preload_libraries = 'pg_tre'"
             echo "jit = off"
             echo "unix_socket_directories = '/tmp'"
           } >> "$PGDATA/postgresql.conf"

@@ -16,7 +16,6 @@ my $node = PostgreSQL::Test::Cluster->new('reindex_test');
 $node->init;
 $node->append_conf(
 	'postgresql.conf', qq{
-shared_preload_libraries = 'pg_tre'
 });
 $node->start;
 

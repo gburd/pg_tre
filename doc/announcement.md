@@ -47,12 +47,7 @@ PG_CONFIG=/path/to/pg_config make
 sudo PG_CONFIG=/path/to/pg_config make install
 ```
 
-Add to `postgresql.conf`:
-```ini
-shared_preload_libraries = 'pg_tre'
-```
-
-Restart PostgreSQL, then:
+Then:
 ```sql
 CREATE EXTENSION pg_tre;
 ```
@@ -127,7 +122,6 @@ Patches welcome via Codeberg PR or email. When filing bugs, include:
 1. PostgreSQL version (`SELECT version();`)
 2. Minimal reproducer (SQL only)
 3. `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output
-4. Whether `shared_preload_libraries = 'pg_tre'` is set
 
 ---
 

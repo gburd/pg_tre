@@ -30,7 +30,6 @@
 #include "pg_tre/meta.h"
 #include "pg_tre/page.h"
 #include "pg_tre/run_catalog.h"
-#include "pg_tre/xlog.h"
 
 /* Max PgTreRun records that fit on one catalog page after the header.
  * Defined in run_catalog.h (also used by pending.c's Hanoi merge). */
@@ -205,7 +204,7 @@ pg_tre_run_catalog_close(PgTreRunIter *it)
  * Crash-safety (the bug that blocked B1.2, now fixed): all page
  * modifications -- the catalog-page append AND the meta-page update --
  * happen inside ONE critical section, and both buffers are WAL-logged
- * as full-page images under XLOG_PTRE_META_UPDATE in a single record.
+ * as full-page images under a generic WAL record in a single record.
  * New catalog pages use REGBUF_FORCE_IMAGE (NOT REGBUF_WILL_INIT):
  * pg_tre_extend has already physically extended the relation, so the
  * block exists at replay and the generic pg_tre_redo_fpi restores the
