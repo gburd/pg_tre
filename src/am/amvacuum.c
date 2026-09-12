@@ -98,6 +98,15 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     if (info->index == NULL)
         return stats;
 
+    /*
+     * analyze_only means ANALYZE called us purely to refresh statistics;
+     * PostgreSQL's contract is that we must not modify the index.  Merging
+     * the pending list here would do real WAL-logged work on a plain
+     * ANALYZE, which the caller neither asked for nor expects to pay for.
+     */
+    if (info->analyze_only)
+        return stats;
+
     if (stats == NULL)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
 

@@ -398,7 +398,9 @@ static void
 pg_tre_pending_scan_watermark(Relation index, PgTrePendingCallback callback,
                               void *ctx, BlockNumber *watermark_tail_out,
                               uint32 *watermark_tail_n_out,
-                              BlockNumber *head_out)
+                              BlockNumber *head_out,
+                              BlockNumber **consumed_pages_out,
+                              int *n_consumed_out, int *consumed_cap_io)
 {
     PgTreMetaPageData meta;
     BlockNumber blk;
@@ -454,6 +456,30 @@ pg_tre_pending_scan_watermark(Relation index, PgTrePendingCallback callback,
         }
 
         UnlockReleaseBuffer(buf);
+
+        /*
+         * Record this page as consumed.  Every page we visit before
+         * breaking at wm_tail is fully drained by this merge and becomes
+         * unreachable once finalize_merge moves pending_head, so these are
+         * exactly the blocks that must go back to the FSM.  Collected here,
+         * holding no buffer lock, because finalize_merge cannot walk the
+         * chain itself (it holds the meta page and wm_tail exclusively).
+         *
+         * The watermark tail is excluded: when concurrent appends survive
+         * on it, finalize_merge rewinds and KEEPS that page as the new
+         * head.  Freeing it would hand a live page to the FSM.
+         */
+        if (consumed_pages_out != NULL && blk != wm_tail)
+        {
+            if (*n_consumed_out >= *consumed_cap_io)
+            {
+                *consumed_cap_io = (*consumed_cap_io) * 2;
+                *consumed_pages_out = repalloc(*consumed_pages_out,
+                                               (*consumed_cap_io) *
+                                               sizeof(BlockNumber));
+            }
+            (*consumed_pages_out)[(*n_consumed_out)++] = blk;
+        }
 
         /* Stop at the watermark tail; pages past it are concurrent appends. */
         if (blk == wm_tail)
@@ -1072,7 +1098,8 @@ static void
 finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
                uint64 n_trigrams, uint64 n_tuples_indexed,
                BlockNumber watermark_tail, uint32 watermark_tail_n,
-               uint64 *consumed_out)
+               uint64 *consumed_out,
+               const BlockNumber *consumed_pages, int n_consumed_pages)
 {
     Buffer  metabuf;
     Page    metapage;
@@ -1084,6 +1111,7 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
     uint64  consumed = 0;
     uint32  survive = 0;
     uint64  surviving_total = 0;
+    bool    free_wm_tail = false;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
@@ -1136,6 +1164,16 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
         }
     }
 
+    /*
+     * The pages this merge makes unreachable are collected during the
+     * watermark scan and passed in by the caller.  Do NOT re-walk the
+     * chain here: this function already holds the meta page and the
+     * watermark tail EXCLUSIVELY, so taking a share lock on a page we
+     * already hold self-deadlocks on LWLock/BufferContent (observed:
+     * VACUUM wedged forever on its own buffer).  Collection must happen
+     * where no pg_tre buffer lock is held -- that is the scan.
+     */
+
     START_CRIT_SECTION();
 
     if (!rewind_tail)
@@ -1145,13 +1183,21 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
         m->pending_head      = InvalidBlockNumber;
         m->pending_tail      = InvalidBlockNumber;
         m->pending_n_entries = 0;
+        /*
+         * Nothing survives, so the watermark tail is unreachable too.  The
+         * scan deliberately leaves it out of consumed_pages (it cannot know
+         * which arm we take), so add it here -- otherwise the one page that
+         * always exists would still leak on every full drain.
+         */
+        free_wm_tail = (watermark_tail != InvalidBlockNumber);
     }
     else
     {
         /*
          * Compact survivors on the watermark tail down to slot 0 and
-         * make it the new head.  Pages before it are orphaned (the
-         * pre-existing "rely on REINDEX to reclaim" policy).
+         * make it the new head.  Pages before it are freed via
+         * consumed_pages; this page stays live as the new head, so it
+         * must NOT be freed.
          */
         PgTrePendingEntry *tent = pending_entries(tailpage);
         uint64 old_total = m->pending_n_entries;
@@ -1209,6 +1255,33 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
         UnlockReleaseBuffer(tailbuf);
     UnlockReleaseBuffer(metabuf);
 
+    /*
+     * The meta update is committed and the pages the scan drained are now
+     * unreachable from the pending chain, so hand them to the deferred free
+     * log for XID-gated FSM reclaim.  Done after the buffers are released
+     * because pg_tre_free_log_append takes the meta lock itself -- calling
+     * it while we still held that lock deadlocked VACUUM against its own
+     * buffer.
+     *
+     * Before this, both arms above simply moved (or cleared) pending_head
+     * and left every drained page allocated -- "orphaned until REINDEX".
+     * Under steady insert traffic that leaks the whole pending list on
+     * every merge: a field report showed 716 pending pages surviving
+     * VACUUM (5176 kB vs 1600 kB for the same data freshly built) with the
+     * meta page already reporting pending_head = InvalidBlockNumber and
+     * pending_n_entries = 0.  The entries were merged correctly; the pages
+     * were simply never freed.
+     *
+     * Logging after the commit means a crash mid-merge leaves the blocks
+     * allocated (leaked, i.e. the old behaviour) rather than freed while
+     * still linked.  Leaking on a crash is recoverable; handing a live
+     * page to the FSM is not.
+     */
+    if (n_consumed_pages > 0 && consumed_pages != NULL)
+        pg_tre_free_log_append(index, consumed_pages, n_consumed_pages);
+    if (free_wm_tail)
+        pg_tre_free_log_append(index, &watermark_tail, 1);
+
     if (consumed_out != NULL)
         *consumed_out = consumed;
 }
@@ -1226,6 +1299,9 @@ pg_tre_pending_merge(Relation index)
     BlockNumber       wm_tail;
     uint32            wm_tail_n;
     BlockNumber       wm_head;
+    BlockNumber      *consumed_pages = NULL;
+    int               n_consumed = 0;
+    int               consumed_cap = 0;
 
     pg_tre_meta_read(index, &meta);
     if (meta.pending_head == InvalidBlockNumber)
@@ -1247,9 +1323,19 @@ pg_tre_pending_merge(Relation index)
      * that prefix.  Entries a concurrent aminsert appends during the
      * (long) rebuild below land past the watermark and survive into
      * the next merge instead of being silently dropped.
+     *
+     * The scan also records which pending pages it fully drained, so
+     * finalize_merge can hand them back to the FSM.  Collected there
+     * rather than in finalize_merge because that function holds the meta
+     * page and the watermark tail exclusively and cannot re-lock them.
      */
+    consumed_cap = 64;
+    consumed_pages = MemoryContextAlloc(merge_cxt,
+                                        consumed_cap * sizeof(BlockNumber));
     pg_tre_pending_scan_watermark(index, collect_pending_cb, &mc,
-                                  &wm_tail, &wm_tail_n, &wm_head);
+                                  &wm_tail, &wm_tail_n, &wm_head,
+                                  &consumed_pages, &n_consumed,
+                                  &consumed_cap);
 
     mc.pending_only = pg_tre_flush_to_run;
     materialize_merged_postings(index, &mc);
@@ -1333,7 +1419,8 @@ pg_tre_pending_merge(Relation index)
          * (no-op root swap), so finalize_merge only does the truncate. */
         finalize_merge(index, meta.root_upper, meta.root_range,
                        meta.n_trigrams, meta.n_tuples_indexed,
-                       wm_tail, wm_tail_n, &consumed);
+                       wm_tail, wm_tail_n, &consumed,
+                       consumed_pages, n_consumed);
         n_merged = consumed;
 
         MemoryContextSwitchTo(old);
@@ -1361,7 +1448,8 @@ pg_tre_pending_merge(Relation index)
 
         finalize_merge(index, new_root, meta.root_range,
                        (uint64) k, meta.n_tuples_indexed,
-                       wm_tail, wm_tail_n, &consumed);
+                       wm_tail, wm_tail_n, &consumed,
+                       consumed_pages, n_consumed);
 
         n_merged = consumed;
         tid_est = consumed / 5;   /* avg ~5 trigrams per row */
