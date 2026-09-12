@@ -121,7 +121,7 @@ pending_page_init(Page page)
  */
 static void
 acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
-             Buffer *prev_tail_buf_out, bool *tail_is_new)
+             Buffer *prev_tail_buf_out, bool *tail_is_new, bool *head_is_new)
 {
     Buffer   metabuf;
     Page     metapage;
@@ -134,16 +134,28 @@ acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
     meta = PgTreMetaPageGet(metapage);
 
     *tail_is_new = false;
+    *head_is_new = false;
     *prev_tail_buf_out = InvalidBuffer;
 
     if (meta->pending_tail == InvalidBlockNumber)
     {
+        /*
+         * First pending page for this index.  Like the full-tail case below,
+         * do NOT init the page or write the meta pointers here: the caller
+         * re-applies both against the generic-WAL scratch pages so they land
+         * in the WAL record.  Writing them into the shared buffers here left
+         * pending_head/pending_tail un-logged entirely, so after crash
+         * recovery the meta page pointed at no list and the index returned
+         * ZERO rows while a sequential scan found them all (caught by
+         * tap/crash_recovery.pl: "idx=0 seq=100" for every committed batch).
+         *
+         * *head_is_new tells the caller to stamp pending_head as well, which
+         * only this branch needs -- the full-tail branch appends to an
+         * existing list and must leave the head alone.
+         */
         tailbuf = pg_tre_extend(index, PG_TRE_PAGE_PENDING);
-        pending_page_init(BufferGetPage(tailbuf));
-
-        meta->pending_head = BufferGetBlockNumber(tailbuf);
-        meta->pending_tail = meta->pending_head;
         *tail_is_new = true;
+        *head_is_new = true;
     }
     else
     {
@@ -191,6 +203,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
 {
     Buffer  metabuf, tailbuf, prev_tailbuf;
     bool    tail_is_new;
+    bool    head_is_new;
     PgTrePendingHeader *hdr;
     PgTrePendingEntry  *entries;
     Page    tailpage, metapage;
@@ -208,7 +221,8 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
     {
         GenericXLogState *state;
 
-        acquire_tail(index, &metabuf, &tailbuf, &prev_tailbuf, &tail_is_new);
+        acquire_tail(index, &metabuf, &tailbuf, &prev_tailbuf, &tail_is_new,
+                     &head_is_new);
 
         /*
          * Generic WAL.  Register every buffer this iteration touches, in the
@@ -248,6 +262,10 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
             }
             PgTreMetaPageGet(metapage)->pending_tail =
                 BufferGetBlockNumber(tailbuf);
+            /* First page of a brand-new list: the head moves too. */
+            if (head_is_new)
+                PgTreMetaPageGet(metapage)->pending_head =
+                    BufferGetBlockNumber(tailbuf);
         }
 
         hdr     = pending_header(tailpage);

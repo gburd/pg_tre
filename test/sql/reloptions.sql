@@ -3,7 +3,8 @@
 -- Regression guard for the defect where _PG_init did not call
 -- pg_tre_init_reloptions(), leaving pg_tre_relopt_kind == 0 so EVERY
 -- index storage parameter was silently ignored (with a WARNING).
--- This test creates an index WITH reloptions and asserts the options round-trip into pg_class.reloptions
+-- This test creates an index WITH reloptions and asserts the options
+-- round-trip into pg_class.reloptions
 -- (NULL/absent before the fix).  Spelling-agnostic (key presence, not
 -- the on/off vs true/false rendering).  Single-token robust style.
 SET client_min_messages = warning;

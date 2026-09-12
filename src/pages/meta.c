@@ -188,14 +188,25 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
     {
         GenericXLogState *state;
 
+        /*
+         * Always Finish, never Abort.  GenericXLogAbort DISCARDS the scratch
+         * page, so aborting here threw the pg_tre_meta_init() away and left
+         * an all-zero meta page -- "meta page magic mismatch (got
+         * 0x00000000)" on first read.  That is exactly what happened on
+         * temp/unlogged indexes while this was gated on wal_log.
+         *
+         * Finishing unconditionally is correct: GenericXLogFinish applies the
+         * change to the buffer and marks it dirty in every case, and emits no
+         * WAL record when the relation does not need one.  The init fork
+         * still gets a record because it is the template replayed during
+         * crash recovery even for UNLOGGED indexes.
+         */
         state = GenericXLogStart(index);
-        metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+        metapage = GenericXLogRegisterBuffer(state, metabuf,
+                                             GENERIC_XLOG_FULL_IMAGE);
         pg_tre_meta_init(metapage);
-
-        if (wal_log)
-            GenericXLogFinish(state);
-        else
-            GenericXLogAbort(state);
+        GenericXLogFinish(state);
+        (void) wal_log;
     }
 
     UnlockReleaseBuffer(metabuf);
