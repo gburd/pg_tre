@@ -11,6 +11,7 @@
 
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/generic_xlog.h"
 #include "access/xloginsert.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
@@ -268,27 +269,27 @@ pg_tre_meta_set_surf(Relation index, BlockNumber root_surf, uint32 surf_n_keys)
     Buffer metabuf;
     Page   metapage;
     PgTreMetaPage meta;
+    GenericXLogState *state;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
-    metapage = BufferGetPage(metabuf);
+
+    /*
+     * Generic WAL: GenericXLogRegisterBuffer hands back a scratch copy of
+     * the page; every modification must target THAT pointer, not
+     * BufferGetPage(metabuf).  GenericXLogFinish then computes the delta,
+     * enters its own critical section, marks the buffer dirty and sets the
+     * LSN -- so the explicit START_CRIT_SECTION / MarkBufferDirty /
+     * PageSetLSN this replaced are all gone.
+     */
+    state = GenericXLogStart(index);
+    metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
     meta = PgTreMetaPageGet(metapage);
 
     meta->root_surf = root_surf;
     meta->surf_n_keys = surf_n_keys;
 
-    START_CRIT_SECTION();
-    MarkBufferDirty(metabuf);
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-        PageSetLSN(metapage, recptr);
-    }
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     UnlockReleaseBuffer(metabuf);
 }
