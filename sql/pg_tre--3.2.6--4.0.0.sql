@@ -1,0 +1,29 @@
+-- pg_tre 3.2.6 -> 4.0.0 upgrade.
+--
+-- No catalog changes: `diff sql/pg_tre--3.2.6.sql sql/pg_tre--4.0.0.sql`
+-- differs only in the header comment's version string.  The SQL surface,
+-- the operator classes and the ON-DISK PAGE FORMAT are all unchanged, so
+-- **no REINDEX is required**.
+--
+-- What 4.0.0 changes is the WAL record format.  pg_tre no longer registers
+-- a custom resource manager; the write path uses PostgreSQL's generic WAL
+-- facility.  Two operational consequences, both documented in CHANGELOG.md
+-- under "Breaking changes":
+--
+--   1. shared_preload_libraries = 'pg_tre' is NO LONGER REQUIRED.  You may
+--      remove it after upgrading.  Leaving it set is harmless.
+--
+--   2. WAL written by pg_tre 3.x cannot be replayed by 4.0.0 and vice
+--      versa.  This is NOT a concern for a normal upgrade of a cleanly
+--      shut down server, but it does mean:
+--        - shut the server down cleanly (a checkpoint on shutdown) before
+--          swapping the library, so no 3.x pg_tre WAL remains to replay;
+--        - a physical standby cannot run a different pg_tre major than its
+--          primary -- upgrade the primary, then rebuild the standby from a
+--          fresh base backup.  There is no rolling-upgrade path.
+--      Logical replication is unaffected.
+--
+-- Also note: wal_consistency_checking = 'pg_tre' is now a FATAL startup
+-- error, because that resource-manager name no longer exists.  Use
+-- wal_consistency_checking = 'all' (generic WAL records are checked under
+-- the `generic` resource manager).

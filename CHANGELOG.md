@@ -6,6 +6,110 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.0.0] - 2026-09-12 - no custom resource manager; no shared_preload_libraries
+
+pg_tre now stores and WAL-logs its pages the way every other PostgreSQL
+index does: through the **generic WAL facility**
+(`access/generic_xlog.h`), instead of a custom resource manager.
+
+**The `shared_preload_libraries = 'pg_tre'` requirement is gone.**  That
+requirement never had anything to do with the index itself -- it existed
+solely because `RegisterCustomRmgr()` must run during preload.
+`CREATE EXTENSION pg_tre;` is now sufficient.
+
+The **on-disk page format is unchanged** and **no REINDEX is required**.
+
+### Breaking changes
+
+1. **WAL written by 3.x cannot be replayed by 4.0.0, and vice versa.**  The
+   records are no longer `RM_PG_TRE_ID`; they are generic-WAL records.  For
+   a normal upgrade of a cleanly shut down server this is a non-event, but:
+   - shut the server down cleanly before swapping the library, so no 3.x
+     pg_tre WAL is left to replay;
+   - a physical standby cannot run a different pg_tre major than its
+     primary.  Upgrade the primary, then rebuild the standby from a fresh
+     base backup.  **There is no rolling-upgrade path.**  Logical
+     replication is unaffected.
+
+2. **`wal_consistency_checking = 'pg_tre'` is now a FATAL startup error**
+   ("Unrecognized key word"), because that resource-manager name no longer
+   exists.  Use `wal_consistency_checking = 'all'`; generic WAL records are
+   checked under the `generic` resource manager.  Anything still setting the
+   old value will prevent the server from starting, so this is not optional
+   cleanup -- every test, script and CI workflow in the tree was updated.
+
+### Removed
+
+- `src/wal/xlog.c` (327 lines of redo / desc / identify / startup / cleanup
+  / mask), `include/pg_tre/xlog.h`, all `XLOG_PTRE_*` opcodes,
+  `RM_PG_TRE_ID`, the `RmgrData` and its registration, and the redo-only
+  `pg_tre_pending_redo_apply_delta` helper.
+- The hand-rolled pending-insert delta record.  Generic WAL computes its own
+  compact page diff, which is precisely what that record existed to do by
+  hand.
+
+### Changed
+
+- **WAL volume for insert-heavy workloads dropped 43%.**  Measured on 20k
+  rows inserted in 1k batches (the pending-append path), median of three
+  runs each: **1,054 bytes/row on 4.0.0 vs 1,863 on 3.2.6.**  This was the
+  one thing the conversion plan flagged as a risk -- removing a
+  purpose-built delta encoder in favour of a generic one -- and it went the
+  other way.  Generic WAL's diff is simply better than the bespoke one,
+  which only special-cased the tail page and shipped full-page images for
+  everything else.
+- `pg_tre_amvacuumcleanup` honours `info->analyze_only` (a plain `ANALYZE`
+  no longer performs a WAL-logged pending merge).
+
+### Fixed
+
+Four bugs of one class were found *during* the conversion, every one of them
+"page written through the shared buffer instead of the generic scratch
+copy", which makes generic WAL diff a page against its own already-mutated
+contents and ship an incomplete or empty record:
+
+- `pg_tre_run_catalog_replace` populated a freshly extended catalog page in
+  the shared buffer before registering it -- crash recovery would have
+  silently lost the entire run catalog.
+- `pg_tre_run_catalog_append` wrote the catalog header before registration.
+- `acquire_tail` (full-tail path) page-init'd a new pending tail and wrote
+  the old tail's `next_page` link into shared buffers.
+- `acquire_tail` (first-page path) wrote `pending_head`/`pending_tail`
+  outside any record.  **This one shipped an index that returned zero rows
+  after crash recovery** -- 566,050 rows inserted, index empty, sequential
+  scan fine.
+
+Worth recording honestly: **reading the code caught none of the four.**  The
+42-test regression suite passed with the last and worst of them present.
+Only `tap/crash_recovery.pl` (kill -9 mid-write, then verify every committed
+batch through both the index and a sequential scan) found it, deterministically
+across three runs.  Also fixed: gating the meta-page init on `wal_log` and
+calling `GenericXLogAbort` in the false branch, which discards the scratch
+page and left an all-zero meta page on temp/unlogged indexes.
+
+### Qualified
+
+EC2 c7i.4xlarge, PostgreSQL 18.0, **no `shared_preload_libraries`**,
+`wal_consistency_checking = 'all'`:
+
+- **42/42** regression tests; clean build, zero warnings; `nix build .#pg17`
+  and `.#pg18` both produce `pg_tre-4.0.0`; `nix flake check` passes.
+- **17/17 TAP tests: `All tests successful. Result: PASS`** --
+  `concurrency.pl` 2/2, `crash_recovery.pl` 10/10 (two kill -9 cycles, 397
+  and 756 catalog runs surviving replay), `replication.pl` 5/5 including
+  standby promotion.
+- Stress C/D/G/H/I/J: **zero accuracy-oracle mismatches**, identical
+  parallel-vs-serial hit counts (59,167), DoS guards holding, SuRF
+  anchored-absent reject 0.063 ms, 0 stuck spinlocks.
+- Verified that a cluster which never preloaded the library can
+  `CREATE EXTENSION`, build an index and query it.
+
+Scenario G's churn bloat (3.83x) is unchanged and remains a separate,
+pre-existing issue -- real `posting_leaf` growth at 91% occupancy, not
+leaked pages.  Documented in `LIMITATIONS.md`.
+
+---
+
 ## [3.2.6] - 2026-09-12 - VACUUM leaked every consumed pending-list page
 
 Storage fix.  No on-disk format change, **no REINDEX required**.

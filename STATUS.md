@@ -1,8 +1,27 @@
 # pg_tre status
 
-Released: **3.2.6** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.0.0** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.0.0 removes pg_tre's custom WAL resource manager: it now stores
+and WAL-logs pages through PostgreSQL's generic WAL facility, like
+every other index AM.  **`shared_preload_libraries = 'pg_tre'` is
+no longer required** -- that requirement existed only because
+`RegisterCustomRmgr()` must run during preload.  The on-disk page
+format is unchanged and no REINDEX is needed.
+
+Breaking: WAL from 3.x cannot be replayed by 4.0.0 (shut down
+cleanly before upgrading; rebuild physical standbys from a fresh
+base backup -- no rolling upgrade), and
+`wal_consistency_checking = 'pg_tre'` is now a fatal startup error
+(use `'all'`).
+
+Insert-heavy WAL volume dropped 43% (1,054 vs 1,863 bytes/row):
+generic WAL's page diff beats the hand-rolled delta it replaced.
+Four "wrote the shared buffer instead of the scratch page" bugs
+were found during the conversion -- none by reading the code, all
+by `tap/crash_recovery.pl` under kill -9.  See `CHANGELOG.md`.
 
 3.2.6 fixes a page leak: a pending-list merge (VACUUM) consumed
 its pages without ever freeing them -- the code called them
