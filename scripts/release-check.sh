@@ -85,7 +85,7 @@ echo "==> Checking flake pins match the submodules"
 # The flake pins vendored sources as its own inputs instead of using
 # ?submodules=1, so every vendored rev has two sources of truth.  When they
 # diverged, `make` built fine and passed 41/41 while `nix build` died in
-# patchPhase -- v3.2.6-dev shipped that way.  A release must not.
+# patchPhase -- v3.2.6 shipped that way.  A release must not.
 if ! bash scripts/flake-check-revs.sh; then
     echo "FAIL: flake.nix and the submodules disagree" >&2
     exit 1

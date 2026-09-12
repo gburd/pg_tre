@@ -6,6 +6,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.6] - 2026-09-12 - VACUUM leaked every consumed pending-list page
+
+Storage fix.  No on-disk format change, **no REINDEX required**.
+
+### Fixed
+
+- **A pending-list merge freed nothing.**  `VACUUM` ->
+  `amvacuumcleanup` -> `pg_tre_pending_merge` drained the pending list into
+  the posting/upper trees, then advanced (or cleared) `meta.pending_head`
+  and abandoned every page it had just consumed.  The code was explicit
+  about it -- *"Pages before it are orphaned (the pre-existing 'rely on
+  REINDEX to reclaim' policy)"* -- which under steady insert traffic leaks
+  the entire pending list on every merge.
+
+  Reported by the solnix.io infra team while investigating something else:
+  their index held 716 pending pages that `VACUUM` would not remove
+  (5176 kB vs 1600 kB for identical data freshly built), and they asked how
+  to drain it, assuming operator error.  It was not: the entries merged
+  correctly every time, the pages were simply never released.
+
+  Consumed pages now go to the deferred free log -- the same XID-gated path
+  posting-leaf recycling already uses -- and return to the FSM for reuse.
+
+- `pg_tre_amvacuumcleanup` ignored `info->analyze_only`, so a plain
+  `ANALYZE` performed a full WAL-logged pending merge.  PostgreSQL's
+  contract is that `analyze_only` means do not modify the index.
+
+### Added
+
+- `test/sql/pending_reclaim.sql`.  Verified to **fail with 319 leaked pages
+  when the reclaim is disabled** and pass with 0 after each of two merge
+  cycles -- a test that cannot fail on its target bug is not a test.  It
+  also asserts index-vs-sequential agreement after the merge, since freeing
+  a page that is still reachable would be worse than the leak it replaces.
+
+### Not fixed by this
+
+The churn bloat in stress scenario G is essentially unchanged
+(3.87x -> 3.83x) and is a **separate** problem.  That growth is 522,346
+`posting_leaf` pages at 91% occupancy -- genuinely used pages produced by
+delete+reinsert churn, not leaked pending pages (only 1,387 of those, all
+from live traffic).  Still documented in `LIMITATIONS.md`; `REINDEX`
+reclaims it.
+
+Pages leaked by *earlier* versions are not retroactively reclaimed -- there
+is no record of which blocks they were.  The next merge stops adding to the
+pile; `REINDEX` recovers the historical waste.
+
+### Qualified
+
+EC2 c7i.4xlarge, PostgreSQL 18.0: 42/42 regression tests, clean build with
+zero warnings, stress C/D/G/H/I/J with **zero accuracy-oracle mismatches**,
+identical parallel-vs-serial hit counts (59,167), DoS guards holding, SuRF
+anchored-absent reject at 0.066 ms.
+
+---
+
 ## [3.2.5] - 2026-09-11 - literal '-' in a bracket expression was rejected
 
 Scan-path fix.  No on-disk format change, **no REINDEX**: patterns that

@@ -1,8 +1,20 @@
 # pg_tre status
 
-Released: **3.2.5** (2026-09).  See `CHANGELOG.md` for full
+Released: **3.2.6** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+3.2.6 fixes a page leak: a pending-list merge (VACUUM) consumed
+its pages without ever freeing them -- the code called them
+"orphaned until REINDEX" -- so an index under steady insert
+traffic grew without bound.  Consumed pages now go to the
+deferred free log and return to the FSM.  Storage-layer only: no
+on-disk change, no REINDEX (though REINDEX is what reclaims pages
+leaked by earlier versions).  Also stops a plain ANALYZE from
+performing a full WAL-logged merge.  Note the churn bloat in
+stress scenario G is a SEPARATE issue and is unchanged -- that is
+real posting_leaf growth at 91% occupancy, not leaked pages.
+See `CHANGELOG.md`.
 
 3.2.5 fixes a regex-tokenizer bug: a literal `-` first or last in
 a bracket expression (`[-_.]`, `[abc-]`, `[-]`, `[^-x]` -- all

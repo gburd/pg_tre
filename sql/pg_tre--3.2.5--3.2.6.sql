@@ -1,0 +1,12 @@
+-- pg_tre 3.2.5 -> 3.2.6 upgrade.
+--
+-- No catalog changes.  3.2.6 fixes a page leak: a pending-list merge
+-- (VACUUM) consumed its pages without ever freeing them, so an index under
+-- steady insert traffic grew without bound until REINDEX.  Storage-layer
+-- only; `diff sql/pg_tre--3.2.5.sql sql/pg_tre--3.2.6.sql` differs only in
+-- the header comment.
+--
+-- No on-disk format change and NO REINDEX required.  Already-leaked pages
+-- from earlier versions are not retroactively reclaimed (nothing records
+-- which blocks they were); the next merge stops adding to the pile, and a
+-- REINDEX reclaims the historical waste if you want the space back.
