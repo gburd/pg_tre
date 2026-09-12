@@ -26,6 +26,7 @@
 
 #include <string.h>
 
+#include "access/generic_xlog.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "miscadmin.h"
@@ -154,25 +155,27 @@ acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
             pending_capacity())
         {
             Buffer newbuf = pg_tre_extend(index, PG_TRE_PAGE_PENDING);
-            pending_page_init(BufferGetPage(newbuf));
-
-            pending_header(BufferGetPage(tailbuf))->next_page =
-                BufferGetBlockNumber(newbuf);
-            MarkBufferDirty(tailbuf);
 
             /*
+             * Do NOT init the new page or write the next_page link here.
+             * Under generic WAL the caller re-applies both against the
+             * scratch pages returned by GenericXLogRegisterBuffer, so that
+             * they land inside the same WAL record as the append.  Writing
+             * them into the shared buffers here as well would be redundant
+             * at best; at worst generic WAL would diff against an already
+             * mutated pre-image and ship an incomplete delta.
+             *
              * Hand the old tail back to the caller *still locked* so the
-             * next_page link mutation can be WAL-logged in the same
-             * record that initializes the new tail.  Releasing it here
-             * (as a prior version did) left the link change un-logged:
-             * the append record only covered meta + the new tail, so a
-             * standby/crash-recovery replay never learned that the old
-             * tail points at the new one, silently breaking the chain
-             * and dropping every entry past the old tail on scan.
+             * next_page link mutation can be WAL-logged in the same record
+             * that initializes the new tail.  Releasing it here (as a prior
+             * version did) left the link change un-logged: the append record
+             * only covered meta + the new tail, so a standby/crash-recovery
+             * replay never learned that the old tail points at the new one,
+             * silently breaking the chain and dropping every entry past the
+             * old tail on scan.
              */
             *prev_tail_buf_out = tailbuf;
 
-            meta->pending_tail = BufferGetBlockNumber(newbuf);
             tailbuf = newbuf;
             *tail_is_new = true;
         }
@@ -204,9 +207,50 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
 
     while (n > 0)
     {
+        GenericXLogState *state;
+
         acquire_tail(index, &metabuf, &tailbuf, &prev_tailbuf, &tail_is_new);
-        tailpage = BufferGetPage(tailbuf);
-        metapage = BufferGetPage(metabuf);
+
+        /*
+         * Generic WAL.  Register every buffer this iteration touches, in the
+         * order the custom rmgr used (meta=0, tail=1, prev_tail=2), and derive
+         * ALL page pointers from the returned scratch copies.
+         *
+         * acquire_tail has already page-init'd a fresh tail and written the
+         * old tail's next_page link into the shared buffers.  Those writes are
+         * re-applied here against the scratch pages so they land inside this
+         * record.  The link mutation in particular MUST travel with the
+         * append, or replay never learns the chain was extended and every
+         * entry past the old tail is lost on scan -- a bug this code has had
+         * before (see acquire_tail's comment).
+         *
+         * A fresh tail asks for GENERIC_XLOG_FULL_IMAGE (no meaningful
+         * pre-image to diff); existing pages take the default and generic WAL
+         * emits its own compact delta.  That subsumes the hand-rolled
+         * xl_pg_tre_pending_insert_*_delta records, whose sole purpose was
+         * exactly this optimisation.
+         */
+        state = GenericXLogStart(index);
+        metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+        tailpage = GenericXLogRegisterBuffer(state, tailbuf,
+                                             tail_is_new
+                                             ? GENERIC_XLOG_FULL_IMAGE : 0);
+        if (tail_is_new)
+        {
+            /* Re-apply acquire_tail's init/link against the scratch pages. */
+            pending_page_init(tailpage);
+            if (BufferIsValid(prev_tailbuf))
+            {
+                Page prevpage =
+                    GenericXLogRegisterBuffer(state, prev_tailbuf, 0);
+
+                pending_header(prevpage)->next_page =
+                    BufferGetBlockNumber(tailbuf);
+            }
+            PgTreMetaPageGet(metapage)->pending_tail =
+                BufferGetBlockNumber(tailbuf);
+        }
+
         hdr     = pending_header(tailpage);
         entries = pending_entries(tailpage);
 
@@ -214,6 +258,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
         if (room <= 0)
         {
             /* Shouldn't happen: acquire_tail just checked.  Defensive. */
+            GenericXLogAbort(state);
             if (BufferIsValid(prev_tailbuf))
                 UnlockReleaseBuffer(prev_tailbuf);
             UnlockReleaseBuffer(tailbuf);
@@ -238,75 +283,15 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
 
         PgTreMetaPageGet(metapage)->pending_n_entries += take;
 
-        MarkBufferDirty(tailbuf);
-        MarkBufferDirty(metabuf);
-
-        if (RelationNeedsWAL(index))
-        {
-            XLogRecPtr recptr;
-            XLogBeginInsert();
-
-            if (tail_is_new)
-            {
-                /*
-                 * Fresh tail page: standby cannot reconstruct the
-                 * page-init layout (special-area tag, initial
-                 * pd_lower/pd_upper) from a delta, so emit the
-                 * full-page image variant.
-                 */
-                XLogRegisterBuffer(0, metabuf,
-                                   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-                XLogRegisterBuffer(1, tailbuf,
-                                   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-                /*
-                 * When the previous tail was full we just linked it to
-                 * this new page.  That next_page mutation MUST travel in
-                 * the same record, or recovery/standby loses the chain
-                 * link.  Ship it as a full-page image (block 2).
-                 */
-                if (BufferIsValid(prev_tailbuf))
-                    XLogRegisterBuffer(2, prev_tailbuf,
-                                       REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-                recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_INSERT);
-            }
-            else
-            {
-                /*
-                 * Existing tail page: emit a delta describing exactly
-                 * the bytes that changed.  Cuts WAL volume from two
-                 * full-page images (~16 KB) to a few hundred bytes.
-                 *
-                 * The standby's redo applies the delta on top of its
-                 * current page state via XLogReadBufferForRedo.  See
-                 * pg_tre_redo_pending_insert_delta in src/wal/xlog.c.
-                 */
-                xl_pg_tre_pending_insert_meta_delta meta_d;
-                xl_pg_tre_pending_insert_tail_delta tail_d;
-
-                meta_d.n_entries_added = (uint32) take;
-
-                tail_d.prev_n_entries = (uint16)
-                    (hdr->n_entries - take);
-                tail_d.take = (uint16) take;
-
-                XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
-                XLogRegisterBufData(0, (char *) &meta_d, sizeof(meta_d));
-
-                XLogRegisterBuffer(1, tailbuf, REGBUF_STANDARD);
-                XLogRegisterBufData(1, (char *) &tail_d, sizeof(tail_d));
-                XLogRegisterBufData(1,
-                    (char *) &entries[tail_d.prev_n_entries],
-                    take * sizeof(PgTrePendingEntry));
-
-                recptr = XLogInsert(RM_PG_TRE_ID,
-                                    XLOG_PTRE_PENDING_INSERT |
-                                    XLOG_PTRE_DELTA_FLAG);
-            }
-            PageSetLSN(tailpage, recptr);
-            PageSetLSN(metapage, recptr);
-            if (BufferIsValid(prev_tailbuf))
-                PageSetLSN(BufferGetPage(prev_tailbuf), recptr);
-        }
+        /*
+         * One record for meta + tail (+ prev_tail when the chain grew).
+         * GenericXLogFinish computes the page diffs, enters its own critical
+         * section, marks the buffers dirty and stamps the LSNs -- replacing
+         * the explicit MarkBufferDirty/PageSetLSN pair and BOTH former
+         * branches (full-page-image for a fresh tail, hand-built delta for an
+         * existing one).
+         */
+        GenericXLogFinish(state);
 
         if (BufferIsValid(prev_tailbuf))
             UnlockReleaseBuffer(prev_tailbuf);
@@ -1112,6 +1097,7 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
     uint32  survive = 0;
     uint64  surviving_total = 0;
     bool    free_wm_tail = false;
+    GenericXLogState *state;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
@@ -1174,7 +1160,23 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
      * where no pg_tre buffer lock is held -- that is the scan.
      */
 
-    START_CRIT_SECTION();
+    /*
+     * Start the generic record only now.  It must come AFTER the survivor
+     * tally above, which acquires share locks on the trailing chain: page
+     * modifications belong inside the generic scope and the tally must not
+     * be.  Re-derive the meta and tail pointers from the scratch copies --
+     * everything below writes through these, not through the buffers.
+     */
+    state = GenericXLogStart(index);
+    metapage = GenericXLogRegisterBuffer(state, metabuf,
+                                         GENERIC_XLOG_FULL_IMAGE);
+    m = PgTreMetaPageGet(metapage);
+    if (rewind_tail)
+    {
+        tailpage = GenericXLogRegisterBuffer(state, tailbuf,
+                                             GENERIC_XLOG_FULL_IMAGE);
+        thdr = pending_header(tailpage);
+    }
 
     if (!rewind_tail)
     {
@@ -1217,8 +1219,6 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
         consumed = (old_total >= surviving_total)
                    ? old_total - surviving_total : 0;
         m->pending_n_entries = surviving_total;
-
-        MarkBufferDirty(tailbuf);
     }
 
     /* Swap in the new tree roots / stats in the SAME meta write. */
@@ -1227,29 +1227,14 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
     m->n_trigrams       = n_trigrams;
     m->n_tuples_indexed = n_tuples_indexed;
 
-    MarkBufferDirty(metabuf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-        XLogBeginInsert();
-        /*
-         * FPI both pages.  Bundling the meta (root swap + list head/
-         * counter) and the rewound watermark tail in one record makes
-         * replay atomic: a crash can never reproduce "new root, stale
-         * list" or a half-compacted tail.
-         */
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        if (rewind_tail)
-            XLogRegisterBuffer(1, tailbuf,
-                               REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_PENDING_MERGE_C);
-        PageSetLSN(metapage, recptr);
-        if (rewind_tail)
-            PageSetLSN(tailpage, recptr);
-    }
-
-    END_CRIT_SECTION();
+    /*
+     * One record covering the meta (root swap + list head/counter) and, when
+     * the tail was rewound, the compacted watermark tail.  Bundling them
+     * keeps replay atomic: a crash can never reproduce "new root, stale
+     * list" or a half-compacted tail.  GenericXLogFinish supplies the
+     * critical section, the dirty marks and the LSNs.
+     */
+    GenericXLogFinish(state);
 
     if (BufferIsValid(tailbuf))
         UnlockReleaseBuffer(tailbuf);

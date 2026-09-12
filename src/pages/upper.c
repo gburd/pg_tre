@@ -21,6 +21,7 @@
 #include "postgres.h"
 
 #include "access/xlog.h"
+#include "access/generic_xlog.h"
 #include "access/xloginsert.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
@@ -130,13 +131,16 @@ upper_flush_leaf(UpperBulkState *state)
     Page    page;
     char   *dest;
     Size    entries_size;
+    GenericXLogState *xlog_state;
 
     if (state->leaf_n_entries == 0)
         return;
 
     /* Extend and initialize a new leaf page. */
     buf = pg_tre_extend(state->index, PG_TRE_PAGE_UPPER_L);
-    page = BufferGetPage(buf);
+
+    xlog_state = GenericXLogStart(state->index);
+    page = GenericXLogRegisterBuffer(xlog_state, buf, 0);
 
     /*
      * Layout: PageHeader | PgTreUpperLeafEntry[] | inline blobs | Opaque
@@ -169,25 +173,7 @@ upper_flush_leaf(UpperBulkState *state)
      * inline blobs after the entry array). */
     PageTreGetOpaque(page)->flags = (uint16) state->leaf_n_entries;
 
-    START_CRIT_SECTION();
-
-    MarkBufferDirty(buf);
-
-    /* WAL-log as full-page image.  MarkBufferDirty must precede
-     * XLogRegisterBuffer (PG18 asserts buffer is dirty + exclusively
-     * locked). */
-    if (RelationNeedsWAL(state->index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
-        PageSetLSN(page, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(xlog_state);
 
     /* Record the leaf block and its first key. */
     if (state->n_leaves >= state->leaves_alloced)
@@ -331,12 +317,15 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
         int     start = (int) ((int64) page_idx * n_entries / n_pages);
         int     end   = (int) ((int64) (page_idx + 1) * n_entries / n_pages);
         int     this_n = end - start;
+        GenericXLogState *state;
 
         Assert(this_n > 0);
         Assert(this_n <= entries_per_page);
 
         buf = pg_tre_extend(index, PG_TRE_PAGE_UPPER);
-        page = BufferGetPage(buf);
+
+        state = GenericXLogStart(index);
+        page = GenericXLogRegisterBuffer(state, buf, 0);
         entries = (PgTreUpperInternalEntry *) PageGetContents(page);
         for (i = 0; i < this_n; i++)
         {
@@ -347,24 +336,7 @@ upper_build_internal_level(Relation index, uint64 *keys, BlockNumber *blocks,
         ((PageHeader) page)->pd_lower =
             (char *) &entries[this_n] - (char *) page;
 
-        START_CRIT_SECTION();
-
-        MarkBufferDirty(buf);
-
-        /* MarkBufferDirty must precede XLogRegisterBuffer (PG18
-         * asserts buffer is dirty + exclusively locked). */
-        if (RelationNeedsWAL(index))
-        {
-            XLogRecPtr recptr;
-
-            XLogBeginInsert();
-            XLogRegisterBuffer(0, buf,
-                               REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_UPPER_INSERT);
-            PageSetLSN(page, recptr);
-        }
-
-        END_CRIT_SECTION();
+        GenericXLogFinish(state);
 
         next_keys[page_idx]   = keys[start];   /* first key on this page */
         next_blocks[page_idx] = BufferGetBlockNumber(buf);

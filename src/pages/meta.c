@@ -173,9 +173,6 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
     metabuf = pg_tre_extend_fork(index, forknum, PG_TRE_PAGE_META);
     Assert(BufferGetBlockNumber(metabuf) == PG_TRE_META_BLKNO);
 
-    metapage = BufferGetPage(metabuf);
-    pg_tre_meta_init(metapage);
-
     /*
      * WAL-log the meta-page init.  Two paths:
      *
@@ -189,23 +186,18 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
      */
     wal_log = (forknum == INIT_FORKNUM) || RelationNeedsWAL(index);
 
-    START_CRIT_SECTION();
-
-    MarkBufferDirty(metabuf);
-
-    /* MarkBufferDirty must precede XLogRegisterBuffer (PG18 asserts
-     * buffer is dirty + exclusively locked). */
-    if (wal_log)
     {
-        XLogRecPtr recptr;
+        GenericXLogState *state;
 
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-        PageSetLSN(metapage, recptr);
+        state = GenericXLogStart(index);
+        metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+        pg_tre_meta_init(metapage);
+
+        if (wal_log)
+            GenericXLogFinish(state);
+        else
+            GenericXLogAbort(state);
     }
-
-    END_CRIT_SECTION();
 
     UnlockReleaseBuffer(metabuf);
 
@@ -228,10 +220,13 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
     Buffer metabuf;
     Page   metapage;
     PgTreMetaPage meta;
+    GenericXLogState *state;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
-    metapage = BufferGetPage(metabuf);
+
+    state = GenericXLogStart(index);
+    metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
     meta = PgTreMetaPageGet(metapage);
 
     /* Update tree roots and stats. */
@@ -240,25 +235,7 @@ pg_tre_meta_set_roots(Relation index, BlockNumber root_upper,
     meta->n_trigrams = n_trigrams;
     meta->n_tuples_indexed = n_tuples_indexed;
 
-    START_CRIT_SECTION();
-
-    MarkBufferDirty(metabuf);
-
-    /* WAL-log the update.  MarkBufferDirty must precede
-     * XLogRegisterBuffer (PG18 asserts buffer is dirty + exclusively
-     * locked). */
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-        PageSetLSN(metapage, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     UnlockReleaseBuffer(metabuf);
 }

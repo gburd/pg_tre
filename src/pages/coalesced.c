@@ -24,6 +24,7 @@
 
 #include "postgres.h"
 
+#include "access/generic_xlog.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "miscadmin.h"
@@ -127,8 +128,15 @@ flush_page(PgTreCoalescedWriter *w)
         return;
 
     /* Edits already made under no lock conflict (we hold the buffer
-     * exclusive from pg_tre_extend); do the dirty + WAL atomically. */
-    START_CRIT_SECTION();
+     * exclusive from pg_tre_extend); GenericXLogFinish does dirty + WAL. */
+    GenericXLogState *state;
+
+    state = GenericXLogStart(w->index);
+    w->page = GenericXLogRegisterBuffer(state, w->buf, 0);
+    w->hdr = (PgTreCoalescedHeader *) PageGetContents(w->page);
+    w->slots = (PgTreCoalescedSlot *)
+        ((char *) w->page + MAXALIGN(SizeOfPageHeaderData)
+         + MAXALIGN(sizeof(PgTreCoalescedHeader)));
 
     ((PageHeader) w->page)->pd_lower =
         (uint16) (MAXALIGN(SizeOfPageHeaderData)
@@ -136,19 +144,7 @@ flush_page(PgTreCoalescedWriter *w)
                   + (Size) w->hdr->n_slots * sizeof(PgTreCoalescedSlot));
     ((PageHeader) w->page)->pd_upper = w->hdr->free_offset;
 
-    MarkBufferDirty(w->buf);
-
-    if (RelationNeedsWAL(w->index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, w->buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_INSERT);
-        PageSetLSN(w->page, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     UnlockReleaseBuffer(w->buf);
     w->buf = InvalidBuffer;

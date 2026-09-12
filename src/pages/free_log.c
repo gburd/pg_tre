@@ -23,6 +23,7 @@
 
 #include <string.h>
 
+#include "access/generic_xlog.h"
 #include "access/transam.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
@@ -295,10 +296,22 @@ free_log_append_chunk(
 	PgTreFreeLogEntry  *ents;
 	int					take, i;
 	bool				new_page = false;
+	GenericXLogState   *state;
 
 	metabuf = pg_tre_read(
 			index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META, BUFFER_LOCK_EXCLUSIVE);
-	metapage = BufferGetPage(metabuf);
+	/*
+	 * Generic WAL: every page modification below must target the scratch
+	 * pages returned by GenericXLogRegisterBuffer, not BufferGetPage().
+	 * The meta scratch page is needed before the catalog page is chosen,
+	 * since meta->free_log_head drives that choice, and a freshly extended
+	 * catalog page is initialised through its own scratch pointer.
+	 *
+	 * Registration order matches the old block_ids (meta=0, catalog=1) so
+	 * replay ordering is unchanged from the custom rmgr.
+	 */
+	state	 = GenericXLogStart(index);
+	metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
 	meta	 = PgTreMetaPageGet(metapage);
 	if (meta->free_log_head == 0)
 		meta->free_log_head = InvalidBlockNumber;
@@ -306,7 +319,7 @@ free_log_append_chunk(
 	if (meta->free_log_head == InvalidBlockNumber)
 	{
 		catbuf			= pg_tre_extend(index, PG_TRE_PAGE_FREE_LOG);
-		catpage			= BufferGetPage(catbuf);
+		catpage			= GenericXLogRegisterBuffer(state, catbuf, 0);
 		hdr				= free_log_header(catpage);
 		hdr->right_link = InvalidBlockNumber;
 		hdr->n_entries	= 0;
@@ -322,15 +335,28 @@ free_log_append_chunk(
 				meta->free_log_head,
 				PG_TRE_PAGE_FREE_LOG,
 				BUFFER_LOCK_EXCLUSIVE);
-		catpage = BufferGetPage(catbuf);
+		catpage = GenericXLogRegisterBuffer(state, catbuf, 0);
 		hdr		= free_log_header(catpage);
 
 		if ((int)hdr->n_entries >= FREE_LOG_CAP)
 		{
 			BlockNumber old_head = meta->free_log_head;
+
+			/*
+			 * The full page needs no changes, so discard this record and
+			 * start a fresh one over the new catalog page.  GenericXLogAbort
+			 * throws away the scratch copies without touching the buffers;
+			 * the meta buffer stays locked and is simply re-registered.
+			 */
+			GenericXLogAbort(state);
 			UnlockReleaseBuffer(catbuf);
+
+			state	 = GenericXLogStart(index);
+			metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+			meta	 = PgTreMetaPageGet(metapage);
+
 			catbuf			= pg_tre_extend(index, PG_TRE_PAGE_FREE_LOG);
-			catpage			= BufferGetPage(catbuf);
+			catpage			= GenericXLogRegisterBuffer(state, catbuf, 0);
 			hdr				= free_log_header(catpage);
 			hdr->right_link = old_head;
 			hdr->n_entries	= 0;
@@ -346,8 +372,6 @@ free_log_append_chunk(
 	if (take > FREE_LOG_CAP - (int)hdr->n_entries)
 		take = FREE_LOG_CAP - (int)hdr->n_entries;
 
-	START_CRIT_SECTION();
-
 	for (i = 0; i < take; i++)
 	{
 		ents[hdr->n_entries + i].block		   = blocks[base + i];
@@ -360,22 +384,7 @@ free_log_append_chunk(
 
 	meta->free_log_head = BufferGetBlockNumber(catbuf);
 
-	MarkBufferDirty(catbuf);
-	MarkBufferDirty(metabuf);
-
-	if (RelationNeedsWAL(index))
-	{
-		XLogRecPtr recptr;
-
-		XLogBeginInsert();
-		XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-		XLogRegisterBuffer(1, catbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-		recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_FREE_LOG);
-		PageSetLSN(catpage, recptr);
-		PageSetLSN(metapage, recptr);
-	}
-
-	END_CRIT_SECTION();
+	GenericXLogFinish(state);
 
 	(void)new_page;
 	UnlockReleaseBuffer(catbuf);
@@ -444,44 +453,42 @@ static void
 free_log_reclaim_one(
 		Relation index, Buffer logbuf, int slot, BlockNumber target)
 {
-	Page				logpage = BufferGetPage(logbuf);
-	PgTreFreeLogHeader *hdr		= free_log_header(logpage);
-	PgTreFreeLogEntry  *ents	= free_log_entries(logpage);
+	Page				logpage;
+	PgTreFreeLogHeader *hdr;
+	PgTreFreeLogEntry  *ents;
 	Buffer				tbuf;
 	Page				tpage;
+	GenericXLogState   *state;
 
 	tbuf = ReadBuffer(index, target);
 	LockBuffer(tbuf, BUFFER_LOCK_EXCLUSIVE);
-	tpage = BufferGetPage(tbuf);
 
-	START_CRIT_SECTION();
+	/*
+	 * Generic WAL.  Note logpage/hdr/ents are derived AFTER registration:
+	 * they must point into the scratch copy of the caller's log buffer, not
+	 * into the buffer itself, or the entry removal below would be written
+	 * outside the WAL record and lost on replay.  Registration order matches
+	 * the old block_ids (target=0, log=1).
+	 */
+	state = GenericXLogStart(index);
+	tpage = GenericXLogRegisterBuffer(state, tbuf, GENERIC_XLOG_FULL_IMAGE);
+	logpage = GenericXLogRegisterBuffer(state, logbuf, 0);
+	hdr	  = free_log_header(logpage);
+	ents  = free_log_entries(logpage);
 
 	/* Reinitialize the target as a blank page (free-log kind sentinel;
 	 * the page is immediately handed to the FSM and reused -- the kind
-	 * only matters until pg_tre_extend re-inits it). */
+	 * only matters until pg_tre_extend re-inits it).  FULL_IMAGE because
+	 * the whole page is being rewritten, so a delta would be no smaller. */
 	pg_tre_page_init(tpage, BLCKSZ, PG_TRE_PAGE_FREE_LOG);
-	MarkBufferDirty(tbuf);
 
 	/* Remove the entry: move the last one into this slot. */
 	ents[slot] = ents[hdr->n_entries - 1];
 	hdr->n_entries--;
 	((PageHeader)logpage)->pd_lower =
 			(char *)&ents[hdr->n_entries] - (char *)logpage;
-	MarkBufferDirty(logbuf);
 
-	if (RelationNeedsWAL(index))
-	{
-		XLogRecPtr recptr;
-
-		XLogBeginInsert();
-		XLogRegisterBuffer(0, tbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-		XLogRegisterBuffer(1, logbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-		recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_FREE_LOG);
-		PageSetLSN(tpage, recptr);
-		PageSetLSN(logpage, recptr);
-	}
-
-	END_CRIT_SECTION();
+	GenericXLogFinish(state);
 
 	UnlockReleaseBuffer(tbuf);
 
@@ -586,24 +593,25 @@ pg_tre_free_log_drain(
 
 			if (hhdr->n_entries == 0 && hhdr->right_link == InvalidBlockNumber)
 			{
-				START_CRIT_SECTION();
-				pg_tre_page_init(hpage, BLCKSZ, PG_TRE_PAGE_FREE_LOG);
-				m->free_log_head = InvalidBlockNumber;
-				MarkBufferDirty(hbuf);
-				MarkBufferDirty(metabuf);
-				if (RelationNeedsWAL(index))
-				{
-					XLogRecPtr recptr;
-					XLogBeginInsert();
-					XLogRegisterBuffer(
-							0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-					XLogRegisterBuffer(
-							1, hbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-					recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_FREE_LOG);
-					PageSetLSN(metapage, recptr);
-					PageSetLSN(hpage, recptr);
-				}
-				END_CRIT_SECTION();
+				/*
+				 * Only now do we know we are writing, so start the generic
+				 * record here rather than around the read-only test above.
+				 * Re-derive both page pointers from the scratch copies:
+				 * hpage/metapage above point at the buffers and must not be
+				 * written through.  Registration order matches the old
+				 * block_ids (meta=0, head=1).
+				 */
+				GenericXLogState *state = GenericXLogStart(index);
+				Page			  s_metapage =
+						GenericXLogRegisterBuffer(state, metabuf, 0);
+				Page			  s_hpage = GenericXLogRegisterBuffer(
+						state, hbuf, GENERIC_XLOG_FULL_IMAGE);
+
+				pg_tre_page_init(s_hpage, BLCKSZ, PG_TRE_PAGE_FREE_LOG);
+				PgTreMetaPageGet(s_metapage)->free_log_head =
+						InvalidBlockNumber;
+
+				GenericXLogFinish(state);
 				collapsed = true;
 				UnlockReleaseBuffer(hbuf);
 				RecordFreeIndexPage(index, head);

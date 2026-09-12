@@ -15,6 +15,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "access/relation.h"
+#include "access/generic_xlog.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "storage/bufmgr.h"
@@ -227,13 +228,67 @@ pg_tre_run_catalog_append(Relation index, PgTreRun *run)
     PgTreRunCatalogHeader *hdr;
     PgTreRun   *runs;
     uint64      assigned_id;
+    GenericXLogState *state;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
-    metapage = BufferGetPage(metabuf);
-    meta = PgTreMetaPageGet(metapage);
 
-    /* Normalize a pre-v7 meta tail in place (matches pg_tre_meta_read). */
+    /*
+     * Decide which catalog page to use by READING the meta buffer, but do not
+     * write anything yet: every mutation below happens through the scratch
+     * pages so it lands in the WAL record.  `fresh_head` records whether the
+     * chosen page needs initialising, which is deferred for the same reason.
+     */
+    meta = PgTreMetaPageGet(BufferGetPage(metabuf));
+    {
+        BlockNumber head = meta->run_catalog_head;
+        bool        fresh_head;
+        BlockNumber old_head = InvalidBlockNumber;
+
+        if (meta->n_runs == 0 && head == 0)
+            head = InvalidBlockNumber;
+
+        if (head == InvalidBlockNumber)
+        {
+            catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
+            fresh_head = true;
+        }
+        else
+        {
+            catbuf = pg_tre_read(index, head, PG_TRE_PAGE_RUN_CATALOG,
+                                 BUFFER_LOCK_EXCLUSIVE);
+            hdr = (PgTreRunCatalogHeader *)
+                PageGetContents(BufferGetPage(catbuf));
+            if (hdr->n_entries >= RUN_CATALOG_CAP)
+            {
+                /* Head full: chain a fresh head in front (newest-first). */
+                old_head = head;
+                UnlockReleaseBuffer(catbuf);
+                catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
+                fresh_head = true;
+            }
+            else
+                fresh_head = false;
+        }
+
+        state = GenericXLogStart(index);
+        metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+        /* A fresh page has no useful pre-image; an existing one deltas. */
+        catpage = GenericXLogRegisterBuffer(state, catbuf,
+                                            fresh_head
+                                            ? GENERIC_XLOG_FULL_IMAGE : 0);
+        meta = PgTreMetaPageGet(metapage);
+        hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
+
+        if (fresh_head)
+        {
+            hdr->right_link = old_head;
+            hdr->n_entries = 0;
+            hdr->_pad0 = 0;
+        }
+    }
+
+    /* Normalize a pre-v7 meta tail (matches pg_tre_meta_read). */
     if (meta->next_run_id == 0)
         meta->next_run_id = 1;
     if (meta->max_levels == 0)
@@ -244,43 +299,15 @@ pg_tre_run_catalog_append(Relation index, PgTreRun *run)
     assigned_id = meta->next_run_id;
     run->run_id = assigned_id;
 
-    /* Obtain a catalog page with room, or create the first/new head. */
-    if (meta->run_catalog_head == InvalidBlockNumber)
-    {
-        catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
-        catpage = BufferGetPage(catbuf);
-        hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
-        hdr->right_link = InvalidBlockNumber;
-        hdr->n_entries = 0;
-        hdr->_pad0 = 0;
-    }
-    else
-    {
-        catbuf = pg_tre_read(index, meta->run_catalog_head,
-                             PG_TRE_PAGE_RUN_CATALOG, BUFFER_LOCK_EXCLUSIVE);
-        catpage = BufferGetPage(catbuf);
-        hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
-
-        if (hdr->n_entries >= RUN_CATALOG_CAP)
-        {
-            /* Head full: chain a fresh head page in front (newest-first). */
-            BlockNumber old_head = meta->run_catalog_head;
-            UnlockReleaseBuffer(catbuf);
-            catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
-            catpage = BufferGetPage(catbuf);
-            hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
-            hdr->right_link = old_head;
-            hdr->n_entries = 0;
-            hdr->_pad0 = 0;
-        }
-    }
-
     runs = (PgTreRun *)
         (((char *) PageGetContents(catpage)) +
          MAXALIGN(sizeof(PgTreRunCatalogHeader)));
 
-    /* All page edits + WAL inside one critical section. */
-    START_CRIT_SECTION();
+    meta = PgTreMetaPageGet(metapage);
+    hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
+    runs = (PgTreRun *)
+        (((char *) PageGetContents(catpage)) +
+         MAXALIGN(sizeof(PgTreRunCatalogHeader)));
 
     runs[hdr->n_entries] = *run;
     hdr->n_entries++;
@@ -294,22 +321,7 @@ pg_tre_run_catalog_append(Relation index, PgTreRun *run)
     else
         meta->n_runs++;
 
-    MarkBufferDirty(catbuf);
-    MarkBufferDirty(metabuf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        XLogRegisterBuffer(1, catbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-        PageSetLSN(catpage, recptr);
-        PageSetLSN(metapage, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     UnlockReleaseBuffer(catbuf);
     UnlockReleaseBuffer(metabuf);
@@ -338,13 +350,14 @@ pg_tre_run_catalog_collapse_reset(Relation index, BlockNumber new_root_upper,
     Buffer        metabuf;
     Page          metapage;
     PgTreMetaPage meta;
+    GenericXLogState *state;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
-    metapage = BufferGetPage(metabuf);
-    meta = PgTreMetaPageGet(metapage);
 
-    START_CRIT_SECTION();
+    state = GenericXLogStart(index);
+    metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+    meta = PgTreMetaPageGet(metapage);
 
     meta->root_upper       = new_root_upper;
     meta->root_range       = new_root_range;
@@ -354,19 +367,7 @@ pg_tre_run_catalog_collapse_reset(Relation index, BlockNumber new_root_upper,
     meta->run_catalog_head = InvalidBlockNumber;
     meta->n_runs           = 0;
 
-    MarkBufferDirty(metabuf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-        PageSetLSN(metapage, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     UnlockReleaseBuffer(metabuf);
 }
@@ -398,6 +399,7 @@ pg_tre_run_catalog_rewrite(Relation index, const PgTreRun *runs, int n)
     Buffer        catbuf = InvalidBuffer;
     Page          catpage = NULL;
     BlockNumber   cat_blk = InvalidBlockNumber;
+    GenericXLogState *state;
 
     if (n < 0)
         n = 0;
@@ -409,8 +411,15 @@ pg_tre_run_catalog_rewrite(Relation index, const PgTreRun *runs, int n)
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
-    metapage = BufferGetPage(metabuf);
-    meta = PgTreMetaPageGet(metapage);
+
+    if (n > 0)
+    {
+        catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
+        cat_blk = BufferGetBlockNumber(catbuf);
+    }
+
+    state = GenericXLogStart(index);
+    metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
 
     if (n > 0)
     {
@@ -418,9 +427,17 @@ pg_tre_run_catalog_rewrite(Relation index, const PgTreRun *runs, int n)
         PgTreRun *dst;
         int i;
 
-        catbuf = pg_tre_extend(index, PG_TRE_PAGE_RUN_CATALOG);
-        catpage = BufferGetPage(catbuf);
-        cat_blk = BufferGetBlockNumber(catbuf);
+        /*
+         * Populate the catalog page through its SCRATCH copy.  Writing it
+         * into the shared buffer before registration (as an earlier version
+         * of this conversion did) makes generic WAL diff the page against its
+         * own already-mutated contents: the record ships no catalog bytes at
+         * all and crash recovery silently loses the whole run catalog.  A
+         * freshly extended page has no useful pre-image, so ask for a
+         * full-page image rather than a delta.
+         */
+        catpage = GenericXLogRegisterBuffer(state, catbuf,
+                                           GENERIC_XLOG_FULL_IMAGE);
         hdr = (PgTreRunCatalogHeader *) PageGetContents(catpage);
         hdr->right_link = InvalidBlockNumber;
         hdr->n_entries = (uint32) n;
@@ -434,30 +451,12 @@ pg_tre_run_catalog_rewrite(Relation index, const PgTreRun *runs, int n)
             ((char *) &dst[n] - (char *) catpage);
     }
 
-    START_CRIT_SECTION();
+    meta = PgTreMetaPageGet(metapage);
 
     meta->run_catalog_head = (n > 0) ? cat_blk : InvalidBlockNumber;
     meta->n_runs           = (n > 0) ? (uint32) (n + 1) : 0;
 
-    if (n > 0)
-        MarkBufferDirty(catbuf);
-    MarkBufferDirty(metabuf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, metabuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        if (n > 0)
-            XLogRegisterBuffer(1, catbuf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-        PageSetLSN(metapage, recptr);
-        if (n > 0)
-            PageSetLSN(catpage, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     if (BufferIsValid(catbuf))
         UnlockReleaseBuffer(catbuf);

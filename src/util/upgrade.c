@@ -38,6 +38,7 @@
 
 #include "access/genam.h"
 #include "access/xact.h"
+#include "access/generic_xlog.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/index.h"
@@ -227,6 +228,7 @@ pg_tre_meta_set_min_format_version(Relation index, uint32 min_version)
     Page metapage;
     PgTreMetaPage meta;
     bool changed;
+    GenericXLogState *state;
 
     metabuf = pg_tre_read(index, PG_TRE_META_BLKNO, PG_TRE_PAGE_META,
                           BUFFER_LOCK_EXCLUSIVE);
@@ -247,19 +249,12 @@ pg_tre_meta_set_min_format_version(Relation index, uint32 min_version)
 
     if (changed)
     {
+        state = GenericXLogStart(index);
+        metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+        meta = PgTreMetaPageGet(metapage);
+
         meta->min_page_format_version = min_version;
-        MarkBufferDirty(metabuf);
-
-        if (RelationNeedsWAL(index))
-        {
-            XLogRecPtr recptr;
-
-            XLogBeginInsert();
-            XLogRegisterBuffer(0, metabuf,
-                               REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_META_UPDATE);
-            PageSetLSN(metapage, recptr);
-        }
+        GenericXLogFinish(state);
     }
 
     UnlockReleaseBuffer(metabuf);
@@ -335,30 +330,23 @@ pg_tre_upgrade_index(PG_FUNCTION_ARGS)
                             (uint32) PG_TRE_FORMAT_VERSION_LATEST)));
         }
 
-        START_CRIT_SECTION();
-
-        changed = pg_tre_upgrade_page_to_latest(page);
-
-        if (changed)
         {
-            MarkBufferDirty(buf);
+            GenericXLogState *state;
+            bool changed;
 
-            if (RelationNeedsWAL(index))
-            {
-                XLogRecPtr recptr;
+            state = GenericXLogStart(index);
+            page = GenericXLogRegisterBuffer(state, buf, 0);
 
-                XLogBeginInsert();
-                XLogRegisterBuffer(0, buf,
-                                   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-                recptr = XLogInsert(RM_PG_TRE_ID,
-                                    XLOG_PTRE_PAGE_FORMAT_UPGRADE);
-                PageSetLSN(page, recptr);
-            }
+            changed = pg_tre_upgrade_page_to_latest(page);
+
+            if (changed)
+                GenericXLogFinish(state);
+            else
+                GenericXLogAbort(state);
         }
 
-        END_CRIT_SECTION();
-
         /* Track the minimum across all pages we've seen so far. */
+        opq = PageTreGetOpaque(BufferGetPage(buf));
         if (opq->format_version < observed_min)
             observed_min = opq->format_version;
 

@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "access/genam.h"
+#include "access/generic_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -169,19 +170,36 @@ static void
 posting_leaf_unlink(Relation index, Buffer prev_buf, Buffer cur_buf,
                     BlockNumber cur_blk)
 {
-    Page    prev_page = BufferGetPage(prev_buf);
-    Page    cur_page  = BufferGetPage(cur_buf);
-    PgTrePostingLeafHeader *prev_hdr =
-        (PgTrePostingLeafHeader *) PageGetContents(prev_page);
-    PgTrePostingLeafHeader *cur_hdr =
-        (PgTrePostingLeafHeader *) PageGetContents(cur_page);
-    PageTreOpaque cur_opq = PageTreGetOpaque(cur_page);
-    BlockNumber cur_right = cur_hdr->right_link;
-    FullTransactionId del_xid = ReadNextFullTransactionId();
+    Page    prev_page;
+    Page    cur_page;
+    PgTrePostingLeafHeader *prev_hdr;
+    PgTrePostingLeafHeader *cur_hdr;
+    PageTreOpaque cur_opq;
+    BlockNumber cur_right;
+    FullTransactionId del_xid;
     uint8  *empty_sm;
     Size    empty_sm_sz;
     char   *sm_area;
     Size    xid_off;
+    GenericXLogState *state;
+
+    /* Read cur_right + del_xid before GenericXLogRegisterBuffer. */
+    cur_page = BufferGetPage(cur_buf);
+    cur_hdr = (PgTrePostingLeafHeader *) PageGetContents(cur_page);
+    cur_right = cur_hdr->right_link;
+    del_xid = ReadNextFullTransactionId();
+
+    state = GenericXLogStart(index);
+    prev_page = GenericXLogRegisterBuffer(state, prev_buf, 0);
+    /* FULL_IMAGE: the page is being reinitialised as a deleted waypoint,
+     * so a delta against the pre-image saves nothing.  (Passing a bare 1
+     * happened to work only because GENERIC_XLOG_FULL_IMAGE == 0x0001.) */
+    cur_page  = GenericXLogRegisterBuffer(state, cur_buf,
+                                          GENERIC_XLOG_FULL_IMAGE);
+
+    prev_hdr = (PgTrePostingLeafHeader *) PageGetContents(prev_page);
+    cur_hdr  = (PgTrePostingLeafHeader *) PageGetContents(cur_page);
+    cur_opq  = PageTreGetOpaque(cur_page);
 
     /* 1. Splice cur out of the chain. */
     prev_hdr->right_link = cur_right;
@@ -216,23 +234,7 @@ posting_leaf_unlink(Relation index, Buffer prev_buf, Buffer cur_buf,
     ((PageHeader) cur_page)->pd_upper =
         BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData));
 
-    START_CRIT_SECTION();
-
-    MarkBufferDirty(prev_buf);
-    MarkBufferDirty(cur_buf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, prev_buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        XLogRegisterBuffer(1, cur_buf,  REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_UNLINK);
-        PageSetLSN(prev_page, recptr);
-        PageSetLSN(cur_page, recptr);
-    }
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
     (void) cur_blk;
 }
 
@@ -377,6 +379,7 @@ write_single_leaf(Relation index, uint64 trigram_hash,
     char   *sparsemap_area;
     char   *payload_area;
     Size    total_sz;
+    GenericXLogState *state;
 
     total_sz = sz + payload_sz;
     if (total_sz > posting_leaf_budget())
@@ -392,8 +395,10 @@ write_single_leaf(Relation index, uint64 trigram_hash,
                          "that work completes.")));
 
     buf   = pg_tre_extend(index, PG_TRE_PAGE_POSTING_L);
-    page  = BufferGetPage(buf);
     blkno = BufferGetBlockNumber(buf);
+
+    state = GenericXLogStart(index);
+    page = GenericXLogRegisterBuffer(state, buf, 0);
 
     /* PgTrePostingLeafHeader lives right after the PageHeader, before the
      * line-pointer area (we don't use line pointers on this page).  Store
@@ -433,21 +438,7 @@ write_single_leaf(Relation index, uint64 trigram_hash,
         ((PageHeader) page)->pd_lower = (sparsemap_area + sz) - (char *) page;
     }
 
-    START_CRIT_SECTION();
-
-    MarkBufferDirty(buf);
-
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_INSERT);
-        PageSetLSN(page, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     UnlockReleaseBuffer(buf);
     return blkno;
@@ -1418,11 +1409,10 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
                            IndexBulkDeleteCallback callback,
                            void *callback_state, uint64 *out_remaining)
 {
-    Page    page = BufferGetPage(buf);
-    PageTreOpaque opq = PageTreGetOpaque(page);
-    PgTreUpperLeafEntry *entries =
-        (PgTreUpperLeafEntry *) PageGetContents(page);
-    int     n_entries = opq->flags;
+    Page    page;
+    PageTreOpaque opq;
+    PgTreUpperLeafEntry *entries;
+    int     n_entries;
     uint8  *inline_region;
     Size    old_region_used = 0;
     Size    new_region_used = 0;
@@ -1430,12 +1420,25 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
     uint64  removed = 0;
     int     i;
     bool    any_inline = false;
+    GenericXLogState *state;
+
+    /* Read n_entries before GenericXLogRegisterBuffer (to check if empty),
+     * but delay reading entries[].inline_bytes until after. */
+    page = BufferGetPage(buf);
+    opq = PageTreGetOpaque(page);
+    n_entries = opq->flags;
 
     if (n_entries == 0)
         n_entries = (((PageHeader) page)->pd_lower - sizeof(PageHeaderData))
                   / sizeof(PgTreUpperLeafEntry);
     if (n_entries <= 0)
         return 0;
+
+    /* Acquire scratch page. */
+    state = GenericXLogStart(index);
+    page = GenericXLogRegisterBuffer(state, buf, 0);
+    opq = PageTreGetOpaque(page);
+    entries = (PgTreUpperLeafEntry *) PageGetContents(page);
 
     for (i = 0; i < n_entries; i++)
     {
@@ -1455,7 +1458,10 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
         }
     }
     if (!any_inline)
+    {
+        GenericXLogAbort(state);
         return 0;
+    }
 
     /* Inline region begins immediately after the entry array. */
     inline_region = (uint8 *) &entries[n_entries];
@@ -1568,20 +1574,7 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
         ((char *) inline_region + new_region_used) - (char *) page;
     pfree(new_region);
 
-    START_CRIT_SECTION();
-
-    MarkBufferDirty(buf);
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_VACUUM);
-        PageSetLSN(page, recptr);
-    }
-
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     return removed;
 }
@@ -1598,9 +1591,8 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
                     IndexBulkDeleteCallback callback, void *callback_state,
                     uint64 *out_remaining)
 {
-    Page    page = BufferGetPage(buf);
-    PgTrePostingLeafHeader *hdr =
-        (PgTrePostingLeafHeader *) PageGetContents(page);
+    Page    page;
+    PgTrePostingLeafHeader *hdr;
     uint8  *sm_bytes;
     sm_t *smap;
     Size    bloom_bytes = (PG_TRE_BLOOM_TUPLE_BITS + 7) / 8;
@@ -1624,6 +1616,11 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
     Size    new_payload_cap = 0;
 
     uint64  member;
+    GenericXLogState *state;
+
+    /* Read original page for analysis. */
+    page = BufferGetPage(buf);
+    hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
 
     if (!posting_leaf_header_valid(hdr))
         ereport(ERROR,
@@ -1813,6 +1810,11 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
             return 0;   /* leaf unchanged; dead TIDs deferred to recheck */
         }
 
+        /* Acquire scratch page for modifications. */
+        state = GenericXLogStart(index);
+        page = GenericXLogRegisterBuffer(state, buf, 0);
+        hdr = (PgTrePostingLeafHeader *) PageGetContents(page);
+
         /* Header: preserve right_link; refresh min/max/sizes/counts. */
         hdr->min_tid         = new_min;
         hdr->max_tid         = new_max;
@@ -1854,21 +1856,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
     if (new_payload)
         pfree(new_payload);
 
-    /* WAL: MarkBufferDirty BEFORE XLogRegisterBuffer (PG18 asserts the
-     * buffer is dirty + exclusively locked); FPI replay handled by
-     * pg_tre_redo_fpi via XLOG_PTRE_VACUUM. */
-    START_CRIT_SECTION();
-    MarkBufferDirty(buf);
-    if (RelationNeedsWAL(index))
-    {
-        XLogRecPtr recptr;
-
-        XLogBeginInsert();
-        XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-        recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_VACUUM);
-        PageSetLSN(page, recptr);
-    }
-    END_CRIT_SECTION();
+    GenericXLogFinish(state);
 
     return removed;
 
@@ -2037,19 +2025,14 @@ pg_tre_posting_recycle_deleted(Relation index, Relation heaprel,
         }
 
         /* Re-initialize as a blank page and WAL-log, then record free. */
-        pg_tre_page_init(page, BLCKSZ, PG_TRE_PAGE_POSTING_L);
-        START_CRIT_SECTION();
-        MarkBufferDirty(buf);
-        if (RelationNeedsWAL(index))
         {
-            XLogRecPtr recptr;
+            GenericXLogState *state;
 
-            XLogBeginInsert();
-            XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-            recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_POSTING_RECYCLE);
-            PageSetLSN(page, recptr);
+            state = GenericXLogStart(index);
+            page = GenericXLogRegisterBuffer(state, buf, 0);
+            pg_tre_page_init(page, BLCKSZ, PG_TRE_PAGE_POSTING_L);
+            GenericXLogFinish(state);
         }
-        END_CRIT_SECTION();
         UnlockReleaseBuffer(buf);
 
         RecordFreeIndexPage(index, blk);

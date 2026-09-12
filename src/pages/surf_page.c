@@ -15,6 +15,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/generic_xlog.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/pg_am.h"
@@ -68,11 +69,14 @@ pg_tre_surf_write_image(Relation index, const uint8 *image, Size len)
 		PgTreSurfHeader *hdr;
 		Size		chunk;
 		BlockNumber this_blk;
+		GenericXLogState *state;
 
 		buf = pg_tre_extend(index, PG_TRE_PAGE_SURF);
-		page = BufferGetPage(buf);
-		content = (char *) PageGetContents(page);
 		this_blk = BufferGetBlockNumber(buf);
+
+		state = GenericXLogStart(index);
+		page = GenericXLogRegisterBuffer(state, buf, 0);
+		content = (char *) PageGetContents(page);
 
 		chunk = Min(cap, len - off);
 
@@ -87,39 +91,20 @@ pg_tre_surf_write_image(Relation index, const uint8 *image, Size len)
 			(LocationIndex) (content + MAXALIGN(sizeof(PgTreSurfHeader)) + chunk
 							 - (char *) page);
 
-		START_CRIT_SECTION();
-		MarkBufferDirty(buf);
-		if (RelationNeedsWAL(index))
-		{
-			XLogRecPtr	recptr;
-
-			XLogBeginInsert();
-			XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-			recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_SURF_UPDATE);
-			PageSetLSN(page, recptr);
-		}
-		END_CRIT_SECTION();
+		GenericXLogFinish(state);
 
 		/* Link the previous page to this one. */
 		if (prev_buf != InvalidBuffer)
 		{
-			Page		ppage = BufferGetPage(prev_buf);
-			PgTreSurfHeader *phdr = (PgTreSurfHeader *) PageGetContents(ppage);
+			Page		ppage;
+			PgTreSurfHeader *phdr;
 
-			START_CRIT_SECTION();
+			state = GenericXLogStart(index);
+			ppage = GenericXLogRegisterBuffer(state, prev_buf, 0);
+			phdr = (PgTreSurfHeader *) PageGetContents(ppage);
+
 			phdr->next_page = this_blk;
-			MarkBufferDirty(prev_buf);
-			if (RelationNeedsWAL(index))
-			{
-				XLogRecPtr	recptr;
-
-				XLogBeginInsert();
-				XLogRegisterBuffer(0, prev_buf,
-								   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-				recptr = XLogInsert(RM_PG_TRE_ID, XLOG_PTRE_SURF_UPDATE);
-				PageSetLSN(ppage, recptr);
-			}
-			END_CRIT_SECTION();
+			GenericXLogFinish(state);
 			UnlockReleaseBuffer(prev_buf);
 		}
 
