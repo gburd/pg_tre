@@ -1,8 +1,24 @@
 # pg_tre status
 
-Released: **4.0.1** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.0.2** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.0.2 is a correctness fix: a plain Index Scan silently
+under-returned rows on a heap with HOT updates.  The scan handed
+the executor the TID of a heap-only tuple version instead of its
+HOT-chain root, and `heap_hot_search_buffer` cannot reach a chain
+from a mid-chain TID, so every HOT-updated row was dropped -- one
+un-vacuumed UPDATE pass lost a row, a production heap with 27.2M
+lifetime updates lost 169 of 185.  Bitmap and sequential scans
+were never affected (bitmap reports whole blocks, so tuple-level
+TIDs never reach the executor), which is why three rounds of
+casing-parameterised tests missed it: they all planned as bitmap
+scans.  Fixed with a per-page HOT root map, as
+heapam_index_build_range_scan does.  Scan-path only: no on-disk
+change, no REINDEX -- the index contents were always correct.
+`test/sql/churned_heap_scan.sql` now pins both the scan-path and
+heap-state axes.  See `CHANGELOG.md`.
 
 4.0.1 fixes the long-standing stress-scenario-G churn bloat: a
 pending-list merge rebuilt the upper tree and abandoned every page

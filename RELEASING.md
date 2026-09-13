@@ -199,6 +199,7 @@ restart:
 | 3.2.5   | 3.2.6   | ✅ Yes       | Page-leak fix; no on-disk change, no REINDEX |
 | 3.2.6   | 4.0.0   | ⚠️ Yes, with care | No on-disk change, no REINDEX — but WAL format changed. Shut down cleanly; rebuild physical standbys from a fresh base backup (no rolling upgrade); replace `wal_consistency_checking='pg_tre'` with `'all'` |
 | 4.0.0   | 4.0.1   | ✅ Yes       | Storage fix; no on-disk change, no REINDEX |
+| 4.0.1   | 4.0.2   | ✅ Yes       | Scan-path correctness fix; no on-disk change, no REINDEX |
 
 When releasing a version with breaking changes:
 

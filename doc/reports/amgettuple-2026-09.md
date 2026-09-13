@@ -1,6 +1,39 @@
-# pg_tre 4.0.1 — reply to the 3.2.5 `amgettuple` report
+# pg_tre — the `amgettuple` under-return investigation
 
-## Status: cannot reproduce, and I have run out of hypotheses I can test alone
+## RESOLVED in 4.0.2. This document is kept for the record.
+
+**Root cause:** the `always_true` scan path collected heap TIDs from
+`heap_getnext()`, which returns the *current* tuple version.  After a HOT
+update that version is a `HEAP_ONLY_TUPLE` successor, and
+`heap_hot_search_buffer` walks forward from the TID it is given and refuses to
+start from a heap-only tuple — so the executor silently dropped every
+HOT-updated row.  Fixed with a per-page HOT root map
+(`heap_get_root_tuples()`), as `heapam_index_build_range_scan` does.
+
+**What I got wrong, recorded because it cost the reporter three rounds:**
+
+- I could not reproduce it because I only ever tested *freshly built* indexes.
+  The trigger is heap state, not index state — the reporter said so and was
+  right.  `UPDATE t SET c = c` once, without vacuuming, is the whole
+  reproducer.
+- My first mechanism, "offsets above 103 are lost", correlated perfectly on
+  the sample I had and was a red herring; 103 was just where the pre-UPDATE
+  tuples ended on those pages.  The real predicate is `HEAP_ONLY_TUPLE`.
+- I replied that the guard was "already satisfied on both paths because both
+  call the same prefilter".  True and irrelevant: the bug was never in the
+  prefilter.  I argued the existing coverage was sufficient instead of adding
+  the scan-path test the reporter asked for, three reports in a row.
+- `Index Searches: 0` genuinely is not a fault signature (it is expected on
+  this path) — that part of my earlier pushback holds.  But it also was not
+  evidence of correctness, and I treated it as though it were.
+
+The reporter also retracted two framings of their own along the way
+(casing, and a stale binary).  The eventual report that isolated scan path
+*and* heap state is what made this findable.
+
+---
+
+## Original investigation notes (4.0.1, before the root cause was known)
 
 You retracted the casing framing and re-aimed at scan path, which was the
 right call and narrowed things usefully. I still cannot reproduce it, and I

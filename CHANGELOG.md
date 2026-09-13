@@ -6,6 +6,87 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.0.2] - 2026-09-13 - Index Scan dropped HOT-updated rows
+
+**Correctness fix. Upgrade if you use `~*` or `ILIKE` on a table that gets
+UPDATEs.**  Scan-path only: no on-disk format change, **no REINDEX** (the
+index contents were always correct -- REINDEX never helped).  Loading the new
+`.so` corrects the answers.
+
+### Fixed
+
+- **A plain Index Scan (`amgettuple`) silently under-returned rows, and the
+  loss grew with heap churn.**
+
+  The `always_true` path -- taken by `~*` / `ILIKE`, which cannot be
+  trigram-accelerated -- streams every live heap TID and lets the executor
+  recheck.  It took those TIDs from `heap_getnext()`, which returns the
+  *current* tuple version; after a HOT update that version is a
+  `HEAP_ONLY_TUPLE` successor, not the chain root.
+  `heap_hot_search_buffer` walks **forward** from the TID it is given and
+  bails immediately if that TID is itself heap-only, so every HOT-updated row
+  was handed over as an unreachable TID and discarded:
+
+  | heap state | rows lost |
+  |---|---|
+  | fresh index | none |
+  | 1 no-VACUUM `UPDATE t SET c = c` pass | 1 of 3 |
+  | 3 passes | 16 of 1,473 |
+  | reporter's production heap (27.2M lifetime updates) | **169 of 185** |
+
+  Fixed as `heapam_index_build_range_scan` does it: a per-page HOT root map
+  from `heap_get_root_tuples()`, translating each heap-only tuple to its
+  chain root before emitting.  The map is rebuilt if a tuple maps to
+  `InvalidOffsetNumber`, since this scan holds only `AccessShareLock` and a
+  concurrent HOT update can extend a chain underneath it.  An unreachable
+  root emits the tuple's own TID rather than dropping it — the executor
+  rechecks regardless, and a false positive is recoverable where a lost row
+  is not.
+
+  **Bitmap Index Scans and sequential scans were never affected.**
+  `amgetbitmap` calls `tbm_add_page()` — whole blocks, no TIDs — so the
+  index's tuple-level decisions never reach the executor.  If you worked
+  around this by steering queries onto the Bitmap plan (e.g. lower()-ing the
+  pattern), that is no longer necessary.
+
+  Reported by the solnix.io infra team, who retracted two earlier framings of
+  their own and then delivered a self-contained reproducer that localised it
+  to scan path plus heap state.  Both were right.
+
+### Added
+
+- `test/sql/churned_heap_scan.sql`, pinning the two axes the reporter asked
+  for across three separate reports:
+  1. **scan path** — every case runs under forced `amgettuple` *and* forced
+     `amgetbitmap`, each required to equal the sequential-scan ground truth;
+  2. **heap state** — the same index is checked fresh *and* after no-VACUUM
+     `UPDATE` churn, with an assertion that `relallvisible` really dropped to
+     0 so the test cannot silently stop exercising the churned case.
+
+  Verified load-bearing: with the translation compiled out the committed test
+  reports 0 where the expected output says 3, and fails.
+
+  This is the gap that let three rounds of the same class through.  The
+  casing-parameterised cases added in 3.2.5 all planned as **bitmap** scans,
+  so they passed while the tuple-at-a-time path stayed broken — exactly what
+  the reporter predicted would happen.
+
+### Qualified
+
+EC2 c7i.4xlarge, PostgreSQL 18.0, no `shared_preload_libraries`:
+
+- **44/44** regression tests; clean build, zero warnings; flake builds
+  `pg_tre-4.0.2` on pg17 and pg18.
+- The reporter's reproducer: `^git`, `^GIT`, `^gi`, `^g`, unanchored `git`
+  all agree with the sequential scan on a 3x-churned heap (`^g` 1457 →
+  1473), and still agree after 13 total `UPDATE` passes with 72k dead tuples
+  and `relallvisible = 0`.
+- **TAP 17/17** — crash recovery, Hanoi merge and replication with promotion.
+- Stress C/D/G/H/I/J: **zero accuracy-oracle mismatches**, scenario G still
+  PASSing at 1.98x, parallel==serial hits (59,167), SuRF reject 0.054 ms.
+
+---
+
 ## [4.0.1] - 2026-09-13 - merges abandoned the whole pre-merge tree (scenario G)
 
 Storage fix.  No on-disk format change, **no REINDEX required**.

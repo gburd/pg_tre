@@ -1,0 +1,23 @@
+-- pg_tre 4.0.1 -> 4.0.2 upgrade.
+--
+-- No catalog changes.  4.0.2 is a CORRECTNESS fix: a plain Index Scan
+-- (amgettuple) silently under-returned rows on a heap with HOT updates,
+-- because the scan handed the executor the TID of a heap-only tuple version
+-- instead of its HOT-chain root, and the executor cannot reach a chain from
+-- a mid-chain TID.  `diff sql/pg_tre--4.0.1.sql sql/pg_tre--4.0.2.sql`
+-- differs only in the header comment.
+--
+-- Scan-path only: no on-disk format change and NO REINDEX required.  The
+-- index contents were always correct -- REINDEX did not help and does not
+-- help.  Loading the 4.0.2 .so is what corrects the answers.
+--
+-- Who was affected: queries using `~*` or `ILIKE` (which cannot be
+-- trigram-accelerated and therefore take the affected path) that the planner
+-- routed to a plain Index Scan, against a table with HOT updates and rows
+-- not yet all-visible.  Bitmap Index Scans and sequential scans were always
+-- correct, and the error grew with accumulated updates: one un-vacuumed
+-- `UPDATE t SET c = c` pass lost a row, a heap with millions of lifetime
+-- updates lost most of them.
+--
+-- If you worked around this by steering queries onto the Bitmap plan (for
+-- example by lower()-ing the pattern), that workaround is no longer needed.
