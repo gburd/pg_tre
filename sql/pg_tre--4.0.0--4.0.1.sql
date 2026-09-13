@@ -1,0 +1,25 @@
+-- pg_tre 4.0.0 -> 4.0.1 upgrade.
+--
+-- No catalog changes.  4.0.1 fixes a storage leak: a pending-list merge
+-- rebuilt the upper tree and abandoned every page of the old one, so an
+-- index under sustained delete+reinsert churn grew without bound (the
+-- long-standing stress-scenario-G finding).  Storage-layer only; `diff
+-- sql/pg_tre--4.0.0.sql sql/pg_tre--4.0.1.sql` differs only in the header
+-- comment.
+--
+-- No on-disk format change and NO REINDEX required.  Pages leaked by
+-- earlier versions are not retroactively reclaimed -- nothing recorded
+-- which blocks they were -- so the next merge stops adding to the pile and
+-- a REINDEX recovers the historical waste if you want the space back.
+--
+-- Also adds DEBUG1 instrumentation to the plain Index Scan (amgettuple)
+-- path, which previously had none.  If you are chasing a scan that returns
+-- unexpected row counts:
+--
+--   SET client_min_messages = debug1;
+--   SET enable_seqscan = off; SET enable_bitmapscan = off;   -- amgettuple
+--   SELECT count(*) FROM your_table WHERE col ~* '^Pattern';
+--
+-- reports whether extraction went always_true, the candidate cardinality,
+-- and how many TIDs were emitted -- which separates "no candidates" from
+-- "empty heap stream" from "recheck filtered everything".

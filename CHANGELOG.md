@@ -6,6 +6,97 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.0.1] - 2026-09-13 - merges abandoned the whole pre-merge tree (scenario G)
+
+Storage fix.  No on-disk format change, **no REINDEX required**.
+
+### Fixed
+
+- **A pending-list merge abandoned every page of the pre-merge upper tree.**
+  A merge rebuilds the whole tree (`snapshot_existing_upper` +
+  `pg_tre_upper_bulkload`) and swaps `meta.root_upper` to the new one, which
+  makes the old tree's upper leaves, coalesced pages and out-of-line posting
+  chains unreachable.  Nothing freed them, so **every merge abandoned a full
+  copy of the posting tier.**
+
+  The growth was unbounded rather than gradual.  Churning 1% of a 60k-row
+  table, index pages per round:
+
+  | round | before | after |
+  |------:|-------:|------:|
+  | 0 | 6,526 | 6,526 |
+  | 1 | 13,150 | 13,150 |
+  | 2 | 19,649 | 13,236 |
+  | 3 | 26,115 | 13,236 |
+  | 4 | 32,621 | 13,242 |
+  | 5 | 39,113 | 13,245 |
+  | 6 | 45,596 | 13,262 |
+
+  Occupancy stayed flat at ~67% throughout, which is what identifies the
+  extra pages as orphaned copies rather than data.  After the fix: one
+  orphaned copy from the first merge, reclaimed and reused thereafter, then
+  flat.  Five further churn rounds added **39 pages total**, against ~6,500
+  per round before.
+
+  **This is the long-standing stress-scenario-G finding**, and the harness's
+  own check now flips from `CHECK: index >2x baseline — investigate reclaim`
+  to `PASS: index within 2x baseline (bounded)` at 1M rows (4,149 MB → 2,146
+  MB, 3.83x → 1.98x).  The 3.2.6 pending-page fix addressed a different and
+  much smaller leak; this is the one that produced the scenario-G number.
+
+  Pages leaked by earlier versions are not retroactively reclaimed (nothing
+  recorded which blocks they were).  The next merge stops adding to the pile;
+  `REINDEX` recovers the historical waste.
+
+### Added
+
+- **DEBUG1 instrumentation on the plain Index Scan (`amgettuple`) path**,
+  which had none.  That absence is why a field report of "plain Index Scan
+  returns 0 rows while Bitmap on the same index returns 3" could not be
+  localised from outside the process: `EXPLAIN`'s `Index Searches: 0` is
+  *expected* on this path (a case-insensitive predicate goes `always_true`
+  and never descends the tree), so it carries no signal.  The new lines
+  report whether `always_true` was taken, the candidate cardinality and how
+  many TIDs were emitted, separating "no candidates" from "empty heap
+  stream" from "recheck filtered everything".  See
+  `doc/reports/amgettuple-2026-09.md`.
+- `test/sql/merge_page_reclaim.sql`, asserting that growth is bounded
+  (≤2.5x) **and stops** (later rounds add <5% of baseline).  Verified
+  load-bearing against a control build with the reclaim compiled out, which
+  fails both invariants.
+- A **scan-path axis** in `test/sql/surf_prefix.sql`: every `~*` / `ILIKE`
+  case now runs under `enable_bitmapscan=off` (forcing `amgettuple`) *and*
+  `enable_indexscan=off` (forcing `amgetbitmap`), both required to equal the
+  sequential-scan ground truth.  All 12 combinations pass.  The casing cases
+  alone could have stayed green while one scan path was broken — which is
+  exactly what the reporter pointed out.
+
+### Still open
+
+The `amgettuple` report itself does **not reproduce**.  Eight axes were
+varied — casing, the reporter's exact table shape, realistic
+nixpkgs-style names, their second index, a fully-merged pending list, long
+posting chains, in-place version upgrades, `ILIKE` — and the plain Index
+Scan matched the sequential scan every time.  The DEBUG1 output above is
+what should localise it; `doc/reports/amgettuple-2026-09.md` says exactly
+which line means what.
+
+### Qualified
+
+EC2 c7i.4xlarge, PostgreSQL 18.0, no `shared_preload_libraries`,
+`wal_consistency_checking = 'all'`:
+
+- **43/43** regression tests; clean build, zero warnings; flake builds
+  `pg_tre-4.0.1` on pg17 and pg18.
+- **TAP 17/17, `All tests successful. Result: PASS`** — mandatory here
+  because the fix touches the merge path's WAL: crash_recovery 10/10 across
+  two `kill -9` cycles (821 catalog runs surviving replay), replication 5/5
+  including promotion.
+- Stress C/D/G/H/I/J: **zero accuracy-oracle mismatches**, G now PASSing,
+  parallel==serial hits (59,167), SuRF reject 0.054 ms, 0 stuck spinlocks.
+
+---
+
 ## [4.0.0] - 2026-09-12 - no custom resource manager; no shared_preload_libraries
 
 pg_tre now stores and WAL-logs its pages the way every other PostgreSQL

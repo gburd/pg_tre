@@ -1,8 +1,24 @@
 # pg_tre status
 
-Released: **4.0.0** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.0.1** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.0.1 fixes the long-standing stress-scenario-G churn bloat: a
+pending-list merge rebuilt the upper tree and abandoned every page
+of the old one, so each merge orphaned a full copy of the posting
+tier and the index grew without bound under delete+reinsert churn
+(2x, 3x, 4x... per round, at flat ~67% occupancy).  Old-tree pages
+now go to the deferred free log and are reused; scenario G at 1M
+rows goes 3.83x -> 1.98x and the harness check flips to PASS.
+Storage-layer only: no on-disk change, no REINDEX (though REINDEX
+is what reclaims pages leaked by earlier versions).
+
+Also adds DEBUG1 instrumentation to the plain Index Scan path,
+which had none -- see `doc/reports/amgettuple-2026-09.md`.  The
+reported amgettuple anomaly still does not reproduce across eight
+varied axes; that document records what was tested and what the
+new DEBUG output means.
 
 4.0.0 removes pg_tre's custom WAL resource manager: it now stores
 and WAL-logs pages through PostgreSQL's generic WAL facility, like
