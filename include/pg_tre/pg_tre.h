@@ -30,7 +30,7 @@
  *            kinds are byte-identical.  Readers handle v<5 range
  *            pages (no header) for back-compat with 1.4.x indexes.
  *   v6     - introduced in 3.0.2.  The vendored sparsemap was updated
- *            to 4.0.0, whose serialized "wire" format widened the
+ *            to 4.0.1-dev, whose serialized "wire" format widened the
  *            per-chunk start offset from 32 to 64 bits (sparsemap
  *            SM_WIRE_VERSION 1 -> 2).  This fixes silent DATA LOSS for
  *            sparsemap indices >= 2^32 -- which pg_tre reaches on any
@@ -56,7 +56,7 @@
  *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
  * BREAKING CHANGE: indexes built with v5 or earlier (pg_tre < 1.6)
- *   must be REINDEXed -- the sparsemap 4.0.0 wire format is not
+ *   must be REINDEXed -- the sparsemap 4.0.1-dev wire format is not
  *   backward-readable, and pre-1.6 indexes on large heaps may already
  *   have lost data to the 32-bit-offset bug.  pg_tre_read() rejects
  *   pre-v6 pages with a REINDEX hint rather than returning wrong rows.
@@ -92,7 +92,7 @@
 #define PG_TRE_FORMAT_VERSION PG_TRE_FORMAT_VERSION_LATEST
 
 /* String version returned by tre_version(). */
-#define PG_TRE_VERSION_STRING "pg_tre 4.0.0"
+#define PG_TRE_VERSION_STRING "pg_tre 4.0.1-dev"
 
 /* Module GUCs, defined in src/module.c. */
 extern int  pg_tre_default_max_cost;
