@@ -168,6 +168,92 @@ SELECT count(*) AS idx_wordbound  FROM surf_t WHERE body ~* '(^|[-_.])error([-_.
           3000
 (1 row)
 
+-- (7) REGRESSION: scan-path axis.  Everything above runs with only
+--     enable_seqscan=off, which lets the planner choose a Bitmap Index Scan.
+--     A field report showed a plain Index Scan (amgettuple) disagreeing with
+--     the Bitmap path on the same index, so the casing cases could all pass
+--     while amgettuple stayed broken.  Force each path explicitly and require
+--     both to equal the sequential-scan ground truth below.
+SET enable_bitmapscan = off;   -- forces plain Index Scan (amgettuple)
+SET
+SELECT count(*) AS gettuple_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+ gettuple_iregex_upper 
+-----------------------
+                  3000
+(1 row)
+
+SELECT count(*) AS gettuple_iregex_lower FROM surf_t WHERE body ~* '^error';
+ gettuple_iregex_lower 
+-----------------------
+                  3000
+(1 row)
+
+SELECT count(*) AS gettuple_iregex_mixed FROM surf_t WHERE body ~* '^eRrOr';
+ gettuple_iregex_mixed 
+-----------------------
+                  3000
+(1 row)
+
+SELECT count(*) AS gettuple_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+ gettuple_ilike_upper 
+----------------------
+                 3000
+(1 row)
+
+SELECT count(*) AS gettuple_absent       FROM surf_t WHERE body ~* '^ZZQQXJ';
+ gettuple_absent 
+-----------------
+               0
+(1 row)
+
+SELECT count(*) AS gettuple_sensitive    FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
+ gettuple_sensitive 
+--------------------
+               3000
+(1 row)
+
+RESET enable_bitmapscan;
+RESET
+SET enable_indexscan = off;    -- forces Bitmap Index Scan (amgetbitmap)
+SET
+SELECT count(*) AS bitmap_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+ bitmap_iregex_upper 
+---------------------
+                3000
+(1 row)
+
+SELECT count(*) AS bitmap_iregex_lower FROM surf_t WHERE body ~* '^error';
+ bitmap_iregex_lower 
+---------------------
+                3000
+(1 row)
+
+SELECT count(*) AS bitmap_iregex_mixed FROM surf_t WHERE body ~* '^eRrOr';
+ bitmap_iregex_mixed 
+---------------------
+                3000
+(1 row)
+
+SELECT count(*) AS bitmap_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+ bitmap_ilike_upper 
+--------------------
+               3000
+(1 row)
+
+SELECT count(*) AS bitmap_absent       FROM surf_t WHERE body ~* '^ZZQQXJ';
+ bitmap_absent 
+---------------
+             0
+(1 row)
+
+SELECT count(*) AS bitmap_sensitive    FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
+ bitmap_sensitive 
+------------------
+             3000
+(1 row)
+
+RESET enable_indexscan;
+RESET
 RESET enable_seqscan;
 RESET
 -- Ground-truth via sequential scan.

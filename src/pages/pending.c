@@ -823,6 +823,7 @@ typedef struct RebuildState
      * So materialize entries to palloc'd copies up front. */
     uint8      **existing_inline;
     int          existing_cap;    /* allocated capacity of the two arrays */
+
 } RebuildState;
 
 static bool
@@ -1304,6 +1305,9 @@ pg_tre_pending_merge(Relation index)
     BlockNumber      *consumed_pages = NULL;
     int               n_consumed = 0;
     int               consumed_cap = 0;
+    BlockNumber       old_root = InvalidBlockNumber;
+    BlockNumber      *old_tree_pages = NULL;
+    int               n_old_tree_pages = 0;
 
     pg_tre_meta_read(index, &meta);
     if (meta.pending_head == InvalidBlockNumber)
@@ -1432,6 +1436,68 @@ pg_tre_pending_merge(Relation index)
 
     snapshot_existing_upper(index, &rs, merge_cxt);
 
+    /*
+     * Collect the pre-merge tree's pages BEFORE rebuilding.  The rebuild
+     * below writes an entirely new upper tree (and new posting leaves) and
+     * finalize_merge then swaps root_upper to it, which makes every page of
+     * the old tree unreachable.  Nothing used to free them, so each merge
+     * abandoned a full copy of the posting tier: churning 1% of a 60k-row
+     * table three times grew the index from 6,514 to 26,000 posting_leaf
+     * pages -- roughly doubling per round -- while occupancy stayed at 67%,
+     * i.e. the growth was entirely orphaned copies rather than real data.
+     *
+     * pg_tre_run_collect_pages already walks an upper tree and gathers its
+     * leaves, its coalesced pages and its out-of-line posting chains; it is
+     * what the Hanoi run-collapse path uses for exactly this purpose.  Do it
+     * before the rebuild, while old_root is still the live tree, and hand the
+     * blocks to the deferred free log only AFTER the root swap commits -- a
+     * crash in between then leaks them (the old behaviour) instead of freeing
+     * pages that are still reachable.
+     */
+    old_root = meta.root_upper;
+    if (BlockNumberIsValid(old_root))
+    {
+        /*
+         * Refuse to collect if any run in the catalog reaches the same tree.
+         * Runs normally build their own fresh upper tree, but a run CAN alias
+         * meta.root_upper (tre_debug_append_run does exactly that, and the
+         * flush-to-run path registers a run while leaving the base root in
+         * place).  Freeing the base tree while such a run still points at it
+         * would hand live pages to the FSM -- the one outcome strictly worse
+         * than the leak this fixes.  root_is_shared() already encodes this
+         * reasoning for the Hanoi collapse path; reuse the same test.
+         */
+        PgTreRunIter *it = pg_tre_run_catalog_open(index);
+        PgTreRun      r;
+        bool          aliased = false;
+
+        while (pg_tre_run_catalog_next(it, &r))
+        {
+            /*
+             * Skip the implicit base run (run_id 0).  The iterator always
+             * reports it with root_upper = meta.root_upper by construction
+             * (see run_catalog.c) -- it IS the tree being replaced, not a
+             * separate structure aliasing it.  Treating it as an alias made
+             * this guard match unconditionally and silently disabled the
+             * whole fix: growth went straight back to 2x, 3x, 4x... per
+             * churn round.  Only CATALOG runs (run_id >= 1) can genuinely
+             * still reach the old tree.
+             */
+            if (r.run_id == 0)
+                continue;
+            if (r.root_upper == old_root)
+            {
+                aliased = true;
+                break;
+            }
+        }
+        pg_tre_run_catalog_close(it);
+
+        if (!aliased)
+            old_tree_pages = pg_tre_run_collect_pages(index, old_root,
+                                                      &n_old_tree_pages);
+    }
+
     /* Rebuild the upper tree from the merged stream. */
     new_root = pg_tre_upper_bulkload(index, rebuild_iter, &rs);
 
@@ -1469,6 +1535,52 @@ pg_tre_pending_merge(Relation index)
             pg_tre_meta_set_roots(index, new_root, meta.root_range,
                                   (uint64) k, new_n_tuples);
         }
+    }
+
+    /*
+     * The root swap has committed, so the pre-merge tree is now unreachable:
+     * hand its pages to the deferred free log for XID-gated FSM reclaim.
+     * Done here rather than before the swap so a crash mid-merge leaks the
+     * blocks instead of freeing pages the meta page still points at.
+     *
+     * Skip any block that the rebuild reused.  pg_tre_upper_bulkload
+     * allocates through pg_tre_extend, which itself consults the FSM, so a
+     * page freed by an EARLIER merge can legitimately be part of the NEW
+     * tree -- but a page still in the old tree cannot, because it was not on
+     * the free list when the rebuild ran.  The guard is cheap insurance
+     * against that reasoning being wrong somewhere: double-freeing a live
+     * page corrupts the index, which is far worse than leaking one.
+     */
+    if (n_old_tree_pages > 0 && old_tree_pages != NULL)
+    {
+        int          n_new = 0;
+        BlockNumber *new_pages = pg_tre_run_collect_pages(index, new_root,
+                                                          &n_new);
+        int i, w = 0;
+
+        /*
+         * Both arrays come back sorted+deduped from pg_tre_run_collect_pages,
+         * so the overlap check is a linear merge rather than the O(n*m) nested
+         * scan a naive version would use -- these arrays reach hundreds of
+         * thousands of entries on a large index, where quadratic would turn
+         * every VACUUM into a stall.
+         */
+        {
+            int j = 0;
+
+            for (i = 0; i < n_old_tree_pages; i++)
+            {
+                while (j < n_new && new_pages[j] < old_tree_pages[i])
+                    j++;
+                if (j < n_new && new_pages[j] == old_tree_pages[i])
+                    continue;           /* reused by the rebuilt tree */
+                old_tree_pages[w++] = old_tree_pages[i];
+            }
+        }
+        if (w > 0)
+            pg_tre_free_log_append(index, old_tree_pages, w);
+        if (new_pages != NULL)
+            pfree(new_pages);
     }
 
     /* No sparsemap handles to free (tids arrays are palloc'd in merge_cxt

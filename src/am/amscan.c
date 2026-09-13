@@ -1410,6 +1410,9 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                 n_entries++;
             }
             table_endscan(heapscan);
+            ereport(DEBUG1,
+                    (errmsg("pg_tre: amgettuple always_true path streamed %d "
+                            "heap TIDs (recheck will filter)", n_entries)));
         }
         else if (result != NULL && sm_cardinality((sm_t *) result) > 0)
         {
@@ -1505,6 +1508,25 @@ knn_build(IndexScanDesc scan, TreScanState *st)
      */
     if (have_orderby)
         qsort((void *) entries, n_entries, sizeof(*entries), knn_entry_cmp);
+
+    /*
+     * One line that distinguishes every way this path can legitimately or
+     * illegitimately produce zero rows.  The amgettuple path had NO
+     * instrumentation, which is why a field report of "plain Index Scan
+     * returns 0 rows while Bitmap on the same index returns 3" could not be
+     * localised from the outside: EXPLAIN's "Index Searches: 0" is expected
+     * here (the always_true path never descends the tree) and so says
+     * nothing.  With this, DEBUG1 tells you whether the candidate set was
+     * empty, whether always_true was taken, and how many TIDs were emitted.
+     */
+    ereport(DEBUG1,
+            (errmsg("pg_tre: amgettuple emitting %d TIDs "
+                    "(always_true=%d, candidates=%llu, orderby=%d)",
+                    n_entries, always_true ? 1 : 0,
+                    result != NULL
+                        ? (unsigned long long) sm_cardinality((sm_t *) result)
+                        : 0ULL,
+                    have_orderby ? 1 : 0)));
 
     st->knn_entries     = (OrderEntry *) entries;
     st->knn_n           = n_entries;

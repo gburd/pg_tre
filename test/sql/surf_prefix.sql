@@ -78,6 +78,30 @@ SELECT count(*) AS idx_dash_only  FROM surf_t WHERE body ~ '[-]';
 SELECT count(*) AS idx_dash_neg   FROM surf_t WHERE body ~ '[^-x]error';
 SELECT count(*) AS idx_wordbound  FROM surf_t WHERE body ~* '(^|[-_.])error([-_.0-9]|$)';
 
+-- (7) REGRESSION: scan-path axis.  Everything above runs with only
+--     enable_seqscan=off, which lets the planner choose a Bitmap Index Scan.
+--     A field report showed a plain Index Scan (amgettuple) disagreeing with
+--     the Bitmap path on the same index, so the casing cases could all pass
+--     while amgettuple stayed broken.  Force each path explicitly and require
+--     both to equal the sequential-scan ground truth below.
+SET enable_bitmapscan = off;   -- forces plain Index Scan (amgettuple)
+SELECT count(*) AS gettuple_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+SELECT count(*) AS gettuple_iregex_lower FROM surf_t WHERE body ~* '^error';
+SELECT count(*) AS gettuple_iregex_mixed FROM surf_t WHERE body ~* '^eRrOr';
+SELECT count(*) AS gettuple_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+SELECT count(*) AS gettuple_absent       FROM surf_t WHERE body ~* '^ZZQQXJ';
+SELECT count(*) AS gettuple_sensitive    FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
+RESET enable_bitmapscan;
+
+SET enable_indexscan = off;    -- forces Bitmap Index Scan (amgetbitmap)
+SELECT count(*) AS bitmap_iregex_upper FROM surf_t WHERE body ~* '^ERROR';
+SELECT count(*) AS bitmap_iregex_lower FROM surf_t WHERE body ~* '^error';
+SELECT count(*) AS bitmap_iregex_mixed FROM surf_t WHERE body ~* '^eRrOr';
+SELECT count(*) AS bitmap_ilike_upper  FROM surf_t WHERE body ILIKE 'ERROR%';
+SELECT count(*) AS bitmap_absent       FROM surf_t WHERE body ~* '^ZZQQXJ';
+SELECT count(*) AS bitmap_sensitive    FROM surf_t WHERE body %~~ tre_pattern('^error', 0);
+RESET enable_indexscan;
+
 RESET enable_seqscan;
 
 -- Ground-truth via sequential scan.
