@@ -1,0 +1,223 @@
+-- test/sql/churned_heap_scan.sql
+--
+-- amgettuple must return HOT-chain ROOT TIDs, on a churned heap.
+--
+-- The `always_true` scan path (which is what ~* / ILIKE take, since a
+-- case-insensitive predicate cannot be trigram-accelerated) streams every
+-- live heap TID and lets the executor recheck.  It collected those TIDs from
+-- heap_getnext(), which returns the CURRENT tuple version -- and after any
+-- HOT update that version is a HEAP_ONLY successor, not the chain root.
+--
+-- index_fetch_heap -> heap_hot_search_buffer walks forward from the TID it is
+-- given and bails immediately if that TID is itself heap-only
+-- (`at_chain_start && HeapTupleIsHeapOnly`).  So every HOT-updated row was
+-- handed to the executor as an unreachable TID and silently dropped:
+--
+--   fresh index                    -> exact
+--   after 1 no-VACUUM UPDATE pass  -> lost 1 of 3
+--   after 3 passes                 -> lost 16 of 1473
+--   reporter's production heap      -> lost 169 of 185 (27.2M lifetime updates)
+--
+-- amgetbitmap was immune throughout, because it reports whole blocks and lets
+-- the executor recheck, so the index's tuple-level TIDs never matter.  That
+-- asymmetry is why three rounds of casing-parameterised tests missed this:
+-- they all planned as bitmap scans.
+--
+-- This test therefore pins BOTH axes the reporter kept asking for:
+--   1. scan path -- every case is run under forced amgettuple AND forced
+--      amgetbitmap, each required to equal the sequential-scan ground truth;
+--   2. heap state -- the same index is checked fresh AND after no-VACUUM
+--      UPDATE churn, because a suite that only indexes freshly-inserted rows
+--      cannot see this class of bug at all.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/churned_heap_scan.sql:33: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+DROP TABLE IF EXISTS churn CASCADE;
+psql:test/sql/churned_heap_scan.sql:35: NOTICE:  table "churn" does not exist, skipping
+DROP TABLE
+CREATE TABLE churn (id bigserial PRIMARY KEY, name text);
+CREATE TABLE
+INSERT INTO churn (name) VALUES ('git'), ('git'), ('git');
+INSERT 0 3
+INSERT INTO churn (name)
+SELECT 'pkg' || md5(g::text) FROM generate_series(1, 2000) g;
+INSERT 0 2000
+SET client_min_messages = warning;
+SET
+CREATE INDEX churn_tre ON churn USING tre (name);
+CREATE INDEX
+RESET client_min_messages;
+RESET
+ANALYZE churn;
+ANALYZE
+-- ---- fresh heap: all three paths must agree ----
+SET enable_seqscan = off; SET enable_bitmapscan = off;   -- amgettuple
+SET
+SET
+SELECT count(*) AS fresh_gettuple_git FROM churn WHERE name ~* '^git';
+ fresh_gettuple_git 
+--------------------
+                  3
+(1 row)
+
+SELECT count(*) AS fresh_gettuple_g   FROM churn WHERE name ~* '^g';
+ fresh_gettuple_g 
+------------------
+                3
+(1 row)
+
+SET enable_seqscan = off; SET enable_indexscan = off; SET enable_bitmapscan = on;
+SET
+SET
+SET
+SELECT count(*) AS fresh_bitmap_git   FROM churn WHERE name ~* '^git';
+ fresh_bitmap_git 
+------------------
+                3
+(1 row)
+
+SELECT count(*) AS fresh_bitmap_g     FROM churn WHERE name ~* '^g';
+ fresh_bitmap_g 
+----------------
+              3
+(1 row)
+
+RESET enable_indexscan; RESET enable_bitmapscan; SET enable_seqscan = on;
+RESET
+RESET
+SET
+SET enable_indexscan = off; SET enable_bitmapscan = off;  -- ground truth
+SET
+SET
+SELECT count(*) AS fresh_seq_git      FROM churn WHERE name ~* '^git';
+ fresh_seq_git 
+---------------
+             3
+(1 row)
+
+SELECT count(*) AS fresh_seq_g        FROM churn WHERE name ~* '^g';
+ fresh_seq_g 
+-------------
+           3
+(1 row)
+
+RESET enable_indexscan; RESET enable_bitmapscan;
+RESET
+RESET
+-- ---- churn the heap: three UPDATE passes, deliberately no VACUUM ----
+-- `SET name = name` is a HOT update (no indexed column changes value), which
+-- is exactly the shape that produces heap-only successors.
+UPDATE churn SET name = name;
+UPDATE 2003
+UPDATE churn SET name = name;
+UPDATE 2003
+UPDATE churn SET name = name;
+UPDATE 2003
+ANALYZE churn;
+ANALYZE
+-- The heap is now mostly heap-only tuples with the visibility map unset.
+SELECT (SELECT relallvisible FROM pg_class WHERE relname = 'churn') = 0
+           AS visibility_map_unset;
+ visibility_map_unset 
+----------------------
+ t
+(1 row)
+
+-- ---- churned heap: all three paths must STILL agree ----
+SET enable_seqscan = off; SET enable_bitmapscan = off;   -- amgettuple
+SET
+SET
+SELECT count(*) AS churned_gettuple_git FROM churn WHERE name ~* '^git';
+ churned_gettuple_git 
+----------------------
+                    3
+(1 row)
+
+SELECT count(*) AS churned_gettuple_g   FROM churn WHERE name ~* '^g';
+ churned_gettuple_g 
+--------------------
+                  3
+(1 row)
+
+SELECT count(*) AS churned_gettuple_un  FROM churn WHERE name ~* 'git';
+ churned_gettuple_un 
+---------------------
+                   3
+(1 row)
+
+SET enable_seqscan = off; SET enable_indexscan = off; SET enable_bitmapscan = on;
+SET
+SET
+SET
+SELECT count(*) AS churned_bitmap_git   FROM churn WHERE name ~* '^git';
+ churned_bitmap_git 
+--------------------
+                  3
+(1 row)
+
+SELECT count(*) AS churned_bitmap_g     FROM churn WHERE name ~* '^g';
+ churned_bitmap_g 
+------------------
+                3
+(1 row)
+
+SELECT count(*) AS churned_bitmap_un    FROM churn WHERE name ~* 'git';
+ churned_bitmap_un 
+-------------------
+                 3
+(1 row)
+
+RESET enable_indexscan; RESET enable_bitmapscan; SET enable_seqscan = on;
+RESET
+RESET
+SET
+SET enable_indexscan = off; SET enable_bitmapscan = off;  -- ground truth
+SET
+SET
+SELECT count(*) AS churned_seq_git      FROM churn WHERE name ~* '^git';
+ churned_seq_git 
+-----------------
+               3
+(1 row)
+
+SELECT count(*) AS churned_seq_g        FROM churn WHERE name ~* '^g';
+ churned_seq_g 
+---------------
+             3
+(1 row)
+
+SELECT count(*) AS churned_seq_un       FROM churn WHERE name ~* 'git';
+ churned_seq_un 
+----------------
+              3
+(1 row)
+
+RESET enable_indexscan; RESET enable_bitmapscan;
+RESET
+RESET
+-- Case-sensitive operators take the indexed path rather than always_true,
+-- so check them over the churned heap too.
+SET enable_seqscan = off; SET enable_bitmapscan = off;
+SET
+SET
+SELECT count(*) AS churned_gettuple_sens FROM churn WHERE name %~~ tre_pattern('git', 0);
+ churned_gettuple_sens 
+-----------------------
+                     3
+(1 row)
+
+SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_seqscan = on;
+SET
+SET
+SET
+SELECT count(*) AS churned_seq_sens      FROM churn WHERE name %~~ tre_pattern('git', 0);
+ churned_seq_sens 
+------------------
+                3
+(1 row)
+
+RESET enable_indexscan; RESET enable_bitmapscan;
+RESET
+RESET
+DROP TABLE churn CASCADE;
+DROP TABLE

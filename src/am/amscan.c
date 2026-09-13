@@ -1367,6 +1367,31 @@ knn_build(IndexScanDesc scan, TreScanState *st)
             TableScanDesc heapscan;
             HeapTuple     htup;
             TupleDesc     desc = RelationGetDescr(heap);
+            /*
+             * HOT-chain root map for the page currently being scanned.
+             *
+             * An index scan must hand the executor the TID of a HOT chain's
+             * ROOT, never a heap-only successor.  index_fetch_heap ->
+             * heap_hot_search_buffer walks forward from the TID it is given
+             * and bails immediately if that TID is itself a HEAP_ONLY tuple
+             * (at_chain_start && HeapTupleIsHeapOnly), so returning a
+             * successor's own t_self silently yields nothing.
+             *
+             * heap_getnext hands back the CURRENT version, which after any
+             * HOT update IS a heap-only successor -- so this loop was
+             * emitting unreachable TIDs and the executor dropped every one.
+             * Effect scaled with churn: one no-VACUUM `UPDATE t SET c = c`
+             * pass lost a row, three lost 16 of 1473, and a production heap
+             * with 27.2M lifetime updates lost 169 of 185.  amgetbitmap was
+             * unaffected because it reports whole blocks and lets the
+             * executor recheck, so the index's tuple-level TIDs never matter.
+             *
+             * Same fix heapam_index_build_range_scan uses: build a
+             * per-page root map with heap_get_root_tuples() and translate.
+             */
+            OffsetNumber *root_offsets = palloc(MaxHeapTuplesPerPage *
+                                                sizeof(OffsetNumber));
+            BlockNumber   root_blkno = InvalidBlockNumber;
 
             heapscan = table_beginscan_strat(heap, scan->xs_snapshot, 0, NULL,
                                              true /* allow_strat */, true /* allow_sync */);
@@ -1400,6 +1425,43 @@ knn_build(IndexScanDesc scan, TreScanState *st)
 
                 ItemPointerCopy(&htup->t_self, &tid);
 
+                /*
+                 * Translate a heap-only tuple to its HOT chain root, which is
+                 * the only TID an index scan may hand the executor.  The root
+                 * map is (re)built per page; it is also rebuilt when a
+                 * heap-only tuple maps to InvalidOffsetNumber, which can
+                 * happen because we hold only AccessShareLock and a
+                 * concurrent HOT update may have extended a chain since the
+                 * map was taken (heapam_index_build_range_scan documents the
+                 * same case under ShareUpdateExclusiveLock).
+                 */
+                if (HeapTupleIsHeapOnly(htup))
+                {
+                    HeapScanDesc hscan = (HeapScanDesc) heapscan;
+                    BlockNumber  blk = ItemPointerGetBlockNumber(&tid);
+                    OffsetNumber off = ItemPointerGetOffsetNumber(&tid);
+
+                    if (root_blkno != blk ||
+                        root_offsets[off - 1] == InvalidOffsetNumber)
+                    {
+                        Page page = BufferGetPage(hscan->rs_cbuf);
+
+                        LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
+                        heap_get_root_tuples(page, root_offsets);
+                        LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+                        root_blkno = blk;
+                    }
+
+                    if (root_offsets[off - 1] != InvalidOffsetNumber)
+                        ItemPointerSetOffsetNumber(&tid, root_offsets[off - 1]);
+                    /*
+                     * Still unmapped: the chain root is genuinely
+                     * unreachable.  Emit the tuple's own TID rather than
+                     * dropping it -- the executor's recheck decides, and a
+                     * false positive is recoverable where a lost row is not.
+                     */
+                }
+
                 if (n_entries >= cap)
                 {
                     cap *= 2;
@@ -1410,6 +1472,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                 n_entries++;
             }
             table_endscan(heapscan);
+            pfree(root_offsets);
             ereport(DEBUG1,
                     (errmsg("pg_tre: amgettuple always_true path streamed %d "
                             "heap TIDs (recheck will filter)", n_entries)));
