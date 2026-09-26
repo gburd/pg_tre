@@ -1,0 +1,69 @@
+name: pgxn-release
+
+# Publish the tagged release to PGXN. Needs the PGXN_USERNAME and
+# PGXN_PASSWORD repository secrets (a https://manager.pgxn.org account);
+# without them the job skips instead of failing.
+#
+# This runs on the GitHub mirror only. Codeberg does not upload to PGXN,
+# so each version is uploaded exactly once.
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  pgxn:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Skip if PGXN secrets are not set
+        id: check
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          if [ -z "$PGXN_USERNAME" ] || [ -z "$PGXN_PASSWORD" ]; then
+            echo "::notice::PGXN_USERNAME/PGXN_PASSWORD not set; skipping PGXN upload."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          submodules: true
+
+      - name: Check META.json and control file match the tag
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          META_VER="$(jq -r .version META.json)"
+          CTL_VER="$(sed -n "s/^default_version *= *'\(.*\)'/\1/p" pg_tre.control)"
+          if [ "$META_VER" != "$VER" ] || [ "$CTL_VER" != "$VER" ]; then
+            echo "::error::tag $VER, META.json $META_VER, pg_tre.control $CTL_VER"
+            exit 1
+          fi
+
+      # make dist writes a tar.gz with the vendor/tre and vendor/lime
+      # submodules included; PGXN Manager accepts tarballs and repacks
+      # them as zip.
+      - name: Build distribution
+        if: steps.check.outputs.skip != 'true'
+        run: make dist
+
+      - name: Upload to PGXN
+        if: steps.check.outputs.skip != 'true'
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          archive="pg_tre-${GITHUB_REF_NAME#v}.tar.gz"
+          # 2xx/3xx: accepted.  409: this version is already on PGXN.
+          code=$(curl -sS -o /tmp/pgxn_resp.txt -w '%{http_code}' \
+            --user "$PGXN_USERNAME:$PGXN_PASSWORD" \
+            -F "archive=@${archive}" \
+            https://manager.pgxn.org/upload)
+          echo "PGXN upload HTTP $code"; cat /tmp/pgxn_resp.txt || true
+          case "$code" in
+            2*|3*) echo "PGXN upload accepted." ;;
+            409)   echo "::warning::this version is already on PGXN." ;;
+            *)     echo "::error::PGXN upload failed (HTTP $code)"; exit 1 ;;
+          esac
