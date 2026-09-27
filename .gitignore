@@ -88,3 +88,7 @@ vendor/tre/.pg_tre-patched
 
 # Local per-project agent steering (not part of the release).
 .agent-steering-domains.md
+
+# nix build output symlinks (they block scripts/bump-version.sh).
+/result
+/result-*
