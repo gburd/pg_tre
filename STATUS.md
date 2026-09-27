@@ -1,10 +1,10 @@
 # pg_tre status
 
-Released: **4.0.2** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.1.0** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-4.0.2 is a correctness fix: a plain Index Scan silently
+4.1.0 is a correctness fix: a plain Index Scan silently
 under-returned rows on a heap with HOT updates.  The scan handed
 the executor the TID of a heap-only tuple version instead of its
 HOT-chain root, and `heap_hot_search_buffer` cannot reach a chain
@@ -108,7 +108,7 @@ mismatches across all stress scenarios, and the SuRF fast path
 intact at 0.060 ms.  Results in
 `bench/stress/RESULTS-stress-3.2.3.md`.  See `CHANGELOG.md`.
 
-3.2.2 refreshes the vendored sparsemap from v5.1.1 to v5.5.0, an
+3.2.2 refreshes the vendored sparsemap from v5.1.1 to v5.6.0, an
 upstream correctness release (seven bugs; three data-loss or
 corruption on ordinary inputs).  Its release note claimed
 "existing indexes remain readable" -- accurate about the sparsemap

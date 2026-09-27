@@ -1,0 +1,28 @@
+-- pg_tre 4.0.2 -> 4.1.0 upgrade.
+--
+-- No catalog changes: `diff sql/pg_tre--4.0.2.sql sql/pg_tre--4.1.0.sql`
+-- differs only in the header comment's version string.
+--
+-- 4.1.0 refreshes the vendored sparsemap from v5.5.0 to v5.6.0, an upstream
+-- security-hardening release, and adds the corruption detection that release
+-- makes necessary.  The sparsemap wire format is unchanged (still version 2),
+-- so there is **no on-disk format change and NO REINDEX required** -- every
+-- existing posting page is read identically, verified cross-version across
+-- ten map shapes.
+--
+-- One behaviour change worth knowing about: sparsemap now validates on open
+-- and substitutes an empty map for bytes it rejects.  pg_tre cross-checks for
+-- that and raises
+--
+--   ERROR:  pg_tre: corrupt inline sparsemap in posting for this trigram
+--   HINT:   REINDEX the index to rebuild it.
+--
+-- rather than letting a damaged posting read as zero TIDs.  On a healthy
+-- index this never fires: every map shape pg_tre writes passes the stricter
+-- validator.  If you DO see it, the index has real damage -- REINDEX it, and
+-- check the server log for a preceding checksum failure.
+--
+-- Note that with data_checksums on (the PG18 default) PostgreSQL reports
+-- on-disk damage first, as "invalid page in block N".  These guards cover the
+-- cases checksums do not: checksums disabled, or corruption arising in memory
+-- after the page checksum was verified.

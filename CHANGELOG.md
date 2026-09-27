@@ -6,6 +6,112 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.1.0] - 2026-09-27 - vendored sparsemap v5.6.0 (security hardening) + corruption detection
+
+Library-refresh release.  The vendored sparsemap goes from **v5.5.0 to
+v5.6.0**, an upstream security-hardening release, and pg_tre gains the
+corruption detection that hardening makes necessary.
+
+**No on-disk format change and NO REINDEX required.**  The sparsemap wire
+format is unchanged (still version 2); every existing posting page is read
+identically.
+
+### Changed
+
+- **Vendored sparsemap v5.5.0 -> v5.6.0**, verbatim apart from the include
+  path.  Upstream fuzzed every decode and mutation path with untrusted input.
+  What matters for pg_tre, in order:
+  - `sm_open` / `sm_open_copy` now **validate and reject** malformed input,
+    where before they trusted the bytes and a crafted chunk could crash a
+    later `sm_add`.  pg_tre reopens raw on-page bytes through both on every
+    posting read, so this is the consequential change.
+  - `sm_validate` is stricter: it rejects an RLE chunk whose length exceeds
+    its capacity, a chunk start not aligned to the chunk width,
+    `start + capacity` overflowing `uint64_t`, overlapping chunk spans, and a
+    stored chunk count that disagrees with the walk.
+  - **Termination and amplification.**  A 24-byte input can legitimately
+    declare a two-billion-bit run.  `sm_xor`, `sm_extract_range`, `sm_hash`,
+    the `*_cardinality` family, `sm_jaccard_index`, `sm_equals`, `sm_compare`
+    and `sm_subset_compare` were O(set bits) and would hang for seconds on
+    such input; they are now run-based and finish in microseconds.
+  - Memory safety on valid-but-adversarial maps: a source over-read in
+    `sm_split`, a non-terminating per-bit loop, a destination over-write, an
+    out-of-range shift, plus two short-RLE mutation bugs found in upstream's
+    own qualification.
+  - One NULL-map contract: nineteen public functions previously segfaulted on
+    NULL and now return their documented failure value with `errno = EINVAL`.
+
+### Fixed
+
+- **A corrupt on-page sparsemap is now detected instead of read as zero
+  TIDs.**  `sm_open()` returns void and cannot report failure, so for bytes
+  v5.6.0 rejects it substitutes an **empty map**.  Unchecked, that turns a
+  damaged posting into silently-wrong results — and if VACUUM reaches the
+  leaf it repacks it as though it truly held no TIDs, making the loss
+  permanent.
+
+  All three read paths that use `sm_wrap()`+`sm_open()` now cross-check and
+  raise `ERRCODE_DATA_CORRUPTED` with a REINDEX hint: the inline posting blob
+  (the common case — most postings live inline in an upper leaf and never
+  occupy a `posting_leaf` page), the out-of-line leaf serve path, and the
+  vacuum repack path.
+
+  The predicate is `sm_get_size(map) != the length handed in`, **not**
+  `sm_validate()`.  The `sm_validate` version was written first and measured
+  useless: the substituted empty map is itself structurally valid, so
+  `sm_validate` returns true on every corruption (0 of 4 detected).  The size
+  cross-check catches 4 of 4 — inflated chunk count, misaligned chunk start,
+  RLE length > capacity, truncated mid-chunk — with 0 false positives across
+  all nine map shapes pg_tre emits.
+
+  **Scope, stated plainly:** with `data_checksums` on (the PG18 default)
+  PostgreSQL reports on-disk damage first as `invalid page in block N`, so
+  these guards are defence-in-depth.  They were only observed to fire after
+  explicitly running `pg_checksums --disable`; they cover checksums-off
+  clusters and damage arising in memory after the checksum was verified.
+
+### Added
+
+- `test/sql/sparsemap_corrupt_guard.sql` asserts that a healthy index never
+  trips the guard — across singleton, dense/RLE, sparse and multi-leaf
+  postings, through the scan, the vacuum repack and the right-link walk.
+  That is the property protecting the upgrade: if a future sparsemap tightens
+  validation in a way that rejects pg_tre's own output, this fails in CI
+  rather than erroring in production.
+
+### Qualified
+
+On a **Debian 12** EC2 instance (gcc 12, PostgreSQL 18.0) — a different
+distribution and compiler from the usual Amazon Linux rig, which is itself
+useful coverage:
+
+- **45/45** regression tests; clean build, **zero warnings**.
+- **TAP 17/17** — crash recovery across two `kill -9` cycles, Hanoi merge,
+  replication with standby promotion.
+- **Cross-version read compatibility**, the actual upgrade path: bytes written
+  by the vendored v5.5.0 and reopened by v5.6.0 through both of pg_tre's
+  paths return identical cardinality across ten map shapes (single, 64/65
+  boundaries, dense, strided, wide-sparse, long-RLE, gapped, 20k dense).
+- Every map shape pg_tre produces passes the stricter validator (32 checks),
+  so the new rejection cannot fire on our own output.
+- Upstream's suite against the **vendored** copy: 44/44 API/scale tests,
+  175,541 coverage expectations, and the four new hardening suites — NULL
+  contract (69 functions), S1 validate invariants, S3 split safety, S4
+  amplification (46 comparison pairs, 0 mismatches).
+- `SPARSEMAP_PREFIX` renaming intact: 85 prefixed symbols, zero unprefixed
+  leaks.
+- The guard verified firing end-to-end in the server (checksums disabled), and
+  silent on healthy data with checksums on.
+- Stress C/D/G/H/I/J: **zero accuracy-oracle mismatches**, scenario G still
+  PASSing at 1.98x, parallel==serial hit counts (59,167), SuRF anchored-absent
+  reject 0.070 ms, 0 stuck spinlocks.
+
+### Acknowledgements
+
+- The sparsemap project for the v5.6.0 hardening release.
+
+---
+
 ## [4.0.2] - 2026-09-13 - Index Scan dropped HOT-updated rows
 
 **Correctness fix. Upgrade if you use `~*` or `ILIKE` on a table that gets
