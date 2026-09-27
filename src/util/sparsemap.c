@@ -87,7 +87,7 @@
 
 #ifndef SM_POPCOUNT64
 #if defined(__GNUC__) || defined(__clang__)
-#define SM_POPCOUNT64(x) ((int)__builtin_popcountll((unsigned long long)(x)))
+#define SM_POPCOUNT64(x) ((int)__builtin_popcountll((uint64_t)(x)))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
 #define SM_POPCOUNT64(x) ((int)__popcnt64((unsigned __int64)(x)))
@@ -99,10 +99,10 @@
 static inline int
 sm_swar_popcount64(uint64_t x)
 {
-	x = x - ((x >> 1) & 0x5555555555555555ULL);
-	x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
-	x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
-	return ((int)((x * 0x0101010101010101ULL) >> 56));
+	x = x - ((x >> 1) & UINT64_C(0x5555555555555555));
+	x = (x & UINT64_C(0x3333333333333333)) + ((x >> 2) & UINT64_C(0x3333333333333333));
+	x = (x + (x >> 4)) & UINT64_C(0x0F0F0F0F0F0F0F0F);
+	return ((int)((x * UINT64_C(0x0101010101010101)) >> 56));
 }
 #define SM_POPCOUNT64(x) sm_swar_popcount64((uint64_t)(x))
 #endif
@@ -110,7 +110,7 @@ sm_swar_popcount64(uint64_t x)
 
 #ifndef SM_CTZ64
 #if defined(__GNUC__) || defined(__clang__)
-#define SM_CTZ64(x) __builtin_ctzll((unsigned long long)(x))
+#define SM_CTZ64(x) __builtin_ctzll((uint64_t)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
 static inline int
@@ -127,27 +127,27 @@ static inline int
 sm_swar_ctz64(uint64_t x)
 {
 	int n = 0;
-	if (!(x & 0xFFFFFFFFULL)) {
+	if (!(x & UINT64_C(0xFFFFFFFF))) {
 		n += 32;
 		x >>= 32;
 	}
-	if (!(x & 0xFFFFULL)) {
+	if (!(x & UINT64_C(0xFFFF))) {
 		n += 16;
 		x >>= 16;
 	}
-	if (!(x & 0xFFULL)) {
+	if (!(x & UINT64_C(0xFF))) {
 		n += 8;
 		x >>= 8;
 	}
-	if (!(x & 0xFULL)) {
+	if (!(x & UINT64_C(0xF))) {
 		n += 4;
 		x >>= 4;
 	}
-	if (!(x & 0x3ULL)) {
+	if (!(x & UINT64_C(0x3))) {
 		n += 2;
 		x >>= 2;
 	}
-	if (!(x & 0x1ULL)) {
+	if (!(x & UINT64_C(0x1))) {
 		n += 1;
 	}
 	return (n);
@@ -158,7 +158,7 @@ sm_swar_ctz64(uint64_t x)
 
 #ifndef SM_CLZ64
 #if defined(__GNUC__) || defined(__clang__)
-#define SM_CLZ64(x) __builtin_clzll((unsigned long long)(x))
+#define SM_CLZ64(x) __builtin_clzll((uint64_t)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
 static inline int
@@ -174,27 +174,27 @@ static inline int
 sm_swar_clz64(uint64_t x)
 {
 	int n = 0;
-	if (!(x & 0xFFFFFFFF00000000ULL)) {
+	if (!(x & UINT64_C(0xFFFFFFFF00000000))) {
 		n += 32;
 		x <<= 32;
 	}
-	if (!(x & 0xFFFF000000000000ULL)) {
+	if (!(x & UINT64_C(0xFFFF000000000000))) {
 		n += 16;
 		x <<= 16;
 	}
-	if (!(x & 0xFF00000000000000ULL)) {
+	if (!(x & UINT64_C(0xFF00000000000000))) {
 		n += 8;
 		x <<= 8;
 	}
-	if (!(x & 0xF000000000000000ULL)) {
+	if (!(x & UINT64_C(0xF000000000000000))) {
 		n += 4;
 		x <<= 4;
 	}
-	if (!(x & 0xC000000000000000ULL)) {
+	if (!(x & UINT64_C(0xC000000000000000))) {
 		n += 2;
 		x <<= 2;
 	}
-	if (!(x & 0x8000000000000000ULL)) {
+	if (!(x & UINT64_C(0x8000000000000000))) {
 		n += 1;
 	}
 	return (n);
@@ -276,7 +276,18 @@ void
 /* Defaults for any hook the consumer did not supply and that the
  * diagnostic build did not define above. */
 #ifndef __sm_diag
-#define __sm_diag(format, ...) ((void)0)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
+static inline void
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+__sm_diag_noop(const char *format, ...)
+{
+	(void)format;
+}
+#define __sm_diag __sm_diag_noop
 #endif
 #ifndef __sm_assert
 #define __sm_assert(expr) ((void)0)
@@ -577,11 +588,11 @@ typedef struct {
  * RLE chunks are immutable by design - any modification that would create gaps or
  * partial runs causes the chunk to be converted to sparse encoding.
  */
-#define SM_RLE_FLAGS      0x4000000000000000ULL /* Bits 63:62 = 01 */
-#define SM_RLE_FLAGS_MASK 0xC000000000000000ULL /* Mask for bits 63:62 */
+#define SM_RLE_FLAGS      UINT64_C(0x4000000000000000) /* Bits 63:62 = 01 */
+#define SM_RLE_FLAGS_MASK UINT64_C(0xC000000000000000) /* Mask for bits 63:62 */
 #define SM_RLE_CAPACITY_MASK \
-	0x3FFFFFFF80000000ULL         /* Mask for bits 61:31 (capacity) */
-#define SM_RLE_LENGTH_MASK 0x7FFFFFFFULL /* Mask for bits 30:0 (length) */
+	UINT64_C(0x3FFFFFFF80000000) /* Mask for bits 61:31 (capacity) */
+#define SM_RLE_LENGTH_MASK UINT64_C(0x7FFFFFFF) /* Mask for bits 30:0 (length) */
 
 /**
  * @brief Checks if the given chunk is flagged as RLE encoded.
@@ -653,8 +664,9 @@ __sm_chunk_rle_get_capacity(const __sm_chunk_t *chunk)
 static void
 __sm_chunk_rle_set_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 {
+	__sm_bitvec_t w;
 	__sm_assert(capacity <= SM_CHUNK_RLE_MAX_CAPACITY);
-	__sm_bitvec_t w = chunk->m_data[0];
+	w = chunk->m_data[0];
 	w &= ~SM_RLE_CAPACITY_MASK;
 	w |= ((__sm_bitvec_t)capacity << 31) & SM_RLE_CAPACITY_MASK;
 	chunk->m_data[0] = w;
@@ -695,9 +707,10 @@ __sm_chunk_rle_get_length(const __sm_chunk_t *chunk)
 static void
 __sm_chunk_rle_set_length(const __sm_chunk_t *chunk, const size_t length)
 {
+	__sm_bitvec_t w;
 	__sm_assert(length <= SM_CHUNK_RLE_MAX_LENGTH);
 	__sm_assert(length <= __sm_chunk_rle_get_capacity(chunk));
-	__sm_bitvec_t w = chunk->m_data[0];
+	w = chunk->m_data[0];
 	w &= ~SM_RLE_LENGTH_MASK;
 	w |= length & SM_RLE_LENGTH_MASK;
 	chunk->m_data[0] = w;
@@ -825,7 +838,7 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
 enum sm_alloc_kind {
 	SM_OWNED_CONTIGUOUS = 0,
 	SM_WRAPPED = 1,
-	SM_OWNED_SPLIT = 2,
+	SM_OWNED_SPLIT = 2
 };
 
 /* -------------------------------------------------------------------
@@ -976,7 +989,7 @@ static size_t
 __sm_chunk_calc_vector_size(const uint8_t b)
 {
 	/* clang-format off */
-  static int lookup[] = {
+  static const size_t lookup[] = {
     0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
     0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
     1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
@@ -1038,6 +1051,9 @@ __sm_desc_flag_byte(const __sm_bitvec_t desc, const size_t n)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 {
+	/* Handle 4 indices (1 byte) at a time. */
+	size_t position = 0;
+
 	/* Defense-in-depth: callers compute `bv` as `idx / SM_BITS_PER_VECTOR`
 	 * after subtracting the chunk's start offset; on a corrupt buffer
 	 * (sm_open of attacker-controlled bytes) the start offset can be
@@ -1050,21 +1066,19 @@ __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 		return (0);
 	}
 
-	/* Handle 4 indices (1 byte) at a time. */
-	size_t position = 0;
-
 	/* Handle RLE by examining the first byte. */
 	if (!__sm_chunk_is_rle(chunk)) {
 		const __sm_bitvec_t desc = *chunk->m_data;
 		const size_t num_bytes =
 		    bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
-		for (size_t i = 0; i < num_bytes; i++) {
+		size_t i;
+		for (i = 0; i < num_bytes; i++) {
 			position += __sm_chunk_calc_vector_size(
 			    __sm_desc_flag_byte(desc, i));
 		}
 
 		bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
-		for (size_t i = 0; i < bv; i++) {
+		for (i = 0; i < bv; i++) {
 			const size_t flags =
 			    SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
 			if (flags == SM_PAYLOAD_MIXED) {
@@ -1106,20 +1120,24 @@ __sm_chunk_init(__sm_chunk_t *chunk, uint8_t *data)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 {
+	size_t capacity = SM_CHUNK_MAX_CAPACITY;
+	__sm_bitvec_t desc;
+	size_t i;
+
 	/* Handle RLE which encodes the capacity in the vector. */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		return (__sm_chunk_rle_get_capacity(chunk));
 	}
 
-	size_t capacity = SM_CHUNK_MAX_CAPACITY;
-	const __sm_bitvec_t desc = *chunk->m_data;
+	desc = *chunk->m_data;
 
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(desc, i);
+		int j;
 		if (!b || b == 0xff) {
 			continue;
 		}
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				capacity -= SM_BITS_PER_VECTOR;
@@ -1143,22 +1161,25 @@ __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 static void
 __sm_chunk_increase_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 {
+	const size_t initial_capacity = __sm_chunk_get_capacity(chunk);
+	size_t increased = 0;
+	size_t i;
+
 	__sm_assert(capacity % SM_BITS_PER_VECTOR == 0);
 	__sm_assert(capacity <= SM_CHUNK_MAX_CAPACITY);
-	__sm_assert(capacity > __sm_chunk_get_capacity(chunk));
+	__sm_assert(capacity > initial_capacity);
 
-	const size_t initial_capacity = __sm_chunk_get_capacity(chunk);
 	if (capacity <= initial_capacity || capacity > SM_CHUNK_MAX_CAPACITY) {
 		return;
 	}
 
-	size_t increased = 0;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(*chunk->m_data, i);
+		int j;
 		if (!b || b == 0xff) {
 			continue;
 		}
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* Flag (i * 4 + j) of the descriptor word;
@@ -1198,10 +1219,12 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 	if (chunk->m_data[0] != 0) {
 		/* A chunk is considered empty if all flags are SM_PAYLOAD_ZERO or _NONE. */
 		const __sm_bitvec_t desc = *chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		size_t i;
+		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			const uint8_t b = __sm_desc_flag_byte(desc, i);
 			if (b) {
-				for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE;
+				int j;
+				for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE;
 				     j++) {
 					const size_t flags =
 					    SM_CHUNK_GET_FLAGS(b, j);
@@ -1235,7 +1258,8 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 	if (SM_LIKELY(!__sm_chunk_is_rle(chunk))) {
 		/* Use a lookup table for each byte of the flags */
 		const __sm_bitvec_t desc = *chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		size_t i;
+		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			size += sizeof(__sm_bitvec_t) *
 			    __sm_chunk_calc_vector_size(
 			        __sm_desc_flag_byte(desc, i));
@@ -1257,6 +1281,10 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 SM_ALWAYS_INLINE bool
 __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 {
+	size_t bv;
+	size_t flags;
+	__sm_bitvec_t w;
+
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		if (idx < __sm_chunk_rle_get_length(chunk)) {
 			return (true);
@@ -1271,11 +1299,11 @@ __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 		return (false);
 	}
 	/* in which __sm_bitvec_t is |idx| stored? */
-	const size_t bv = idx / SM_BITS_PER_VECTOR;
+	bv = idx / SM_BITS_PER_VECTOR;
 	__sm_assert(bv < SM_FLAGS_PER_INDEX);
 
 	/* now retrieve the flags of that __sm_bitvec_t */
-	const size_t flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
+	flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
 	switch (flags) {
 	case SM_PAYLOAD_ZEROS:
 	case SM_PAYLOAD_NONE:
@@ -1288,8 +1316,7 @@ __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 	}
 
 	/* get the __sm_bitvec_t at |bv| */
-	const __sm_bitvec_t w =
-	    chunk->m_data[1 + __sm_chunk_get_position(chunk, bv)];
+	w = chunk->m_data[1 + __sm_chunk_get_position(chunk, bv)];
 	/* and finally check the bit in that __sm_bitvec_t */
 	return ((w & (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR) > 0);
 }
@@ -1384,6 +1411,7 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 {
 	/* Where in the descriptor does this idx fall, which flag should we examine? */
 	const size_t bv = idx / SM_BITS_PER_VECTOR;
+	__sm_bitvec_t w;
 	__sm_assert(bv < SM_FLAGS_PER_INDEX);
 	__sm_assert(__sm_chunk_is_rle(chunk) == false);
 
@@ -1403,7 +1431,7 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 		/* FALLTHROUGH */
 	case SM_PAYLOAD_MIXED:
 		*pos = 1 + __sm_chunk_get_position(chunk, bv);
-		__sm_bitvec_t w = chunk->m_data[*pos];
+		w = chunk->m_data[*pos];
 		w |= (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR;
 		/* Did the vector transition from mixed to all ones? If so, remove it. */
 		if (w == ~(__sm_bitvec_t)0) {
@@ -1442,6 +1470,10 @@ static size_t
 __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
     const bool value)
 {
+	size_t ret = 0;
+	__sm_bitvec_t sel_desc;
+	size_t i;
+
 	/* RLE fast path */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
@@ -1452,28 +1484,29 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			/* RLE has run of 1s from index 0 to length-1 */
 			if (n < (ssize_t)length) {
 				*offset = -1;
-				return (n); /* nth set bit is at index n */
+				return ((size_t)n); /* nth set bit is at index n */
 			} else {
 				*offset = n -
-				    length; /* propagate remainder to next chunk */
+				    (ssize_t)length; /* propagate remainder to next chunk */
 				return (capacity);
 			}
 		} else {
 			/* Selecting nth unset bit (0) */
 			/* Unset bits start at index length */
+			const size_t unset_count =
+			    (length >= capacity) ? 0 : capacity - length;
 			if (length >= capacity) {
 				/* No unset bits in this chunk */
 				*offset = n;
 				return (capacity);
 			}
-			const size_t unset_count = capacity - length;
 			if (n < (ssize_t)unset_count) {
 				*offset = -1;
 				return (length +
-				    n); /* nth unset bit is at (length + n) */
+				    (size_t)n); /* nth unset bit is at (length + n) */
 			} else {
 				*offset =
-				    n - unset_count; /* propagate remainder */
+				    n - (ssize_t)unset_count; /* propagate remainder */
 				return (capacity);
 			}
 		}
@@ -1487,10 +1520,10 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 	 * searching for 0s). For MIXED vectors, use popcount to quickly check if we need to scan
 	 * individual bits. Accumulate bit positions until we've found the nth occurrence.
 	 */
-	size_t ret = 0;
-	const __sm_bitvec_t sel_desc = *chunk->m_data;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	sel_desc = *chunk->m_data;
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(sel_desc, i);
+		int j;
 		/* Quick skip: if flag byte is 0 (all NONE descriptors) and seeking 1s, skip 4 vectors */
 		if (b == 0 && value) {
 			ret += (size_t)SM_FLAGS_PER_INDEX_BYTE *
@@ -1498,7 +1531,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			continue;
 		}
 
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* No payload, but the slot still occupies its
@@ -1527,7 +1560,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 					continue;
 				}
 				*offset = -1;
-				return (ret + n);
+				return (ret + (size_t)n);
 			}
 			if (flags == SM_PAYLOAD_ONES) {
 				if (value == true) {
@@ -1547,7 +1580,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 						continue;
 					}
 					*offset = -1;
-					return (ret + n);
+					return (ret + (size_t)n);
 				}
 				ret += SM_BITS_PER_VECTOR;
 				continue;
@@ -1555,7 +1588,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			if (flags == SM_PAYLOAD_MIXED) {
 				const __sm_bitvec_t w = chunk->m_data[1 +
 				    __sm_chunk_get_position(chunk,
-				        (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
+				        (i * SM_FLAGS_PER_INDEX_BYTE) + (size_t)j)];
 				/* Use ctzll for fast bit extraction */
 				__sm_bitvec_t target_bits = value ? w : ~w;
 				__sm_bitvec_t remaining = target_bits;
@@ -1654,10 +1687,12 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 		__sm_bitvec_t w, mw;
 		uint64_t mask;
 		size_t pc;
+		size_t i;
 
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			const uint8_t vb = __sm_desc_flag_byte(rank_desc, i);
-			for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+			int j;
+			for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 				const size_t flags =
 				    SM_CHUNK_GET_FLAGS(vb, j);
 
@@ -1733,7 +1768,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 					w = chunk->m_data[1 +
 					    __sm_chunk_get_position(chunk,
 					        (i * SM_FLAGS_PER_INDEX_BYTE) +
-					            j)];
+					            (size_t)j)];
 					if (to >= SM_BITS_PER_VECTOR) {
 						rank->pos += SM_BITS_PER_VECTOR;
 						to -= SM_BITS_PER_VECTOR;
@@ -1745,14 +1780,13 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 						                    64 :
 						                    from)));
 						mw = (value ? w : ~w) & mask;
-						pc = SM_POPCOUNT64(mw);
+						pc = (size_t)SM_POPCOUNT64(mw);
 						amt += pc;
 						from =
 						    from > SM_BITS_PER_VECTOR ?
 						    from - SM_BITS_PER_VECTOR :
 						    0;
 					} else {
-						rank->pos += to + 1;
 						const uint64_t to_mask =
 						    (to == 63) ?
 						    UINT64_MAX :
@@ -1766,10 +1800,11 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 						            (from >= 64 ?
 						                    64 :
 						                    from)));
+						rank->pos += to + 1;
 						/* Create a mask for the range [from, to] and use popcount. */
 						mask = to_mask & from_mask;
 						mw = (value ? w : ~w) & mask;
-						pc = SM_POPCOUNT64(mw);
+						pc = (size_t)SM_POPCOUNT64(mw);
 						amt += pc;
 						rank->rem = mw >>
 						    (from > 63 ? 63 : from);
@@ -1805,9 +1840,16 @@ static size_t
 __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
     void (*scanner)(uint64_t[], size_t, void *aux), size_t skip, void *aux)
 {
+	uint64_t buffer[SM_BITS_PER_VECTOR];
+	size_t i;
+	size_t pos = 0;
+	size_t skipped = 0;
+	__sm_bitvec_t scan_desc;
+
 	/* RLE fast path */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
+		size_t scan_start;
 
 		/* RLE chunks only contain set bits from 0 to length-1 */
 		if (skip >= length) {
@@ -1815,19 +1857,17 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 		}
 
 		/* Skip first `skip` bits, then scan the rest */
-		const size_t scan_start = skip;
+		scan_start = skip;
 
-		/* Process in batches using same buffer size as sparse code */
-		uint64_t buffer[SM_BITS_PER_VECTOR];
-
-		for (size_t i = scan_start; i < length;) {
+		for (i = scan_start; i < length;) {
 			size_t batch_size = SM_BITS_PER_VECTOR;
+			size_t j;
 			if (i + batch_size > length) {
 				batch_size = length - i;
 			}
 
 			/* Fill buffer with consecutive indices */
-			for (size_t j = 0; j < batch_size; j++) {
+			for (j = 0; j < batch_size; j++) {
 				buffer[j] = start + i + j;
 			}
 
@@ -1842,19 +1882,17 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 	 * 'pos' tracks the bit offset within the chunk (each vector = SM_BITS_PER_VECTOR).
 	 * 'skip' counts set bits remaining to skip before scanning.
 	 * Returns the number of set bits skipped in this chunk. */
-	size_t pos = 0;
-	size_t skipped = 0;
-	uint64_t buffer[SM_BITS_PER_VECTOR];
-	const __sm_bitvec_t scan_desc = *chunk->m_data;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	scan_desc = *chunk->m_data;
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(scan_desc, i);
+		int j;
 		if (b == 0) {
 			/* All 4 flag slots in this byte are ZEROS -- no set bits, advance position. */
 			pos += SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR;
 			continue;
 		}
 
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* No capacity in this slot, do not advance position. */
@@ -1868,18 +1906,20 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 					pos += SM_BITS_PER_VECTOR;
 				} else if (skip > 0) {
 					size_t n = 0;
-					for (size_t b = skip;
-					     b < SM_BITS_PER_VECTOR; b++) {
-						buffer[n++] = start + pos + b;
+					size_t bb;
+					for (bb = skip;
+					     bb < SM_BITS_PER_VECTOR; bb++) {
+						buffer[n++] = start + pos + bb;
 					}
 					skipped += skip;
 					skip = 0;
 					scanner(&buffer[0], n, aux);
 					pos += SM_BITS_PER_VECTOR;
 				} else {
-					for (size_t b = 0;
-					     b < SM_BITS_PER_VECTOR; b++) {
-						buffer[b] = start + pos + b;
+					size_t bb;
+					for (bb = 0;
+					     bb < SM_BITS_PER_VECTOR; bb++) {
+						buffer[bb] = start + pos + bb;
 					}
 					scanner(&buffer[0], SM_BITS_PER_VECTOR,
 					    aux);
@@ -1888,15 +1928,16 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 			} else if (flags == SM_PAYLOAD_MIXED) {
 				__sm_bitvec_t remaining = chunk->m_data[1 +
 				    __sm_chunk_get_position(chunk,
-				        (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
+				        (i * SM_FLAGS_PER_INDEX_BYTE) + (size_t)j)];
 				size_t n = 0;
 				while (remaining) {
-					int b = SM_CTZ64(remaining);
+					int bb = SM_CTZ64(remaining);
 					if (skip > 0) {
 						skip--;
 						skipped++;
 					} else {
-						buffer[n++] = start + pos + b;
+						buffer[n++] = start + pos +
+						    (size_t)bb;
 					}
 					remaining &= remaining -
 					    1; /* clear lowest set bit */
@@ -2032,11 +2073,13 @@ __sm_get_chunk_end(const sm_t *map)
 {
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	const size_t count = __sm_get_chunk_count(map);
-	for (size_t i = 0; i < count; i++) {
-		p += SM_SIZEOF_OVERHEAD;
+	size_t i;
+	for (i = 0; i < count; i++) {
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (i + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
@@ -2085,6 +2128,9 @@ __sm_get_size_impl(const sm_t *map)
 	uint8_t *start = __sm_get_chunk_data(map, 0);
 	uint8_t *p = start;
 	uint8_t *end = map->m_data + __sm_cap(map);
+	size_t count;
+	size_t valid_count = 0;
+	size_t i;
 
 	/* Defensive: a chunk-data start outside the data buffer means the
 	 * map header itself is corrupt.  Return the empty-map size. */
@@ -2092,9 +2138,10 @@ __sm_get_size_impl(const sm_t *map)
 		return (SM_SIZEOF_OVERHEAD);
 	}
 
-	const size_t count = __sm_get_chunk_count(map);
-	size_t valid_count = 0;
-	for (size_t i = 0; i < count; i++) {
+	count = __sm_get_chunk_count(map);
+	for (i = 0; i < count; i++) {
+		__sm_chunk_t chunk;
+		size_t chunk_size;
 		/* Each chunk needs at least SM_SIZEOF_OVERHEAD bytes for its
 		 * aligned-offset prefix plus sizeof(__sm_bitvec_t) bytes for the
 		 * mandatory chunk header word.  If less remains, the on-disk
@@ -2104,9 +2151,8 @@ __sm_get_size_impl(const sm_t *map)
 			break;
 		}
 		p += SM_SIZEOF_OVERHEAD;
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		/* __sm_chunk_get_size returns at minimum sizeof(__sm_bitvec_t).
 		 * A chunk that claims to extend past `end` indicates corrupt
 		 * flags; stop walking. */
@@ -2133,7 +2179,7 @@ __sm_get_size_impl(const sm_t *map)
 	if (valid_count != count) {
 		__sm_set_chunk_count((sm_t *)map, valid_count);
 	}
-	return (SM_SIZEOF_OVERHEAD + (p - start));
+	return (SM_SIZEOF_OVERHEAD + (size_t)(p - start));
 }
 
 /**
@@ -2167,11 +2213,6 @@ static ssize_t
 __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 {
 	const size_t count = __sm_get_chunk_count(map);
-
-	if (count == 0) {
-		return (-1);
-	}
-
 	uint8_t *base = __sm_get_chunk_data(map, 0);
 	uint8_t *p = base;
 	/* Offsets returned here are relative to `base` (the first chunk);
@@ -2181,13 +2222,18 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	 * walk by stream_end is correct no matter where we resume from
 	 * (unlike an ordinal count, which would over-run when resuming
 	 * partway through the chunk list). */
-	const size_t stream_end = (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
+	const size_t stream_end =
+	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
 	/* Byte offset (base-relative) of the chunk immediately BEFORE the
 	 * chunk we finally return, or SIZE_MAX if none.  Captured for free
 	 * during the forward walk and handed back to the caller so the
 	 * coalescing path can find the left neighbor without a head-walk. */
 	size_t prev_off = SIZE_MAX;
+
+	if (count == 0) {
+		return (-1);
+	}
 
 	/*
 	 * Cursor fast-path.  If the caller passed a valid cursor whose
@@ -2220,9 +2266,10 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		__sm_assert(s == __sm_get_chunk_aligned_offset(s));
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (idx >= s + __sm_chunk_get_capacity(&chunk) &&
 		    next_off < stream_end) {
@@ -2253,6 +2300,164 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 {
 	__sm_store_u64((uint8_t *)&map->m_data[0], (uint64_t)new_count);
 }
+
+/* Reset a caller-owned cursor to its invalid/initial state.  Field-wise
+ * so it works as a plain assignment in C90 (a `(sm_cursor_t)SM_CURSOR_INIT`
+ * compound literal is C99). */
+static inline void
+__sm_cursor_reset(sm_cursor_t *c)
+{
+	c->offset = (size_t)-1;
+	c->start_idx = 0;
+	c->prev_offset = (size_t)-1;
+}
+
+/* -------------------------------------------------------------------
+ * Small-set mode
+ *
+ * When every set index is below SM_SMALL_MAX_BITS, the map stores a bare
+ * uint64 bitmapword[] from bit 0 (bit i in word i/64) -- exactly like
+ * PostgreSQL's Bitmapset -- behind an 8-byte header that ties
+ * Bitmapset's 8-byte header, so the footprint matches or beats it for
+ * near-zero sets.  Chunk mode keeps winning once indices spread.
+ *
+ * The mode is self-describing in the m_data byte stream: the same
+ * 8-byte header word that holds the chunk count in chunk mode has its
+ * top bit (SM_SMALL_FLAG) set in small mode, with the bitmapword count
+ * in the low 32 bits.  A chunk count never approaches 2^63, so the top
+ * bit is free.  This map-level header word is distinct from every
+ * per-chunk descriptor (which lives after the 8-byte chunk start), so
+ * SM_SMALL_FLAG can never collide with an RLE descriptor (bits 63:62 =
+ * 01, SM_RLE_FLAGS) or a real chunk count.  __sm_get_chunk_count / the
+ * chunk walkers must never run on a small map; callers gate on
+ * __sm_is_small() first.
+ *
+ * Layout (m_data):  [ SM_SMALL_FLAG | nwords : 8 bytes ][ word[0..nwords) ]
+ * m_data_used = SM_SIZEOF_OVERHEAD + nwords * 8.
+ * ------------------------------------------------------------------- */
+
+#define SM_SMALL_FLAG   ((uint64_t)1 << 63)
+#define SM_SMALL_WMASK  (((uint64_t)1 << 32) - 1)
+/* Hard span cap: at 16 words the small form is at most 8 + 16*8 = 136
+ * bytes.  It is preferred over the chunk form whenever it is not larger
+ * and fits in place; in a tightly-sized buffer a growth-to-shrink is
+ * skipped, so the small form can occasionally sit up to one word larger
+ * than the chunk equivalent -- never larger than a Bitmapset.  Above
+ * this cap the map is always in chunk mode. */
+#define SM_SMALL_MAX_WORDS 16u
+#define SM_SMALL_MAX_BITS  (SM_SMALL_MAX_WORDS * 64u)
+
+static inline bool
+__sm_is_small(const sm_t *map)
+{
+	if (map == NULL || map->m_data == NULL ||
+	    map->m_data_used < SM_SIZEOF_OVERHEAD) {
+		return (false);
+	}
+	return ((__sm_load_u64(&map->m_data[0]) & SM_SMALL_FLAG) != 0);
+}
+
+static inline size_t
+__sm_small_nwords(const sm_t *map)
+{
+	return ((size_t)(__sm_load_u64(&map->m_data[0]) & SM_SMALL_WMASK));
+}
+
+static inline uint64_t *
+__sm_small_words(const sm_t *map)
+{
+	return ((uint64_t *)&map->m_data[SM_SIZEOF_OVERHEAD]);
+}
+
+static inline void
+__sm_small_set_header(sm_t *map, size_t nwords)
+{
+	__sm_store_u64((uint8_t *)&map->m_data[0],
+	    SM_SMALL_FLAG | (uint64_t)nwords);
+}
+
+/* Byte footprint of the small form holding indices up to maxbit. */
+static inline size_t
+__sm_small_bytes_for(uint64_t maxbit)
+{
+	return (SM_SIZEOF_OVERHEAD + (size_t)(maxbit / 64 + 1) * sizeof(uint64_t));
+}
+
+/* True if idx is set in a small-mode map. */
+static bool
+__sm_small_contains(const sm_t *map, uint64_t idx)
+{
+	const size_t w = (size_t)(idx / 64);
+	if (w >= __sm_small_nwords(map)) {
+		return (false);
+	}
+	return ((__sm_small_words(map)[w] >> (idx % 64)) & 1u);
+}
+
+/* Population count of a small-mode map. */
+static uint64_t
+__sm_small_cardinality(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	uint64_t c = 0;
+	size_t i;
+	for (i = 0; i < n; i++) {
+		c += (uint64_t)SM_POPCOUNT64(w[i]);
+	}
+	return (c);
+}
+
+static bool
+__sm_small_is_empty(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	size_t i;
+	for (i = 0; i < n; i++) {
+		if (w[i] != 0) {
+			return (false);
+		}
+	}
+	return (true);
+}
+
+static uint64_t
+__sm_small_minimum(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	size_t i;
+	for (i = 0; i < n; i++) {
+		if (w[i] != 0) {
+			return ((uint64_t)i * 64 + (uint64_t)SM_CTZ64(w[i]));
+		}
+	}
+	return (0);
+}
+
+static uint64_t
+__sm_small_maximum(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	size_t i;
+	for (i = n; i-- > 0;) {
+		if (w[i] != 0) {
+			return ((uint64_t)i * 64 + (63 -
+			    (uint64_t)SM_CLZ64(w[i])));
+		}
+	}
+	return (0);
+}
+
+/* Materialize a small-mode map into a freshly allocated chunk-mode map
+ * (adding each set bit).  Returns NULL on allocation failure.  The
+ * caller owns the result and disposes it with sm_free().  Used to give
+ * the chunk-walking read/algebra paths a uniform view of a small map
+ * without mutating the (const) input. */
+static sm_t *__sm_materialize(const sm_t *small);
+
 
 /**
  * @brief Appends data to the sparsemap's internal buffer.
@@ -2317,10 +2522,11 @@ static void
 __sm_insert_data(sm_t *map, const size_t offset, const uint8_t *buffer,
     const size_t buffer_size)
 {
+	uint8_t *p;
 	__sm_assert(map->m_data_used + buffer_size <= __sm_cap(map));
 	__sm_assert(offset <= map->m_data_used);
 
-	uint8_t *p = __sm_get_chunk_data(map, offset);
+	p = __sm_get_chunk_data(map, offset);
 	memmove(p + buffer_size, p, map->m_data_used - offset);
 	memcpy(p, buffer, buffer_size);
 	map->m_data_used += buffer_size;
@@ -2339,8 +2545,9 @@ __sm_insert_data(sm_t *map, const size_t offset, const uint8_t *buffer,
 static void
 __sm_remove_data(sm_t *map, const size_t offset, const size_t gap_size)
 {
+	uint8_t *p;
 	__sm_assert(map->m_data_used >= gap_size);
-	uint8_t *p = __sm_get_chunk_data(map, offset);
+	p = __sm_get_chunk_data(map, offset);
 	memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
 	map->m_data_used -= gap_size;
 }
@@ -2420,11 +2627,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 				    __sm_get_chunk_data(map, adj_offset);
 				const __sm_idx_t adj_start =
 				    __sm_load_idx((const uint8_t *)adj_p);
+				size_t adj_length;
 				__sm_chunk_init(&adj,
 				    adj_p + SM_SIZEOF_OVERHEAD);
 				/* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
-				const size_t adj_length =
-				    __sm_chunk_get_run_length(&adj);
+				adj_length = __sm_chunk_get_run_length(&adj);
 				if (adj_length > 0) {
 					/* Does it align with this chunk? */
 					if (adj_start + adj_length == start) {
@@ -2438,22 +2645,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							const bool adj_is_rle =
 							    __sm_chunk_is_rle(
 							        &adj);
-							bool can_coalesce =
-							    true;
-
-							if (adj_is_rle &&
-							    adj_length >
-							        adj_capacity) {
-								can_coalesce =
-								    false;
-							}
-
 							/* Calculate new length as span from adjacent start to end of current run */
-							size_t new_length =
+							const size_t new_length =
 							    (start +
 							        run_length) -
 							    adj_start;
-
 							/*
 							 * Derive capacity from VEC-aligned boundaries, looking past the
 							 * current chunk (being absorbed) to find the real next neighbor.
@@ -2462,6 +2658,8 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							    merge_data_end =
 							        adj_start +
 							    new_length;
+							bool can_coalesce =
+							    true;
 							size_t new_capacity =
 							    ((merge_data_end +
 							         SM_CHUNK_MAX_CAPACITY -
@@ -2475,6 +2673,14 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							    SM_SIZEOF_OVERHEAD +
 							    __sm_chunk_get_size(
 							        chunk);
+
+							if (adj_is_rle &&
+							    adj_length >
+							        adj_capacity) {
+								can_coalesce =
+								    false;
+							}
+
 							if (post_offset <
 							    map->m_data_used -
 							        (SM_SIZEOF_OVERHEAD +
@@ -2578,11 +2784,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 				    __sm_get_chunk_data(map, adj_offset);
 				const __sm_idx_t adj_start =
 				    __sm_load_idx((const uint8_t *)adj_p);
+				size_t adj_length;
 				__sm_chunk_init(&adj,
 				    adj_p + SM_SIZEOF_OVERHEAD);
 				/* Is the adjacent right chunk RLE or a sparse with a run of ones? */
-				size_t adj_length =
-				    __sm_chunk_get_run_length(&adj);
+				adj_length = __sm_chunk_get_run_length(&adj);
 				/* If this is a SET operation and idx is valid and within the adjacent chunk,
 				 * use it to calculate accurate run length (prevents overestimation) */
 				if (is_set_op && idx != SM_IDX_MAX &&
@@ -2607,8 +2813,34 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							const bool adj_is_rle =
 							    __sm_chunk_is_rle(
 							        &adj);
+							/* Calculate new length as span from this start to end of adjacent run */
+							const size_t new_length =
+							    (adj_start +
+							        adj_length) -
+							    start;
+							/*
+							 * Derive capacity from VEC-aligned boundaries, looking past the
+							 * adjacent chunk (being absorbed) to find the real next neighbor.
+							 */
+							const size_t
+							    r_data_end = start +
+							    new_length;
+							const size_t r_adj_size =
+							    __sm_chunk_get_size(
+							        &adj);
+							const size_t r_post =
+							    adj_offset +
+							    SM_SIZEOF_OVERHEAD +
+							    r_adj_size;
 							bool can_coalesce =
 							    true;
+							size_t new_capacity =
+							    ((r_data_end +
+							         SM_CHUNK_MAX_CAPACITY -
+							         1) /
+							        SM_CHUNK_MAX_CAPACITY) *
+							        SM_CHUNK_MAX_CAPACITY -
+							    start;
 
 							if (adj_is_rle &&
 							    adj_length >
@@ -2617,33 +2849,6 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 								    false;
 							}
 
-							/* Calculate new length as span from this start to end of adjacent run */
-							size_t new_length =
-							    (adj_start +
-							        adj_length) -
-							    start;
-
-							/*
-							 * Derive capacity from VEC-aligned boundaries, looking past the
-							 * adjacent chunk (being absorbed) to find the real next neighbor.
-							 */
-							const size_t
-							    r_data_end = start +
-							    new_length;
-							size_t new_capacity =
-							    ((r_data_end +
-							         SM_CHUNK_MAX_CAPACITY -
-							         1) /
-							        SM_CHUNK_MAX_CAPACITY) *
-							        SM_CHUNK_MAX_CAPACITY -
-							    start;
-							const size_t r_adj_size =
-							    __sm_chunk_get_size(
-							        &adj);
-							const size_t r_post =
-							    adj_offset +
-							    SM_SIZEOF_OVERHEAD +
-							    r_adj_size;
 							if (r_post <
 							    map->m_data_used -
 							        (SM_SIZEOF_OVERHEAD +
@@ -2775,16 +2980,20 @@ __sm_coalesce_map(sm_t *map)
 
 	while (count > 1) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		size_t chunk_size;
+		size_t before;
+		size_t amt;
+		size_t after;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (count > 1) {
 			SM_PREFETCH(p + SM_SIZEOF_OVERHEAD + chunk_size +
 			    SM_SIZEOF_OVERHEAD);
 		}
-		const size_t before = __sm_get_chunk_count(map);
-		const size_t amt = __sm_coalesce_chunk(map, &chunk, offset,
+		before = __sm_get_chunk_count(map);
+		amt = (size_t)__sm_coalesce_chunk(map, &chunk, offset,
 		    start, p, SM_IDX_MAX, false, SIZE_MAX);
-		const size_t after = __sm_get_chunk_count(map);
+		after = __sm_get_chunk_count(map);
 		if (amt > 0 && after < before) {
 			/* A neighbour was absorbed at this position; stay put
 			 * and try to absorb the next one into the same chunk.
@@ -2865,6 +3074,10 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 
 	__sm_chunk_t pivot_chunk;
 	__sm_chunk_t lrc;
+	uint64_t aligned_idx;
+	int i;
+	const size_t base = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+	size_t total;
 
 	__sm_assert(state == 0 || state == 1 || state == -1);
 	__sm_assert(SM_IS_CHUNK_RLE(sep->target.chunk));
@@ -2886,7 +3099,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 	        (sizeof(__sm_bitvec_t) * 6));
 
 	/* Find the starting offset for our pivot chunk ... */
-	const uint64_t aligned_idx = __sm_get_chunk_aligned_offset(idx);
+	aligned_idx = __sm_get_chunk_aligned_offset(idx);
 	__sm_assert(
 	    idx >= aligned_idx && idx < aligned_idx + SM_CHUNK_MAX_CAPACITY);
 	/* avoid changing the map->m_data and for now work in our buf ... */
@@ -2964,12 +3177,11 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 			 * (size underflow) on maps whose RLE capacity was
 			 * widened well past the run.
 			 */
-			sep->count = (aligned_idx > sep->target.start) ? 2 : 1;
-			/* Does our pivot extend beyond the end of the run. */
 			const uint64_t amt_over = aligned_idx +
 			    SM_CHUNK_MAX_CAPACITY -
 			    (sep->target.start + sep->target.length);
-			/*
+			sep->count = (aligned_idx > sep->target.start) ? 2 : 1;
+			/* Does our pivot extend beyond the end of the run. */			/*
 			 * With the straddle guard above, 0 <= amt_over <
 			 * SM_CHUNK_MAX_CAPACITY, so amt_over / 64 * 2 <= 62 and
 			 * first_zero stays in (0, MAX_CAPACITY].  Assert the
@@ -3008,14 +3220,14 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 					    amt_over / SM_BITS_PER_VECTOR * 2;
 				}
 				if (amt_over % SM_BITS_PER_VECTOR) {
-					/* Change only the flag at the position of the last index to "mixed" ... */
-					SM_CHUNK_SET_FLAGS(
-					    pivot_chunk.m_data[0], bv,
-					    SM_PAYLOAD_MIXED);
 					/* Partial run-tail vector: bits [0, first_zero%64) set. */
 					const __sm_bitvec_t tail_mask =
 					    ~(~(__sm_bitvec_t)0 << first_zero %
 					            SM_BITS_PER_VECTOR);
+					/* Change only the flag at the position of the last index to "mixed" ... */
+					SM_CHUNK_SET_FLAGS(
+					    pivot_chunk.m_data[0], bv,
+					    SM_PAYLOAD_MIXED);
 					if (state == 0 && bv == (idx - aligned_idx) /
 					        SM_BITS_PER_VECTOR) {
 						/*
@@ -3101,15 +3313,17 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 					pivot_chunk.m_data[pos] |=
 					    (__sm_bitvec_t)1 << bit_pos;
 				} else {
+					size_t pos;
+					size_t vecs_after;
 					/* Different vector -- add a new MIXED flag and payload vector. */
 					SM_CHUNK_SET_FLAGS(
 					    pivot_chunk.m_data[0], vec_idx,
 					    SM_PAYLOAD_MIXED);
-					const size_t pos = 1 +
+					pos = 1 +
 					    __sm_chunk_get_position(
 					        &pivot_chunk, vec_idx);
 					/* Shift existing vectors after this position to make room. */
-					const size_t vecs_after =
+					vecs_after =
 					    existing_mixed - (pos - 1);
 					if (vecs_after > 0) {
 						memmove(&pivot_chunk
@@ -3251,7 +3465,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 		__sm_assert(sep->ex[1].start < sep->ex[1].end);
 	} while (0);
 
-	for (int i = 0; i < 2; i++) {
+	for (i = 0; i < 2; i++) {
 		if (sep->ex[i].p) {
 			/* First assign the starting offset ... */
 			__sm_store_idx((uint8_t *)sep->ex[i].p,
@@ -3263,6 +3477,9 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 			if (sep->ex[i].end - sep->ex[i].start + 1 >
 			    SM_CHUNK_MAX_CAPACITY) {
 				/* ... we need a run-length encoding (RLE), chunk ... */
+				/* Capacity is set before length to satisfy the invariant */
+				const size_t rle_length =
+				    sep->ex[i].end - sep->ex[i].start + 1;
 				__sm_chunk_set_rle(&lrc);
 				/* ... a few things differ left to right ... */
 				if (i == 0) {
@@ -3313,9 +3530,6 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 					__sm_chunk_rle_set_capacity(&lrc,
 					    right_cap);
 				}
-				/* Capacity is set before length to satisfy the invariant */
-				const size_t rle_length =
-				    sep->ex[i].end - sep->ex[i].start + 1;
 				__sm_chunk_rle_set_length(&lrc, rle_length);
 				/* ... and record our chunk size. */
 				sep->ex[i].size =
@@ -3402,9 +3616,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 	 * __sm_insert_data as a SIZE_MAX-ish length and tripping stack
 	 * canaries / heap corruption.
 	 */
-	const size_t base = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-	const size_t total =
-	    sep->pivot.size + sep->ex[0].size + sep->ex[1].size;
+	total = sep->pivot.size + sep->ex[0].size + sep->ex[1].size;
 	if (total < base) {
 		__sm_when_diag({
 			__sm_assert(0 &&
@@ -3497,6 +3709,11 @@ sparsemap(size_t size)
 sm_t *
 sm_create(size_t size)
 {
+	size_t data_size;
+	size_t total_size;
+	size_t padding;
+	sm_t *map;
+
 	if (size == 0) {
 		size = 1024;
 	}
@@ -3505,14 +3722,14 @@ sm_create(size_t size)
 	 * and the (low-bit-tagged) stored capacity agree exactly. */
 	size = (size + 7u) & ~(size_t)7;
 
-	const size_t data_size = size * sizeof(uint8_t);
+	data_size = size * sizeof(uint8_t);
 
 	/* Ensure that m_data is 8-byte aligned. */
-	size_t total_size = sizeof(sm_t) + data_size;
-	const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
+	total_size = sizeof(sm_t) + data_size;
+	padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 	total_size += padding;
 
-	sm_t *map = (sm_t *)__sm_alloc_zero(total_size);
+	map = (sm_t *)__sm_alloc_zero(total_size);
 	if (map) {
 		uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sm_t)) &
 		    ~(uintptr_t)7);
@@ -3568,11 +3785,13 @@ sm_free(sm_t *map)
 sm_t *
 sm_owned_copy(const sm_t *map)
 {
+	size_t cap;
+	sm_t *out;
 	if (map == NULL) {
 		return (NULL);
 	}
-	const size_t cap = sm_get_capacity(map);
-	sm_t *out = sm_create(cap);
+	cap = sm_get_capacity(map);
+	out = sm_create(cap);
 	if (out == NULL) {
 		return (NULL);
 	}
@@ -3597,12 +3816,14 @@ sm_owned_copy(const sm_t *map)
 sm_t *
 sm_copy(const sm_t *other)
 {
+	size_t cap;
+	sm_t *map;
 	if (other == NULL) {
 		errno = EINVAL;
 		return (NULL);
 	}
-	const size_t cap = sm_get_capacity(other);
-	sm_t *map = sparsemap(cap);
+	cap = sm_get_capacity(other);
+	map = sparsemap(cap);
 	if (map) {
 		__sm_set_cap_kind(map, cap, SM_OWNED_CONTIGUOUS);
 		map->m_data_used = other->m_data_used;
@@ -3678,6 +3899,8 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 void
 sm_open(sm_t *map, uint8_t *data, const size_t size)
 {
+	size_t claimed_count;
+	size_t walked_count;
 	if (map == NULL) {
 		errno = EINVAL;
 		return;
@@ -3699,12 +3922,23 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 */
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
 	map->m_data_used = __sm_cap(map);
+	/* Small-set body: the header word's top bit is set.  Its size is
+	 * fixed by the word count; don't run the chunk walk on it. */
+	if (size >= SM_SIZEOF_OVERHEAD && __sm_is_small(map)) {
+		const size_t nwords = __sm_small_nwords(map);		map->m_data_used =
+		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
+		if (map->m_data_used > __sm_cap(map) || !sm_validate(map)) {
+			__sm_store_u64(&map->m_data[0], 0);
+			map->m_data_used = SM_SIZEOF_OVERHEAD;
+		}
+		return;
+	}
 	/* The stored count as the buffer claims it, before __sm_get_size_impl
 	 * silently truncates it to the valid prefix.  A mismatch is an S1(e)
 	 * violation (stored count disagrees with the walk). */
-	const size_t claimed_count = __sm_get_chunk_count(map);
+	claimed_count = __sm_get_chunk_count(map);
 	map->m_data_used = __sm_get_size_impl(map);
-	const size_t walked_count = __sm_get_chunk_count(map);
+	walked_count = __sm_get_chunk_count(map);
 	/* An untrusted buffer must be structurally valid or it is replaced
 	 * with an empty (valid) map -- the same contract sm_deserialize
 	 * already enforces.  size 0 is the documented "leave it empty" call
@@ -3719,25 +3953,41 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 sm_t *
 sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 {
+	size_t cap;
+	sm_t *m;
 	if (data == NULL && n > 0)
 		return (NULL);
 	/* sm_create needs at least SM_SIZEOF_OVERHEAD bytes; bump up if the
 	 * caller asked for less. */
-	size_t cap = n + slack;
+	cap = n + slack;
 	if (cap < SM_SIZEOF_OVERHEAD)
 		cap = SM_SIZEOF_OVERHEAD;
-	sm_t *m = sm_create(cap);
+	m = sm_create(cap);
 	if (m == NULL)
 		return (NULL);
 	if (n > 0) {
+		size_t claimed_count;
+		size_t walked_count;
 		memcpy(sm_get_data(m), data, n);
+		/* Small-set body: fixed size, no chunk walk. */
+		if (n >= SM_SIZEOF_OVERHEAD && __sm_is_small(m)) {
+			const size_t nwords = __sm_small_nwords(m);
+			m->m_data_used =
+			    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
+			if (m->m_data_used > n || !sm_validate(m)) {
+				sm_free(m);
+				return (NULL);
+			}
+			__sm_set_kind(m, SM_OWNED_CONTIGUOUS);
+			return (m);
+		}
 		/* sm_open re-derives m_data_used from the chunk count + walk;
 		 * temporarily set m_data_used = capacity so the empty-map guard
 		 * in __sm_get_chunk_count doesn't short-circuit during the walk. */
 		m->m_data_used = __sm_cap(m);
-		const size_t claimed_count = __sm_get_chunk_count(m);
+		claimed_count = __sm_get_chunk_count(m);
 		m->m_data_used = __sm_get_size_impl(m);
-		const size_t walked_count = __sm_get_chunk_count(m);
+		walked_count = __sm_get_chunk_count(m);
 		/* Untrusted bytes: reject anything not structurally valid
 		 * rather than returning a half-parsed map. */
 		if (claimed_count != walked_count || !sm_validate(m)) {
@@ -3796,6 +4046,8 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 sm_t *
 sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 {
+	size_t asize;
+	size_t cur_cap;
 	if (map == NULL) {
 		return (NULL);
 	}
@@ -3813,10 +4065,14 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	 * 8-byte boundary so the allocated buffer and the stored (low-bit-
 	 * tagged) capacity agree exactly; __sm_set_cap_kind rounds down,
 	 * so an already-aligned size round-trips unchanged. */
-	const size_t asize = (size + 7u) & ~(size_t)7;
-	const size_t cur_cap = __sm_cap(map);
+	asize = (size + 7u) & ~(size_t)7;
+	cur_cap = __sm_cap(map);
 	switch (__sm_kind(map)) {
 	case SM_OWNED_CONTIGUOUS: {
+		size_t total_size;
+		size_t padding;
+		const size_t old_capacity = cur_cap;
+		sm_t *m;
 		if (size == cur_cap) {
 			return (map);
 		}
@@ -3825,13 +4081,12 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 		 * new data buffer + alignment padding so m_data lands on an 8-byte
 		 * boundary.
 		 */
-		size_t total_size = sizeof(sm_t) + size;
-		const size_t padding =
+		total_size = sizeof(sm_t) + size;
+		padding =
 		    total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 		total_size += padding;
 
-		const size_t old_capacity = cur_cap;
-		sm_t *m = (sm_t *)__sm_realloc(map, total_size);
+		m = (sm_t *)__sm_realloc(map, total_size);
 		if (!m) {
 			/* Original block still valid; leave map untouched. */
 			return (NULL);
@@ -3856,11 +4111,11 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	}
 
 	case SM_OWNED_SPLIT: {
+		uint8_t *new_data;
 		if (size == cur_cap) {
 			return (map);
 		}
-		uint8_t *new_data =
-		    (uint8_t *)__sm_realloc(map->m_data, size);
+		new_data = (uint8_t *)__sm_realloc(map->m_data, size);
 		if (!new_data) {
 			return (NULL);
 		}
@@ -3876,6 +4131,8 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	}
 
 	case SM_WRAPPED: {
+		uint8_t *new_data;
+		size_t copy_bytes;
 		/*
 		 * Caller owns m_data.  Two cases:
 		 *
@@ -3904,11 +4161,11 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 			return (map);
 		}
 
-		uint8_t *new_data = (uint8_t *)__sm_alloc_zero(asize);
+		new_data = (uint8_t *)__sm_alloc_zero(asize);
 		if (!new_data) {
 			return (NULL);
 		}
-		const size_t copy_bytes = map->m_data_used <= cur_cap ?
+		copy_bytes = map->m_data_used <= cur_cap ?
 		    map->m_data_used :
 		    cur_cap;
 		if (copy_bytes > 0 && map->m_data != NULL) {
@@ -3926,6 +4183,424 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	return (NULL);
 }
 
+/* -------------------------------------------------------------------
+ * Small-set <-> chunk transitions
+ * ------------------------------------------------------------------- */
+
+static __sm_idx_t __sm_map_set(sm_t *map, uint64_t idx, bool coalesce,
+    sm_cursor_t *cur);
+static void __sm_expand_sparse_chunk(const __sm_chunk_t *chunk,
+    __sm_bitvec_t words[32], int cap_flags[32]);
+
+/*
+ * True when the bits of a small-mode map form one contiguous run from
+ * bit 0, i.e. the set is exactly {0, 1, ..., maxbit}.  Such a run is the
+ * one case the RLE build can encode as a single descriptor-only RLE
+ * chunk (start 0, length maxbit+1) -- see __sm_small_chunk_bytes and
+ * __sm_promote.  A run that does not start at bit 0 (or has any gap)
+ * cannot be an RLE chunk and must use the sparse form.
+ */
+static bool
+__sm_small_is_run_from_zero(const sm_t *map, uint64_t *run_len_out)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	uint64_t len = 0;
+	bool ended = false;
+	size_t i;
+	for (i = 0; i < n; i++) {
+		const uint64_t lo = w[i];
+		if (ended) {
+			if (lo != 0) {
+				return (false); /* bits after the run: a gap */
+			}
+			continue;
+		}
+		if (lo == ~(uint64_t)0) {
+			len += 64;
+			continue;
+		}
+		if (lo == 0) {
+			ended = true; /* run ends on a whole-word boundary */
+			continue;
+		}
+		/* Partial word: must be a low-contiguous mask (1<<r)-1. */
+		if ((lo & (lo + 1)) != 0) {
+			return (false); /* not a low-contiguous prefix */
+		}
+		len += (uint64_t)SM_POPCOUNT64(lo);
+		ended = true;
+	}
+	if (run_len_out != NULL) {
+		*run_len_out = len;
+	}
+	return (len > 0);
+}
+
+/*
+ * Byte footprint the single low chunk would occupy for the bits
+ * currently held in a small-mode map.  The RLE build has THREE candidate
+ * chunk-mode encodings for a set whose max index is below one chunk's
+ * 2048-bit window; this returns the cheapest:
+ *
+ *   sparse chunk  = 8 (count) + 8 (start) + 8 (descriptor)
+ *                 + 8 per 64-bit word that is neither all-zero (a ZEROS
+ *                   slot, not stored) nor all-one (a ONES slot, not
+ *                   stored) -- i.e. one payload word per MIXED word;
+ *   RLE chunk     = 8 (count) + 8 (start) + 8 (descriptor) = 24, with no
+ *                   payload, but ONLY when the bits form a single run
+ *                   from bit 0 (an RLE chunk encodes [start, start+len)).
+ *
+ * A dense-but-not-word-aligned run such as {0..1000} is 32 bytes sparse
+ * (word 15 is MIXED, so its payload word is stored) but 24 bytes as an
+ * RLE chunk; the RLE-aware minimum makes __sm_promote pick the 24-byte
+ * form.  A word-aligned all-ones run such as {0..1023} is already 24
+ * bytes sparse (every word is a ONES slot), so RLE ties and either form
+ * is chosen.  A sparse scatter such as {0,5,70} has no run to compress,
+ * so only the sparse cost applies and the flat small form usually wins.
+ */
+static size_t
+__sm_small_chunk_bytes(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	size_t mixed = 0;
+	uint64_t run_len = 0;
+	const size_t sparse_base = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+	    sizeof(__sm_bitvec_t);
+	size_t sparse;
+	size_t i;
+	for (i = 0; i < n; i++) {
+		if (w[i] != 0 && w[i] != ~(uint64_t)0) {
+			mixed++;
+		}
+	}
+	sparse = sparse_base + mixed * sizeof(__sm_bitvec_t);
+	if (__sm_small_is_run_from_zero(map, &run_len) &&
+	    run_len <= (uint64_t)SM_CHUNK_RLE_MAX_LENGTH) {
+		const size_t rle = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t);
+		return (rle < sparse ? rle : sparse);
+	}
+	return (sparse);
+}
+
+/* Byte footprint of a small map's own stored form. */
+static size_t
+__sm_small_bytes(const sm_t *map)
+{
+	return (SM_SIZEOF_OVERHEAD + __sm_small_nwords(map) * sizeof(uint64_t));
+}
+
+/*
+ * Should a set whose maximum index is `maxbit` and whose single low
+ * chunk would occupy `chunk_bytes` be stored in small-set mode?  Yes
+ * when the index span fits the small cap AND the small form is no
+ * larger than the chunk form.  (chunk_bytes == 0 means "not computed";
+ * fall back to the span test alone, used when there are no bits yet.)
+ */
+static inline bool
+__sm_small_is_better(uint64_t maxbit, size_t small_bytes, size_t chunk_bytes)
+{
+	if (maxbit >= SM_SMALL_MAX_BITS) {
+		return (false);
+	}
+	return (chunk_bytes == 0 || small_bytes <= chunk_bytes);
+}
+
+/*
+ * Emit the single contiguous run {0..run_len-1} of a small-mode map as
+ * one descriptor-only RLE chunk (start 0), replacing the small body in
+ * place within the existing capacity.  Returns true on success; false
+ * (leaving the map unchanged) if the caller must fall back to the
+ * bit-by-bit sparse promote.  Caller guarantees the bits are a run from
+ * bit 0 and run_len <= SM_CHUNK_RLE_MAX_LENGTH.
+ */
+static bool
+__sm_promote_run_as_rle(sm_t *map, uint64_t run_len)
+{
+	/* 8 (count) + 8 (start) + 8 (RLE descriptor). */
+	const size_t need = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+	    sizeof(__sm_bitvec_t);
+	const size_t capacity = SM_CHUNK_MAX_CAPACITY;
+	__sm_chunk_t chunk;
+	if (need > __sm_cap(map)) {
+		return (false);
+	}
+	/* Capacity is the enclosing 2048-bit chunk window; run_len <=
+	 * SM_SMALL_MAX_BITS (1024) < SM_CHUNK_MAX_CAPACITY (2048). */
+	__sm_set_chunk_count(map, 1);
+	__sm_store_idx(&map->m_data[SM_SIZEOF_OVERHEAD], 0); /* start = 0 */
+	__sm_chunk_init(&chunk,
+	    &map->m_data[SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD]);
+	chunk.m_data[0] = 0;
+	__sm_chunk_set_rle(&chunk);
+	__sm_chunk_rle_set_capacity(&chunk, capacity);
+	__sm_chunk_rle_set_length(&chunk, (size_t)run_len);
+	map->m_data_used = need;
+	return (true);
+}
+
+/*
+ * Convert a small-mode map to chunk mode in place, within the existing
+ * buffer capacity.  Returns true on success; false (ENOSPC) if the
+ * chunk form would not fit -- the caller (sm_add) then reports ENOSPC
+ * and the sm_add_grow wrapper grows and retries.  The map is left
+ * unchanged on failure.
+ *
+ * When the bits form a single run from bit 0 and the RLE form is the
+ * cheapest chunk encoding, emit one descriptor-only RLE chunk directly
+ * (matching the RLE-aware cost in __sm_small_chunk_bytes); otherwise
+ * re-add every set bit into an empty chunk-mode map.
+ */
+static bool
+__sm_promote(sm_t *map)
+{
+	/* Snapshot the bits; the buffer is reused for the chunk form. */
+	const size_t n = __sm_small_nwords(map);
+	uint64_t words[SM_SMALL_MAX_WORDS];
+	uint64_t run_len = 0;
+	size_t pi;
+
+	__sm_assert(__sm_is_small(map));
+	__sm_assert(n <= SM_SMALL_MAX_WORDS);
+	memcpy(words, __sm_small_words(map), n * sizeof(uint64_t));
+
+	/* RLE-cheapest single run from bit 0: emit one RLE chunk directly,
+	 * matching the RLE-aware minimum in __sm_small_chunk_bytes.  Only
+	 * when the RLE form is no larger than the sparse form (a
+	 * word-aligned all-ones run is 24 bytes either way; a partial-tail
+	 * run is 24 RLE vs 32+ sparse). */
+	if (__sm_small_is_run_from_zero(map, &run_len) &&
+	    run_len <= (uint64_t)SM_CHUNK_RLE_MAX_LENGTH) {
+		/* Sparse cost of this run: one payload word only if the run
+		 * ends mid-word (a MIXED tail); all whole words are ONES. */
+		const size_t sparse = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t) +
+		    ((run_len % 64) != 0 ? sizeof(__sm_bitvec_t) : 0);
+		const size_t rle = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t);
+		if (rle < sparse) {
+			if (__sm_promote_run_as_rle(map, run_len)) {
+				return (true);
+			}
+			/* Restore small header before the fallback path
+			 * rebuilds from `words`. */
+			__sm_small_set_header(map, n);
+			map->m_data_used =
+			    SM_SIZEOF_OVERHEAD + n * sizeof(uint64_t);
+		}
+	}
+
+	/* Reset to an empty chunk-mode map and re-add every set bit.  Each
+	 * add stays within [0, SM_SMALL_MAX_BITS) == one chunk, so the peak
+	 * footprint is one chunk; if that exceeds capacity, add returns
+	 * ENOSPC and we restore the small header. */
+	map->m_data_used = SM_SIZEOF_OVERHEAD;
+	__sm_set_chunk_count(map, 0);
+	for (pi = 0; pi < n; pi++) {
+		uint64_t bits = words[pi];
+		while (bits != 0) {
+			const int b = SM_CTZ64(bits);
+			const uint64_t idx = (uint64_t)pi * 64 + (uint64_t)b;
+			bits &= bits - 1;
+			if (__sm_map_set(map, idx, true, NULL) == SM_IDX_MAX) {
+				/* Out of space: restore the small form. */
+				map->m_data_used =
+				    SM_SIZEOF_OVERHEAD + n * sizeof(uint64_t);
+				__sm_small_set_header(map, n);
+				memcpy(__sm_small_words(map), words,
+				    n * sizeof(uint64_t));
+				return (false);
+			}
+		}
+	}
+	return (true);
+}
+
+/*
+ * If a chunk-mode map now holds only indices below SM_SMALL_MAX_BITS and
+ * the small form would be no larger, convert it to small mode in place.
+ * Always fits (small form is smaller than the chunk form it replaces).
+ * A no-op for maps that should stay in chunk mode.
+ */
+static void
+__sm_try_demote(sm_t *map)
+{
+	size_t count;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
+	__sm_bitvec_t w32[SM_FLAGS_PER_INDEX];
+	int cap[SM_FLAGS_PER_INDEX];
+	size_t hi_word = 0;
+	bool any = false;
+	int iw;
+	uint64_t maxbit;
+	size_t nwords;
+	size_t small_bytes;
+	uint64_t out[SM_SMALL_MAX_WORDS];
+	size_t iw2;
+
+	if (map == NULL || __sm_is_small(map) || map->m_data == NULL) {
+		return;
+	}
+	if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
+		return;
+	}
+	count = __sm_get_chunk_count(map);
+	if (count == 0) {
+		/* Empty: leave as an empty chunk-mode map (size == overhead,
+		 * same as small with zero words). */
+		return;
+	}
+	if (count > 1) {
+		return; /* spans >1 chunk => max index >= 2048 > threshold */
+	}
+	/* Single chunk: it must start at 0 for the small form (from bit 0)
+	 * to represent it, and every index must be < SM_SMALL_MAX_BITS. */
+	p = __sm_get_chunk_data(map, 0);
+	start = __sm_load_idx((const uint8_t *)p);
+	if (start != 0) {
+		return;
+	}
+	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+	/* An RLE chunk cannot be word-expanded by __sm_expand_sparse_chunk;
+	 * decode it as the run {0..length-1} it encodes.  A demote target
+	 * only exists when the whole set is below the small cap, so an RLE
+	 * chunk here holds a run shorter than one chunk. */
+	if (__sm_chunk_is_rle(&chunk)) {
+		const size_t length = __sm_chunk_rle_get_length(&chunk);
+		size_t bit;
+		if (length == 0 || length > SM_SMALL_MAX_BITS) {
+			return;
+		}
+		maxbit = (uint64_t)length - 1;
+		nwords = (size_t)(maxbit / 64) + 1;
+		small_bytes = SM_SIZEOF_OVERHEAD +
+		    nwords * sizeof(uint64_t);
+		if (small_bytes > map->m_data_used) {
+			return; /* chunk (RLE) form is smaller; keep it */
+		}
+		memset(out, 0, sizeof(out));
+		for (bit = 0; bit < length; bit++) {
+			out[bit / 64] |= (uint64_t)1 << (bit % 64);
+		}
+		__sm_small_set_header(map, nwords);
+		memcpy(__sm_small_words(map), out,
+		    nwords * sizeof(uint64_t));
+		map->m_data_used = small_bytes;
+		return;
+	}
+	__sm_expand_sparse_chunk(&chunk, w32, cap);
+	/* Highest set bit within the chunk. */
+	for (iw = 0; iw < (int)SM_FLAGS_PER_INDEX; iw++) {
+		if (cap[iw] && w32[iw] != 0) {
+			hi_word = (size_t)iw;
+			any = true;
+		}
+	}
+	if (!any) {
+		/* Chunk with no set bits: collapse to empty chunk-mode. */
+		map->m_data_used = SM_SIZEOF_OVERHEAD;
+		__sm_set_chunk_count(map, 0);
+		return;
+	}
+	maxbit = (uint64_t)hi_word * 64 +
+	    (63 - (uint64_t)SM_CLZ64(w32[hi_word]));
+	if (maxbit >= SM_SMALL_MAX_BITS) {
+		return;
+	}
+	nwords = (size_t)(maxbit / 64) + 1;
+	small_bytes = SM_SIZEOF_OVERHEAD +
+	    nwords * sizeof(uint64_t);
+	if (small_bytes > map->m_data_used) {
+		return; /* chunk form is already smaller; keep it */
+	}
+	/* Build the small form from the expanded words.  small_bytes <=
+	 * m_data_used <= capacity, so it always fits. */
+	memset(out, 0, sizeof(out));
+	for (iw2 = 0; iw2 < nwords; iw2++) {
+		out[iw2] = w32[iw2];
+	}
+	__sm_small_set_header(map, nwords);
+	memcpy(__sm_small_words(map), out, nwords * sizeof(uint64_t));
+	map->m_data_used = small_bytes;
+}
+
+/*
+ * Materialize a small-mode map into a fresh chunk-mode map so the
+ * chunk-walking read/algebra paths get a uniform view without mutating
+ * the const input.  Returns NULL on allocation failure.
+ */
+static sm_t *
+__sm_materialize(const sm_t *small)
+{
+	const uint64_t *w = __sm_small_words(small);
+	const size_t n = __sm_small_nwords(small);
+	sm_t *m = sm_create(256);
+	size_t i;
+	if (m == NULL) {
+		return (NULL);
+	}
+	for (i = 0; i < n; i++) {
+		uint64_t bits = w[i];
+		while (bits != 0) {
+			const int b = SM_CTZ64(bits);
+			const uint64_t idx = (uint64_t)i * 64 + (uint64_t)b;
+			bits &= bits - 1;
+			if (sm_add_grow(&m, idx) == SM_IDX_MAX) {
+				sm_free(m);
+				return (NULL);
+			}
+		}
+	}
+	/* sm_add keeps a near-zero set in small mode; force chunk mode so
+	 * the caller (the chunk-walking read/algebra paths) gets a real
+	 * chunk stream and __sm_chunk_view does not recurse forever. */
+	if (__sm_is_small(m) && !__sm_small_is_empty(m)) {
+		if (!__sm_promote(m)) {
+			/* Promote needs the chunk form to fit; grow and retry. */
+			sm_t *g = sm_set_data_size(m, NULL,
+			    sm_get_capacity(m) * 2 + 4096);
+			if (g == NULL) {
+				sm_free(m);
+				return (NULL);
+			}
+			m = g;
+			if (!__sm_promote(m)) {
+				sm_free(m);
+				return (NULL);
+			}
+		}
+	}
+	return (m);
+}
+
+/*
+ * Return a chunk-mode view of `map` for the raw-chunk-walking read and
+ * set-algebra paths.  If the map is already chunk mode (or NULL) it is
+ * returned as-is and *owned is false.  If it is small, a materialized
+ * chunk-mode copy is returned and *owned is set true; the caller must
+ * sm_free() it.  On materialization failure returns NULL with *owned
+ * false (callers treat NULL as an empty operand / allocation failure).
+ */
+static const sm_t *
+__sm_chunk_view(const sm_t *map, bool *owned)
+{
+	sm_t *m;
+	*owned = false;
+	if (map == NULL || !__sm_is_small(map)) {
+		return (map);
+	}
+	m = __sm_materialize(map);
+	if (m == NULL) {
+		return (NULL);
+	}
+	*owned = true;
+	return (m);
+}
+
 /**
  * @brief Calculates the remaining capacity of the sparsemap.
  *
@@ -3940,9 +4615,10 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 double
 sm_capacity_remaining(const sm_t *map)
 {
+	size_t cap;
 	if (map == NULL)
 		return (0.0);
-	const size_t cap = __sm_cap(map);
+	cap = __sm_cap(map);
 	if (map->m_data_used >= cap) {
 		return (0);
 	}
@@ -3987,6 +4663,10 @@ sm_get_capacity(const sm_t *map)
 SM_HOT bool
 sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 {
+	ssize_t offset;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
 	/* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
 	 * cheap insurance for consumers that pass the result of
 	 * sm_intersection / sm_difference / sm_xor unchecked, which
@@ -3994,10 +4674,13 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	if (map == NULL) {
 		return (false);
 	}
+	if (__sm_is_small(map)) {
+		return (__sm_small_contains(map, idx));
+	}
 	__sm_assert(sm_get_size((sm_t *)map) >= SM_SIZEOF_OVERHEAD);
 
 	/* Get the __sm_chunk_t which manages this index */
-	const ssize_t offset = __sm_get_chunk_offset(map, idx, cur);
+	offset = __sm_get_chunk_offset(map, idx, cur);
 
 	/* No __sm_chunk_t's available -> the bit is not set */
 	if (offset == -1) {
@@ -4005,9 +4688,8 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	}
 
 	/* Otherwise load the __sm_chunk_t */
-	uint8_t *p = __sm_get_chunk_data(map, offset);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-	__sm_chunk_t chunk;
+	p = __sm_get_chunk_data(map, (size_t)offset);
+	start = __sm_load_idx((const uint8_t *)p);
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
 	/*
@@ -4050,6 +4732,16 @@ static __sm_idx_t
 __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 {
 	const uint64_t ret_idx = idx;
+	size_t offset;
+	size_t chunk_offset;
+	uint8_t *p = NULL;
+	__sm_idx_t start = 0;
+	__sm_chunk_t chunk;
+	size_t capacity;
+	size_t pos = 0;
+	__sm_bitvec_t vec = ~(__sm_bitvec_t)0;
+
+	__sm_chunk_init(&chunk, NULL);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
 	/* Clearing a bit could require an additional vector, let's ensure we have that
@@ -4057,8 +4749,8 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 	SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
 	/* Determine if there is a chunk that could contain this index. */
-	size_t offset = __sm_get_chunk_offset(map, idx, NULL);
-	size_t chunk_offset = offset;
+	offset = (size_t)__sm_get_chunk_offset(map, idx, NULL);
+	chunk_offset = offset;
 
 	if ((ssize_t)offset == -1) {
 		/* There are no chunks in the map, there is nothing to clear, this is a
@@ -4074,8 +4766,8 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 	 * - the index is beyond the end of the last chunk, or
 	 * - we found a chunk that can contain this index.
 	 */
-	uint8_t *p = __sm_get_chunk_data(map, offset);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+	p = __sm_get_chunk_data(map, offset);
+	start = __sm_load_idx((const uint8_t *)p);
 	__sm_assert(start == __sm_get_chunk_aligned_offset(start));
 
 	if (idx < start) {
@@ -4087,9 +4779,8 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		goto done;
 	}
 
-	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	const size_t capacity = __sm_chunk_get_capacity(&chunk);
+	capacity = __sm_chunk_get_capacity(&chunk);
 
 	if (idx - start >= capacity) {
 		/*
@@ -4113,12 +4804,32 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 
 		/* Is the 0-based index beyond the run length? */
 		const size_t length = __sm_chunk_rle_get_length(&chunk);
+		__sm_chunk_sep_t sep;
 		if (idx >= start + length) {
 			goto done;
 		}
 
 		/* Is the 0-based index referencing the last bit in the run? */
 		if (idx - start + 1 == length) {
+			/* Removing the sole bit of a length-1 run empties the
+			 * chunk.  Setting the RLE length to 0 would leave a
+			 * length-0 RLE descriptor behind, which every RLE reader
+			 * (rank/select/scan) decodes as a FULL-CAPACITY run
+			 * (2048 bits) -- so sm_remove of the last bit would report
+			 * a cardinality of 2048 instead of 0.  Length-1 runs are
+			 * produced legitimately (a shrinking run passes through
+			 * length 1) as well as by crafted wire input, so remove
+			 * the chunk outright, matching the sparse SM_NEEDS_TO_SHRINK
+			 * arm below.  An RLE chunk is exactly overhead + one
+			 * descriptor word. */
+			if (length == 1) {
+				__sm_remove_data(map, offset,
+				    SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+				__sm_set_chunk_count(map,
+				    __sm_get_chunk_count(map) - 1);
+				offset = SM_UNSET_NO_COALESCE; /* chunk gone */
+				goto done;
+			}
 			/* Should the run-length chunk transition into a sparse chunk? */
 			if (length - 1 == SM_CHUNK_MAX_CAPACITY) {
 				chunk.m_data[0] = ~(__sm_bitvec_t)0;
@@ -4134,12 +4845,13 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		 * starting offset, so let's first find what we'll call the "pivot" chunk
 		 * wherein we'll find the index we need to clear. That chunk will be sparse.
 		 */
-		__sm_chunk_sep_t sep = { .target = { .p = p,
-			                     .offset = offset,
-			                     .chunk = &chunk,
-			                     .start = start,
-			                     .length = length,
-			                     .capacity = capacity } };
+		memset(&sep, 0, sizeof(sep));
+		sep.target.p = p;
+		sep.target.offset = offset;
+		sep.target.chunk = &chunk;
+		sep.target.start = start;
+		sep.target.length = length;
+		sep.target.capacity = capacity;
 		if (__sm_separate_rle_chunk(map, &sep, idx, 0) != 0) {
 			/* Out of space (or invalid): the map was left
 			 * unmodified.  Propagate ENOSPC so sm_add_grow /
@@ -4151,8 +4863,6 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		goto done;
 	}
 
-	size_t pos = 0;
-	__sm_bitvec_t vec = ~(__sm_bitvec_t)0;
 	switch (__sm_chunk_clr_bit(&chunk, idx - start, &pos)) {
 	case SM_OK:
 		break;
@@ -4210,7 +4920,31 @@ sm_remove(sm_t *map, const uint64_t idx)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
-	return (__sm_map_unset(map, idx, true));
+	if (__sm_is_small(map)) {
+		const size_t w = (size_t)(idx / 64);
+		if (w < __sm_small_nwords(map)) {
+			size_t n;
+			uint64_t *words;
+			__sm_small_words(map)[w] &=
+			    ~((uint64_t)1 << (idx % 64));
+			/* Shrink the trailing all-zero words so the footprint
+			 * tracks the new maximum index. */
+			n = __sm_small_nwords(map);
+			words = __sm_small_words(map);
+			while (n > 0 && words[n - 1] == 0) {
+				n--;
+			}
+			__sm_small_set_header(map, n);
+			map->m_data_used = SM_SIZEOF_OVERHEAD +
+			    n * sizeof(uint64_t);
+		}
+		return (idx);
+	}
+	{
+		const uint64_t rc = __sm_map_unset(map, idx, true);
+		__sm_try_demote(map);
+		return (rc);
+	}
 }
 
 /**
@@ -4304,6 +5038,9 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	uint64_t ret_idx = idx;
 	__sm_idx_t start;
 	uint8_t *p;
+	size_t offset;
+	size_t left_hint;
+	size_t capacity;
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
 	/*
@@ -4313,7 +5050,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
 	/* Determine if there is a chunk that could contain this index. */
-	size_t offset = __sm_get_chunk_offset(map, idx, cur);
+	offset = (size_t)__sm_get_chunk_offset(map, idx, cur);
 
 	/* Free left-neighbor hint for the coalescing path: the forward walk
 	 * above already passed over the chunk immediately before the located
@@ -4322,7 +5059,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	 * separates, or shifts chunk layout at/before `offset` resets it to
 	 * SIZE_MAX so a stale hint is never produced.  A SIZE_MAX hint just
 	 * makes __sm_coalesce_chunk fall back to a head-walk. */
-	size_t left_hint = (cur != NULL) ? cur->prev_offset : SIZE_MAX;
+	left_hint = (cur != NULL) ? cur->prev_offset : SIZE_MAX;
 
 	if ((ssize_t)offset == -1) {
 		/*
@@ -4331,6 +5068,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 */
 		const uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
+		const __sm_bitvec_unaligned_t *v;
 		/* Capacity was established by the SM_ENOUGH_SPACE() above; a
 		 * failure here would mean that check and this size disagree,
 		 * so propagate ENOSPC rather than corrupt the buffer. */
@@ -4342,8 +5080,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		    __sm_get_chunk_aligned_offset(idx));
 		__sm_set_chunk_count(map, 1);
 
-		const __sm_bitvec_unaligned_t *v =
-		    (__sm_bitvec_unaligned_t *)((uintptr_t)p +
+		v = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		        SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 		ret_idx = __sparsemap_add(map, idx, p, 0, v);
 
@@ -4373,6 +5110,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 */
 		const uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
+		const __sm_bitvec_unaligned_t *v;
 		SM_ENOUGH_SPACE(sizeof(buf));
 		__sm_insert_data(map, offset, &buf[0], sizeof(buf));
 		__sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
@@ -4382,8 +5120,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		    __sm_get_chunk_aligned_offset(idx));
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
-		const __sm_bitvec_unaligned_t *v =
-		    (__sm_bitvec_unaligned_t *)((uintptr_t)p +
+		v = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		        SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 		ret_idx = __sparsemap_add(map, idx, p, offset, v);
 		left_hint = SIZE_MAX; /* inserted a chunk before this one */
@@ -4391,7 +5128,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	}
 
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	size_t capacity = __sm_chunk_get_capacity(&chunk);
+	capacity = __sm_chunk_get_capacity(&chunk);
 
 	if (!__sm_chunk_is_rle(&chunk) &&
 	    capacity < SM_CHUNK_MAX_CAPACITY &&
@@ -4432,8 +5169,8 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 * in this run.
 		 */
 
-		__sm_chunk_set_rle(&chunk);
 		const size_t rle_length = SM_CHUNK_MAX_CAPACITY + 1;
+		__sm_chunk_set_rle(&chunk);
 		__sm_chunk_rle_set_capacity(&chunk,
 		    __sm_chunk_rle_capacity_limit(map, start, rle_length,
 		        offset));
@@ -4479,12 +5216,14 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 * "insert new chunk" path below.
 		 */
 		if (idx >= start && idx - start < capacity) {
-			__sm_chunk_sep_t sep = { .target = { .p = p,
-				                     .offset = offset,
-				                     .chunk = &chunk,
-				                     .start = start,
-				                     .length = length,
-				                     .capacity = capacity } };
+			__sm_chunk_sep_t sep;
+			memset(&sep, 0, sizeof(sep));
+			sep.target.p = p;
+			sep.target.offset = offset;
+			sep.target.chunk = &chunk;
+			sep.target.start = start;
+			sep.target.length = length;
+			sep.target.capacity = capacity;
 			if (__sm_separate_rle_chunk(map, &sep, idx, 1) != 0) {
 				/* Out of space (or invalid): the map was left
 				 * unmodified.  Propagate ENOSPC so sm_add_grow
@@ -4505,6 +5244,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		const uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
 		const size_t size = __sm_chunk_get_size(&chunk);
+		const __sm_bitvec_unaligned_t *v;
 		SM_ENOUGH_SPACE(sizeof(buf));
 		offset += SM_SIZEOF_OVERHEAD + size;
 		p += SM_SIZEOF_OVERHEAD + size;
@@ -4515,8 +5255,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		__sm_assert(start == __sm_get_chunk_aligned_offset(start));
 		__sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
 
-		const __sm_bitvec_unaligned_t *v =
-		    (__sm_bitvec_unaligned_t *)((uintptr_t)p +
+		v = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		        SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 		ret_idx = __sparsemap_add(map, idx, p, offset, v);
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -4555,6 +5294,113 @@ done:;
 	return (ret_idx);
 }
 
+/*
+ * Small-mode bit set.  Grows the word array within the existing buffer
+ * capacity; returns SM_IDX_MAX (errno=ENOSPC) if the buffer is too
+ * small, so sm_add_grow can grow and retry.  The map stays in small
+ * mode.  Caller guarantees idx < SM_SMALL_MAX_BITS.
+ */
+static uint64_t
+__sm_small_add(sm_t *map, uint64_t idx)
+{
+	const size_t w = (size_t)(idx / 64);
+	size_t n = __sm_small_nwords(map);
+	if (w >= n) {
+		const size_t need = SM_SIZEOF_OVERHEAD +
+		    (w + 1) * sizeof(uint64_t);
+		uint64_t *words;
+		size_t i;
+		if (need > __sm_cap(map)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
+		/* Zero the newly-exposed words. */
+		words = __sm_small_words(map);
+		for (i = n; i <= w; i++) {
+			words[i] = 0;
+		}
+		n = w + 1;
+		__sm_small_set_header(map, n);
+		map->m_data_used = need;
+	}
+	__sm_small_words(map)[w] |= (uint64_t)1 << (idx % 64);
+	return (idx);
+}
+
+/*
+ * Unified add path handling both small and chunk mode.
+ *
+ *  - A small-mode map (or an empty chunk-mode map) whose new max index
+ *    stays below SM_SMALL_MAX_BITS stays/goes small.  If, after the add,
+ *    the equivalent single chunk would be strictly smaller, promote --
+ *    that always fits, since the chunk form is the smaller one.
+ *  - Otherwise (index out of small range, or already a multi-chunk map)
+ *    promote any small map to chunk form and use the chunk setter, then
+ *    try to demote the result back to small.
+ *
+ * The cursor accelerates the chunk-mode ascending path only; on any
+ * mode transition it is reset (layout changed) so a stale seat is never
+ * used.
+ */
+static uint64_t
+__sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
+{
+	const bool small = __sm_is_small(map);
+	const bool empty_chunk = !small &&
+	    (map->m_data_used < SM_SIZEOF_OVERHEAD ||
+	        __sm_get_chunk_count(map) == 0);
+
+	if ((small || empty_chunk) && idx < SM_SMALL_MAX_BITS) {
+		uint64_t rc;
+		uint64_t maxbit;
+		if (empty_chunk) {
+			/* Turn the empty chunk-mode buffer into an empty
+			 * small-mode map (zero words). */
+			if (SM_SIZEOF_OVERHEAD > __sm_cap(map)) {
+				errno = ENOSPC;
+				return (SM_IDX_MAX);
+			}
+			__sm_small_set_header(map, 0);
+			map->m_data_used = SM_SIZEOF_OVERHEAD;
+		}
+		rc = __sm_small_add(map, idx);
+		if (rc == SM_IDX_MAX) {
+			return (SM_IDX_MAX); /* ENOSPC: caller may grow */
+		}
+		if (cur != NULL) {
+			__sm_cursor_reset(cur);
+		}
+		/* Keep the smaller of the two forms.  Promote only when the
+		 * chunk form is strictly smaller (it then always fits). */
+		maxbit = __sm_small_maximum(map);
+		if (!__sm_small_is_better(maxbit, __sm_small_bytes(map),
+		        __sm_small_chunk_bytes(map))) {
+			(void)__sm_promote(map);
+		}
+		return (idx);
+	}
+
+	/* Chunk-mode path (promote first if the map is still small). */
+	if (small) {
+		if (!__sm_promote(map)) {
+			return (SM_IDX_MAX); /* ENOSPC: caller may grow */
+		}
+		if (cur != NULL) {
+			__sm_cursor_reset(cur);
+		}
+	}
+	{
+		const uint64_t rc = __sm_map_set(map, idx, true, cur);
+		if (rc != SM_IDX_MAX) {
+			__sm_try_demote(map);
+			if (cur != NULL && __sm_is_small(map)) {
+				__sm_cursor_reset(cur);
+			}
+		}
+		return (rc);
+	}
+}
+
 /**
  * @brief Sets the specified index in the sparsemap.
  *
@@ -4572,7 +5418,7 @@ sm_add(sm_t *map, const uint64_t idx)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
-	return (__sm_map_set(map, idx, true, NULL));
+	return (__sm_add_dispatch(map, idx, NULL));
 }
 
 /* Cursor-threading variant of sm_add for O(N) bulk construction.
@@ -4598,24 +5444,28 @@ __sm_add_c(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	 * making bulk insert O(N^2)).  __sm_get_chunk_offset self-validates
 	 * the seat, so an occasionally-stale cursor is safe.
 	 */
-	return (__sm_map_set(map, idx, true, cur));
+	return (__sm_add_dispatch(map, idx, cur));
 }
 
 uint64_t
 sm_add_grow(sm_t **mapp, uint64_t idx)
 {
+	sm_t *m;
+	uint64_t rc;
+	size_t new_cap;
+	sm_t *grown;
 	if (mapp == NULL || *mapp == NULL)
 		return (SM_IDX_MAX);
-	sm_t *m = *mapp;
-	uint64_t rc = sm_add(m, idx);
+	m = *mapp;
+	rc = sm_add(m, idx);
 	if (rc != SM_IDX_MAX)
 		return (rc);
 
 	/* ENOSPC: grow geometrically with a 4 KiB floor. */
-	size_t new_cap = sm_get_capacity(m) * 2;
+	new_cap = sm_get_capacity(m) * 2;
 	if (new_cap < 4096)
 		new_cap = 4096;
-	sm_t *grown = sm_set_data_size(m, NULL, new_cap);
+	grown = sm_set_data_size(m, NULL, new_cap);
 	if (grown == NULL)
 		return (SM_IDX_MAX);
 	*mapp = grown;
@@ -4625,24 +5475,28 @@ sm_add_grow(sm_t **mapp, uint64_t idx)
 uint64_t
 sm_add_grow_cursor(sm_t **mapp, uint64_t idx, sm_cursor_t *cur)
 {
+	sm_t *m;
+	uint64_t rc;
+	size_t new_cap;
+	sm_t *grown;
 	if (mapp == NULL || *mapp == NULL)
 		return (SM_IDX_MAX);
-	sm_t *m = *mapp;
-	uint64_t rc = __sm_add_c(m, idx, cur);
+	m = *mapp;
+	rc = __sm_add_c(m, idx, cur);
 	if (rc != SM_IDX_MAX)
 		return (rc);
 
 	/* ENOSPC: grow geometrically with a 4 KiB floor. */
-	size_t new_cap = sm_get_capacity(m) * 2;
+	new_cap = sm_get_capacity(m) * 2;
 	if (new_cap < 4096)
 		new_cap = 4096;
-	sm_t *grown = sm_set_data_size(m, NULL, new_cap);
+	grown = sm_set_data_size(m, NULL, new_cap);
 	if (grown == NULL)
 		return (SM_IDX_MAX);
 	*mapp = grown;
 	/* The grow relocated the buffer; the cursor's byte offset is stale. */
 	if (cur != NULL)
-		*cur = (sm_cursor_t)SM_CURSOR_INIT;
+		__sm_cursor_reset(cur);
 	return (__sm_add_c(grown, idx, cur));
 }
 
@@ -4687,26 +5541,33 @@ sm_assign(sm_t *map, const uint64_t idx, const bool value)
 uint64_t
 sm_minimum(const sm_t *map)
 {
+	uint64_t offset = 0;
+	size_t count;
+	uint8_t *p;
+	uint64_t relative_position;
+	__sm_chunk_t chunk;
+	size_t m;
 	if (map == NULL)
 		return (0);
+	if (__sm_is_small(map))
+		return (__sm_small_minimum(map));
 	__sm_check_invariants(map);
-	uint64_t offset = 0;
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (0);
 	}
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	uint64_t relative_position = __sm_load_idx((const uint8_t *)p);
+	p = __sm_get_chunk_data(map, 0);
+	relative_position = __sm_load_idx((const uint8_t *)p);
 	p += SM_SIZEOF_OVERHEAD;
-	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk, p);
 	if (__sm_chunk_is_rle(&chunk)) {
 		offset = relative_position;
 		goto done;
 	}
-	for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++) {
+	for (m = 0; m < sizeof(__sm_bitvec_t); m++) {
 		const uint8_t fb = __sm_desc_flag_byte(*chunk.m_data, m);
-		for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
+		int n;
+		for (n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(fb, n);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* A NONE slot carries no payload, but it still
@@ -4728,10 +5589,13 @@ sm_minimum(const sm_t *map)
 			} else if (flags == SM_PAYLOAD_MIXED) {
 				const __sm_bitvec_t w = chunk.m_data[1 +
 				    __sm_chunk_get_position(&chunk,
-				        (m * SM_FLAGS_PER_INDEX_BYTE) + n)];
-				for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
+				        (m * SM_FLAGS_PER_INDEX_BYTE) +
+				            (size_t)n)];
+				int k;
+				for (k = 0; k < SM_BITS_PER_VECTOR; k++) {
 					if (w & (__sm_bitvec_t)1 << k) {
-						offset = relative_position + k;
+						offset = relative_position +
+						    (uint64_t)k;
 						goto done;
 					}
 				}
@@ -4757,10 +5621,20 @@ done:;
 uint64_t
 sm_maximum(const sm_t *map)
 {
+	size_t count;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
+	uint64_t offset = 0;
+	uint64_t relative_position;
+	size_t i;
+	size_t m;
 	if (map == NULL)
 		return (0);
+	if (__sm_is_small(map))
+		return (__sm_small_maximum(map));
 	__sm_check_invariants(map);
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 
 	/* the ending offset of a map containing zero chunks is zero */
 	if (count == 0) {
@@ -4768,18 +5642,16 @@ sm_maximum(const sm_t *map)
 	}
 
 	/* the ending offset will be the last offset in the last chunk */
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	for (size_t i = 0; i < count - 1; i++) {
+	p = __sm_get_chunk_data(map, 0);
+	for (i = 0; i < count - 1; i++) {
 		p += SM_SIZEOF_OVERHEAD;
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p);
 		p += __sm_chunk_get_size(&chunk);
 	}
 
 	/* examine the last chunk in the map */
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+	start = __sm_load_idx((const uint8_t *)p);
 	p += SM_SIZEOF_OVERHEAD;
-	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk, p);
 
 	/* the ending offset of an RLE chunk is its starting offset + length */
@@ -4788,11 +5660,11 @@ sm_maximum(const sm_t *map)
 	}
 
 	/* the last chunk is not RLE, let's examine it further */
-	uint64_t offset = 0;
-	uint64_t relative_position = start;
-	for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++) {
+	relative_position = start;
+	for (m = 0; m < sizeof(__sm_bitvec_t); m++) {
 		const uint8_t fb = __sm_desc_flag_byte(*chunk.m_data, m);
-		for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
+		int n;
+		for (n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(fb, n);
 			switch (flags) {
 			case SM_PAYLOAD_ZEROS:
@@ -4806,14 +5678,16 @@ sm_maximum(const sm_t *map)
 			case SM_PAYLOAD_MIXED: {
 				const __sm_bitvec_t w = chunk.m_data[1 +
 				    __sm_chunk_get_position(&chunk,
-				        (m * SM_FLAGS_PER_INDEX_BYTE) + n)];
+				        (m * SM_FLAGS_PER_INDEX_BYTE) +
+				            (size_t)n)];
 				int idx = 0;
-				for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
+				int k;
+				for (k = 0; k < SM_BITS_PER_VECTOR; k++) {
 					if (w & (__sm_bitvec_t)1 << k) {
 						idx = k;
 					}
 				}
-				offset = relative_position + idx;
+				offset = relative_position + (uint64_t)idx;
 				relative_position += SM_BITS_PER_VECTOR;
 				break;
 			}
@@ -4845,17 +5719,21 @@ sm_maximum(const sm_t *map)
 double
 sm_fill_factor(sm_t *map)
 {
+	size_t rank;
+	uint64_t lo;
+	uint64_t hi;
+	uint64_t range;
 	if (map == NULL)
 		return (0.0);
 	__sm_check_invariants(map);
-	const size_t rank = sm_rank(map, 0, SM_IDX_MAX, true);
+	rank = sm_rank(map, 0, SM_IDX_MAX, true);
 	if (rank == 0) {
 		return (0.0);
 	}
-	const uint64_t lo = sm_minimum(map);
-	const uint64_t hi = sm_maximum(map);
+	lo = sm_minimum(map);
+	hi = sm_maximum(map);
 	/* range = hi - lo + 1 (the inclusive span containing all set bits). */
-	const uint64_t range = hi - lo + 1;
+	range = hi - lo + 1;
 	if (range == 0) {
 		return (0.0);
 	}
@@ -4893,6 +5771,10 @@ sm_get_size(sm_t *map)
 {
 	if (map == NULL)
 		return (0);
+	/* Small-set mode: the stored m_data_used is authoritative; the
+	 * chunk-walking size recompute must not run on a small body. */
+	if (__sm_is_small(map))
+		return (map->m_data_used);
 	if (map->m_data_used) {
 		const size_t size = __sm_get_size_impl(map);
 		if (size != map->m_data_used) {
@@ -4919,6 +5801,8 @@ sm_get_size(sm_t *map)
 size_t
 sm_cardinality(sm_t *map)
 {
+	if (map != NULL && __sm_is_small(map))
+		return ((size_t)__sm_small_cardinality(map));
 	return (sm_rank(map, 0, SM_IDX_MAX, true));
 }
 
@@ -4942,19 +5826,35 @@ void
 sm_scan(const sm_t *map, void (*scanner)(uint64_t[], size_t, void *aux),
     size_t skip, void *aux)
 {
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	const size_t count = __sm_get_chunk_count(map);
+	uint8_t *p;
+	size_t count;
+	size_t si;
 
-	for (size_t i = 0; i < count; i++) {
+	if (map == NULL)
+		return;
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return;
+		sm_scan(m, scanner, skip, aux);
+		sm_free(m);
+		return;
+	}
+	p = __sm_get_chunk_data(map, 0);
+	count = __sm_get_chunk_count(map);
+
+	for (si = 0; si < count; si++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		size_t skipped;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
-		if (i + 1 < count) {
+		chunk_size = __sm_chunk_get_size(&chunk);
+		if (si + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
-		const size_t skipped =
+		skipped =
 		    __sm_chunk_scan(&chunk, start, scanner, skip, aux);
 		if (skip) {
 			__sm_assert(skip >= skipped);
@@ -5005,14 +5905,15 @@ __sm_expand_sparse_chunk(const __sm_chunk_t *chunk, __sm_bitvec_t words[32],
 	/* Pass 1: prefix-sum of MIXED flag counts to break serial vec_idx dependency. */
 	int vec_offsets[SM_FLAGS_PER_INDEX];
 	int running = 0;
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	int i;
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		vec_offsets[i] = running;
 		running +=
 		    (((desc >> (i * 2)) & SM_FLAG_MASK) == SM_PAYLOAD_MIXED);
 	}
 
 	/* Pass 2: each slot computed independently using precomputed offsets. */
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		const unsigned f = (desc >> (i * 2)) & SM_FLAG_MASK;
 		cap_flags[i] = (f != SM_PAYLOAD_NONE);
 		words[i] = (f == SM_PAYLOAD_MIXED) ?
@@ -5039,6 +5940,13 @@ static bool
 __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
     __sm_bitvec_t *out_desc, __sm_bitvec_t out_vecs[32], int *out_nvecs)
 {
+	__sm_bitvec_t desc = 0;
+	bool has_bits = false;
+	unsigned flags[SM_FLAGS_PER_INDEX];
+	int i;
+	int nvecs = 0;
+	int mi;
+
 	/* Slot 31 (the highest) must never be NONE, because NONE in bits 63:62
      of the descriptor would be misidentified as the RLE flag.  Force it
      to ZEROS (adding 64 bits of harmless zero capacity) when needed. */
@@ -5048,10 +5956,7 @@ __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
 	}
 
 	/* Pass 1: compute flags for each slot (no inter-iteration dependency). */
-	__sm_bitvec_t desc = 0;
-	bool has_bits = false;
-	unsigned flags[SM_FLAGS_PER_INDEX];
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		unsigned f;
 		if (!cap_flags[i]) {
 			f = SM_PAYLOAD_NONE;
@@ -5069,10 +5974,9 @@ __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
 	}
 
 	/* Pass 2: compact MIXED vectors (serial but only touches MIXED slots). */
-	int nvecs = 0;
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
-		if (flags[i] == SM_PAYLOAD_MIXED) {
-			out_vecs[nvecs++] = words[i];
+	for (mi = 0; mi < (int)SM_FLAGS_PER_INDEX; mi++) {
+		if (flags[mi] == SM_PAYLOAD_MIXED) {
+			out_vecs[nvecs++] = words[mi];
 		}
 	}
 
@@ -5108,8 +6012,9 @@ __sm_expand_rle_as_words(const __sm_chunk_t *rle_chunk, __sm_idx_t rle_start,
 	const size_t rle_len = __sm_chunk_rle_get_length(rle_chunk);
 	const size_t rle_set_start = (size_t)rle_start;
 	const size_t rle_set_end = rle_set_start + rle_len;
+	int i;
 
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		const size_t slot_start =
 		    (size_t)target_start + (size_t)i * SM_BITS_PER_VECTOR;
 		const size_t slot_end = slot_start + SM_BITS_PER_VECTOR;
@@ -5159,7 +6064,8 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 4) {
+	int i;
+	for (i = 0; i < 32; i += 4) {
 		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
 		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
 		_mm256_storeu_si256((__m256i *)&dst[i],
@@ -5171,7 +6077,8 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 4) {
+	int i;
+	for (i = 0; i < 32; i += 4) {
 		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
 		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
 		_mm256_storeu_si256((__m256i *)&dst[i],
@@ -5184,7 +6091,8 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
 	/* dst = a & ~b */
-	for (int i = 0; i < 32; i += 4) {
+	int i;
+	for (i = 0; i < 32; i += 4) {
 		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
 		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
 		_mm256_storeu_si256((__m256i *)&dst[i],
@@ -5199,7 +6107,8 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 2) {
+	int i;
+	for (i = 0; i < 32; i += 2) {
 		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
 		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
 		_mm_storeu_si128((__m128i *)&dst[i], _mm_or_si128(va, vb));
@@ -5210,7 +6119,8 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 2) {
+	int i;
+	for (i = 0; i < 32; i += 2) {
 		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
 		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
 		_mm_storeu_si128((__m128i *)&dst[i], _mm_and_si128(va, vb));
@@ -5222,7 +6132,8 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
 	/* dst = a & ~b */
-	for (int i = 0; i < 32; i += 2) {
+	int i;
+	for (i = 0; i < 32; i += 2) {
 		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
 		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
 		_mm_storeu_si128((__m128i *)&dst[i], _mm_andnot_si128(vb, va));
@@ -5236,7 +6147,8 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i++)
+	int i;
+	for (i = 0; i < 32; i++)
 		dst[i] = a[i] | b[i];
 }
 
@@ -5244,7 +6156,8 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i++)
+	int i;
+	for (i = 0; i < 32; i++)
 		dst[i] = a[i] & b[i];
 }
 
@@ -5252,7 +6165,8 @@ static inline void
 __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i++)
+	int i;
+	for (i = 0; i < 32; i++)
 		dst[i] = a[i] & ~b[i];
 }
 
@@ -5284,14 +6198,17 @@ __sm_ensure_capacity(sm_t **resultp, size_t needed)
 	if (result->m_data_used + needed <= __sm_cap(result)) {
 		return (true);
 	}
-	size_t cap = __sm_cap(result);
-	size_t new_cap = cap + (cap / 2 > needed ? cap / 2 : needed + 256);
-	sm_t *grown = sm_set_data_size(result, NULL, new_cap);
-	if (grown == NULL) {
-		return (false);
+	{
+		size_t cap = __sm_cap(result);
+		size_t new_cap =
+		    cap + (cap / 2 > needed ? cap / 2 : needed + 256);
+		sm_t *grown = sm_set_data_size(result, NULL, new_cap);
+		if (grown == NULL) {
+			return (false);
+		}
+		*resultp = grown;
+		return (true);
 	}
-	*resultp = grown;
-	return (true);
 }
 
 /**
@@ -5310,10 +6227,12 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
 {
 	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) +
 	    (size_t)nvecs * sizeof(__sm_bitvec_t);
+	sm_t *result;
+	int i;
 	if (!__sm_ensure_capacity(resultp, chunk_size)) {
 		return (false);
 	}
-	sm_t *result = *resultp;
+	result = *resultp;
 
 	/* Capacity for the whole chunk was reserved above, so these appends
 	 * cannot fail; check anyway so the invariant is enforced by the
@@ -5326,7 +6245,7 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
 	        sizeof(__sm_bitvec_t)))) {
 		return (false);
 	}
-	for (int i = 0; i < nvecs; i++) {
+	for (i = 0; i < nvecs; i++) {
 		if (SM_UNLIKELY(!__sm_append_data(result,
 		        (const uint8_t *)&vecs[i], sizeof(__sm_bitvec_t)))) {
 			return (false);
@@ -5351,6 +6270,9 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
     size_t length)
 {
 	sm_t *result = *resultp;
+	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+	SM_ALIGNAS(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
+	__sm_chunk_t tmp;
 
 	/* Inline coalescing: try to merge with the last emitted chunk. */
 	const size_t count = __sm_get_chunk_count(result);
@@ -5358,16 +6280,17 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 		/* Find the last chunk in the result */
 		uint8_t *p = __sm_get_chunk_data(result, 0);
 		uint8_t *last_p = p;
-		for (size_t i = 0; i < count; i++) {
-			last_p = p;
+		__sm_idx_t last_start;
+		__sm_chunk_t last_chunk;
+		size_t i;
+		for (i = 0; i < count; i++) {
 			__sm_chunk_t c;
+			last_p = p;
 			__sm_chunk_init(&c, p + SM_SIZEOF_OVERHEAD);
 			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&c);
 		}
 
-		const __sm_idx_t last_start =
-		    __sm_load_idx((const uint8_t *)last_p);
-		__sm_chunk_t last_chunk;
+		last_start = __sm_load_idx((const uint8_t *)last_p);
 		__sm_chunk_init(&last_chunk, last_p + SM_SIZEOF_OVERHEAD);
 
 		if (__sm_chunk_is_rle(&last_chunk)) {
@@ -5414,6 +6337,7 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 						    (size_t)(last_p -
 						        __sm_get_chunk_data(
 						            result, 0));
+						size_t j;
 						__sm_remove_data(result,
 						    last_offset +
 						        SM_SIZEOF_OVERHEAD +
@@ -5422,8 +6346,8 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 						/* Re-init after data shift */
 						last_p = __sm_get_chunk_data(
 						    result, 0);
-						for (size_t i = 0;
-						     i < count - 1; i++) {
+						for (j = 0;
+						     j < count - 1; j++) {
 							__sm_chunk_t c;
 							__sm_chunk_init(&c,
 							    last_p +
@@ -5449,7 +6373,6 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 	}
 
 	/* No merge possible: append new RLE chunk */
-	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
 	if (!__sm_ensure_capacity(resultp, chunk_size)) {
 		return (false);
 	}
@@ -5462,8 +6385,6 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 	}
 
 	/* Build and write the RLE word */
-	SM_ALIGNAS(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
-	__sm_chunk_t tmp;
 	__sm_chunk_init(&tmp, rle_buf);
 	__sm_chunk_set_rle(&tmp);
 	__sm_chunk_rle_set_capacity(&tmp, capacity);
@@ -5524,18 +6445,21 @@ __sm_emit_flush(__sm_emitter_t *e)
 	if (!e->pending) {
 		return (true);
 	}
-	e->pending = false;
-	__sm_bitvec_t desc;
-	__sm_bitvec_t vecs[32];
-	int nvecs;
-	if (!__sm_encode_sparse_chunk(e->words, e->cap, &desc, vecs, &nvecs)) {
-		return (true); /* nothing set: emit nothing */
+	{
+		__sm_bitvec_t desc;
+		__sm_bitvec_t vecs[32];
+		int nvecs;
+		e->pending = false;
+		if (!__sm_encode_sparse_chunk(e->words, e->cap, &desc, vecs,
+		        &nvecs)) {
+			return (true); /* nothing set: emit nothing */
+		}
+		/* Once a sparse chunk lands after the RLE chunk, that chunk is no
+		 * longer the tail and its span must not absorb later emits. */
+		e->have_rle = false;
+		return (__sm_append_sparse_chunk(e->resultp, e->start, desc,
+		    vecs, nvecs));
 	}
-	/* Once a sparse chunk lands after the RLE chunk, that chunk is no
-	 * longer the tail and its span must not absorb later emits. */
-	e->have_rle = false;
-	return (__sm_append_sparse_chunk(e->resultp, e->start, desc, vecs,
-	    nvecs));
 }
 
 /* Emit (or merge) a sparse output chunk given as expanded words. */
@@ -5544,7 +6468,8 @@ __sm_emit_words(__sm_emitter_t *e, __sm_idx_t start,
     const __sm_bitvec_t words[32], const int cap[32])
 {
 	if (e->pending && e->start == start) {
-		for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+		int i;
+		for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 			if (cap[i]) {
 				e->words[i] |= words[i];
 				e->cap[i] = 1;
@@ -5612,49 +6537,55 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 	 */
 	(void)capacity;
 
-	const size_t full = (length / SM_CHUNK_MAX_CAPACITY) *
-	    SM_CHUNK_MAX_CAPACITY;
-	if (full > 0) {
-		if (!__sm_emit_flush(e)) {
-			return (false);
+	{
+		const size_t full = (length / SM_CHUNK_MAX_CAPACITY) *
+		    SM_CHUNK_MAX_CAPACITY;
+		const size_t rem = length - full;
+		__sm_bitvec_t w[32];
+		int c[32];
+		int i;
+		size_t bit;
+		if (full > 0) {
+			if (!__sm_emit_flush(e)) {
+				return (false);
+			}
+			if (!__sm_append_rle_chunk(e->resultp, start, full,
+			        full)) {
+				return (false);
+			}
+			e->rle_start = start;
+			e->rle_end = (size_t)start + full;
+			e->rle_len = full;
+			e->have_rle = true;
 		}
-		if (!__sm_append_rle_chunk(e->resultp, start, full, full)) {
-			return (false);
+
+		if (rem == 0) {
+			return (true);
 		}
-		e->rle_start = start;
-		e->rle_end = (size_t)start + full;
-		e->rle_len = full;
-		e->have_rle = true;
-	}
 
-	const size_t rem = length - full;
-	if (rem == 0) {
-		return (true);
+		memset(w, 0, sizeof(w));
+		/* Full 32-slot capacity (see __sm_emit_run): a partial trailing run
+		 * still claims the whole chunk window, encoding the unset tail slots
+		 * as ZEROS rather than NONE. */
+		for (i = 0; i < 32; i++)
+			c[i] = 1;
+		for (bit = 0; bit < rem; bit += SM_BITS_PER_VECTOR) {
+			const size_t slot = bit / SM_BITS_PER_VECTOR;
+			const size_t n = (rem - bit < SM_BITS_PER_VECTOR) ?
+			    rem - bit :
+			    SM_BITS_PER_VECTOR;
+			w[slot] = (n == SM_BITS_PER_VECTOR) ?
+			    ~(__sm_bitvec_t)0 :
+			    (((__sm_bitvec_t)1 << n) - 1);
+		}
+		/* The remainder starts exactly where the RLE part ended, so it is
+		 * outside that chunk's span; clear the marker so the assertion in
+		 * __sm_emit_words (which forbids a start *inside* the span) is not
+		 * confused by the boundary case. */
+		e->have_rle = false;
+		return (__sm_emit_words(e,
+		    (__sm_idx_t)((size_t)start + full), w, c));
 	}
-
-	__sm_bitvec_t w[32];
-	int c[32];
-	memset(w, 0, sizeof(w));
-	/* Full 32-slot capacity (see __sm_emit_run): a partial trailing run
-	 * still claims the whole chunk window, encoding the unset tail slots
-	 * as ZEROS rather than NONE. */
-	for (int i = 0; i < 32; i++)
-		c[i] = 1;
-	for (size_t bit = 0; bit < rem; bit += SM_BITS_PER_VECTOR) {
-		const size_t slot = bit / SM_BITS_PER_VECTOR;
-		const size_t n = (rem - bit < SM_BITS_PER_VECTOR) ?
-		    rem - bit :
-		    SM_BITS_PER_VECTOR;
-		w[slot] = (n == SM_BITS_PER_VECTOR) ?
-		    ~(__sm_bitvec_t)0 :
-		    (((__sm_bitvec_t)1 << n) - 1);
-	}
-	/* The remainder starts exactly where the RLE part ended, so it is
-	 * outside that chunk's span; clear the marker so the assertion in
-	 * __sm_emit_words (which forbids a start *inside* the span) is not
-	 * confused by the boundary case. */
-	e->have_rle = false;
-	return (__sm_emit_words(e, (__sm_idx_t)((size_t)start + full), w, c));
 }
 
 /*
@@ -5677,30 +6608,33 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 static bool
 __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 {
+	uint64_t aligned;
+	uint64_t body_lo = lo;
 	if (lo >= hi) {
 		return (true);
 	}
 
 	/* Sub-chunk head: bits from lo up to the next chunk boundary. */
-	const uint64_t aligned = ((lo + SM_CHUNK_MAX_CAPACITY - 1) /
+	aligned = ((lo + SM_CHUNK_MAX_CAPACITY - 1) /
 	                             SM_CHUNK_MAX_CAPACITY) *
 	    SM_CHUNK_MAX_CAPACITY;
-	uint64_t body_lo = lo;
 	if (aligned > lo) {
 		const uint64_t head_hi = aligned < hi ? aligned : hi;
 		const __sm_idx_t chunk_start =
 		    (__sm_idx_t)(lo - (lo % SM_CHUNK_MAX_CAPACITY));
 		__sm_bitvec_t w[32];
 		int c[32];
+		int i;
+		uint64_t bit;
 		memset(w, 0, sizeof(w));
 		/* Full 32-slot capacity, matching __sm_expand_rle_as_words: a
 		 * sparse chunk with front slots marked NONE (cap 0) instead of
 		 * ZEROS confuses the reader, which then finds only the first set
 		 * bit.  Every emitted sparse chunk claims the whole 2048-bit
 		 * window and encodes absent slots as ZEROS. */
-		for (int i = 0; i < 32; i++)
+		for (i = 0; i < 32; i++)
 			c[i] = 1;
-		for (uint64_t bit = lo; bit < head_hi; bit++) {
+		for (bit = lo; bit < head_hi; bit++) {
 			const uint64_t off = bit - chunk_start;
 			const size_t slot = off / SM_BITS_PER_VECTOR;
 			w[slot] |= (__sm_bitvec_t)1
@@ -5719,16 +6653,74 @@ __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 	/* body_lo is now chunk-aligned; __sm_emit_rle emits the whole
 	 * output chunks as RLE and forwards its own sub-chunk tail to the
 	 * words path.  capacity == length keeps the RLE chunk-aligned. */
-	const size_t len = (size_t)(hi - body_lo);
-	return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
+	{
+		const size_t len = (size_t)(hi - body_lo);
+		return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
+	}
+}
+
+/*
+ * Absolute shifted start of a chunk under sm_offset, computed without a
+ * signed-overflow intermediate.
+ *
+ * sm_offset shifts every bit at position i to i + offset.  A chunk that
+ * starts at src_start therefore lands at src_start + offset, which for a
+ * large |offset| overflows the ssize_t used by the old `(ssize_t)src_start
+ * + offset` expression even though the true value fits (the caller's
+ * ERANGE / drop guards already bound the surviving range to
+ * [0, SM_IDX_MAX]).  Return the shifted start as an unsigned magnitude
+ * plus a sign flag: *neg is true when the start falls below bit 0 (only
+ * possible for offset < 0), in which case *mag is how far below 0 it is.
+ * The whole computation stays in uint64_t / ssize_t with explicit range
+ * checks -- no __int128, no compiler builtins (MSVC-portable, two-file
+ * style).
+ */
+static inline uint64_t
+__sm_offset_abs_start(uint64_t src_start, ssize_t offset, bool *neg)
+{
+	uint64_t down;
+	if (offset >= 0) {
+		/* Non-negative shift.  The offset>0 ERANGE guard already
+		 * proved max + offset <= SM_IDX_MAX and src_start <= max, so
+		 * this uint64_t add cannot wrap. */
+		*neg = false;
+		return (src_start + (uint64_t)offset);
+	}
+	/* offset < 0: |offset| as an unsigned magnitude (SSIZE_MIN-safe). */
+	down = (uint64_t)(-(offset + 1)) + 1;
+	if (src_start >= down) {
+		*neg = false;
+		return (src_start - down);
+	}
+	*neg = true;
+	return (down - src_start);
 }
 
 sm_t *
 sm_offset(const sm_t *map, ssize_t offset)
 {
+	size_t count;
+	size_t chunk_bytes;
+	size_t cap;
+	sm_t *result;
+	uint8_t *p;
+	size_t i;
+	__sm_emitter_t em;
+
 	__sm_check_invariants(map);
 	if (map == NULL) {
 		return (NULL);
+	}
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		sm_t *r;
+		if (m == NULL)
+			return (NULL);
+		r = sm_offset(m, offset);
+		sm_free(m);
+		if (r != NULL)
+			__sm_try_demote(r);
+		return (r);
 	}
 
 	/* offset == 0: just copy */
@@ -5736,7 +6728,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 		return (sm_copy(map));
 	}
 
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (NULL);
 	}
@@ -5753,7 +6745,11 @@ sm_offset(const sm_t *map, ssize_t offset)
 	/* Check if all bits would be shifted below 0 */
 	if (offset < 0) {
 		uint64_t max = sm_maximum(map);
-		if ((ssize_t)max + offset < 0) {
+		/* Compare in unsigned to avoid the (ssize_t)max cast UB when a
+		 * valid map holds a bit above 2^63: the whole map is dropped
+		 * iff every bit shifts below 0, i.e. max < |offset|. */
+		const uint64_t neg = (uint64_t)(-(offset + 1)) + 1; /* |offset| */
+		if (max < neg) {
 			return (NULL); /* all bits shifted away */
 		}
 	}
@@ -5768,10 +6764,10 @@ sm_offset(const sm_t *map, ssize_t offset)
 	 * on the byte stream -- with zero headroom its memmove read one
 	 * chunk past the allocation (ASan heap-buffer-overflow).
 	 */
-	const size_t chunk_bytes = SM_SIZEOF_OVERHEAD +
+	chunk_bytes = SM_SIZEOF_OVERHEAD +
 	    sizeof(__sm_bitvec_t) * (SM_FLAGS_PER_INDEX + 1);
-	size_t cap = map->m_data_used * 2 + chunk_bytes;
-	sm_t *result = sparsemap(cap > 1024 ? cap : 1024);
+	cap = map->m_data_used * 2 + chunk_bytes;
+	result = sparsemap(cap > 1024 ? cap : 1024);
 	if (result == NULL) {
 		return (NULL);
 	}
@@ -5780,46 +6776,59 @@ sm_offset(const sm_t *map, ssize_t offset)
 	 * that several source pieces landing in the same aligned output
 	 * chunk are merged instead of appended twice.  Replaces the old
 	 * carry buffer, which only serialised the forward-overflow case. */
-	__sm_emitter_t em = { .resultp = &result, .pending = false };
+	memset(&em, 0, sizeof(em));
+	em.resultp = &result;
+	em.pending = false;
 
 	/* Walk source chunks */
-	uint8_t *p = __sm_get_chunk_data(map, 0);
+	p = __sm_get_chunk_data(map, 0);
 
-	for (size_t i = 0; i < count; i++) {
+	for (i = 0; i < count; i++) {
 		const __sm_idx_t src_start = __sm_load_idx((const uint8_t *)p);
-		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 
 		if (__sm_chunk_is_rle(&chunk)) {
 			const size_t rle_len =
 			    __sm_chunk_rle_get_length(&chunk);
+			bool neg;
+			uint64_t mag;
+			uint64_t clipped_start;
+			size_t new_len;
+			__sm_idx_t aligned_start;
+			size_t rle_offset_in_chunk;
 
 			/* RLE set bits occupy [src_start, src_start + rle_len).
-         After offset: [src_start + offset, src_start + offset + rle_len). */
-			ssize_t final_start = (ssize_t)src_start + offset;
-			ssize_t final_end = final_start + (ssize_t)rle_len;
-
-			/* Clip to >= 0 */
-			if (final_end <= 0) {
-				goto next_chunk;
+			 * After the shift they occupy [start, start + rle_len)
+			 * where start = src_start + offset.  Compute start as an
+			 * unsigned magnitude + sign so a large |offset| cannot
+			 * overflow a signed intermediate; clip the part that
+			 * falls below bit 0. */
+			mag = __sm_offset_abs_start(src_start, offset, &neg);
+			if (neg) {
+				/* Run starts mag bits below 0. */
+				if (rle_len <= (size_t)mag) {
+					goto next_chunk; /* wholly below 0 */
+				}
+				clipped_start = 0;
+				new_len = rle_len - (size_t)mag;
+			} else {
+				clipped_start = mag;
+				new_len = rle_len;
 			}
-			if (final_start < 0) {
-				final_start = 0;
-			}
-
-			size_t new_len = (size_t)(final_end - final_start);
 			if (new_len == 0) {
 				goto next_chunk;
 			}
 
 			/* Align the start to chunk boundary */
-			__sm_idx_t aligned_start =
+			aligned_start =
 			    (__sm_idx_t)__sm_get_chunk_aligned_offset(
-			        (size_t)final_start);
-			size_t rle_offset_in_chunk =
-			    (size_t)final_start - aligned_start;
+			        (size_t)clipped_start);
+			rle_offset_in_chunk =
+			    (size_t)clipped_start - aligned_start;
 
 			if (rle_offset_in_chunk == 0) {
 				/* Starts on chunk boundary, emit as pure RLE */
@@ -5839,24 +6848,30 @@ sm_offset(const sm_t *map, ssize_t offset)
 				/* Emit first partial chunk as sparse */
 				size_t first_chunk_bits =
 				    SM_CHUNK_MAX_CAPACITY - rle_offset_in_chunk;
+				__sm_bitvec_t fw[32] = { 0 };
+				int fc[32] = { 0 };
+				size_t last_data_slot;
+				size_t bp;
+				size_t bl;
+				size_t remaining;
+				__sm_idx_t cur_start;
+				size_t s;
 				if (first_chunk_bits > new_len) {
 					first_chunk_bits = new_len;
 				}
 
-				__sm_bitvec_t fw[32] = { 0 };
-				int fc[32] = { 0 };
 				/* Mark capacity for all slots up to and including the data */
-				size_t last_data_slot =
+				last_data_slot =
 				    (rle_offset_in_chunk + first_chunk_bits +
 				        SM_BITS_PER_VECTOR - 1) /
 				    SM_BITS_PER_VECTOR;
-				for (size_t s = 0; s < last_data_slot && s < 32;
+				for (s = 0; s < last_data_slot && s < 32;
 				     s++) {
 					fc[s] = 1;
 				}
 				/* Set the actual bits */
-				size_t bp = rle_offset_in_chunk;
-				size_t bl = first_chunk_bits;
+				bp = rle_offset_in_chunk;
+				bl = first_chunk_bits;
 				while (bl > 0) {
 					size_t slot = bp / SM_BITS_PER_VECTOR;
 					size_t bit_in_vec =
@@ -5883,8 +6898,8 @@ sm_offset(const sm_t *map, ssize_t offset)
 					return (NULL);
 				}
 
-				size_t remaining = new_len - first_chunk_bits;
-				__sm_idx_t cur_start =
+				remaining = new_len - first_chunk_bits;
+				cur_start =
 				    aligned_start + SM_CHUNK_MAX_CAPACITY;
 
 				/* Emit middle RLE for full chunks */
@@ -5940,6 +6955,16 @@ sm_offset(const sm_t *map, ssize_t offset)
          place into correct output chunk(s). */
 			__sm_bitvec_t words[32];
 			int cf[32];
+			bool neg;
+			uint64_t mag;
+			ssize_t intra_shift;
+			uint64_t out_aligned;
+			__sm_bitvec_t main_words[32] = { 0 };
+			int main_cap[32] = { 0 };
+			__sm_bitvec_t overflow_words[32] = { 0 };
+			int overflow_cap[32] = { 0 };
+			bool has_overflow = false;
+			int ow;
 			__sm_expand_sparse_chunk(&chunk, words, cf);
 
 			/* Each bit at absolute position src_start + slot*64 + bit_offset
@@ -5951,29 +6976,32 @@ sm_offset(const sm_t *map, ssize_t offset)
          If intra >= 0: right-shift within the 32-word array, overflow to carry.
          If intra < 0 (new start negative): left-shift, dropping low bits. */
 
-			ssize_t new_abs_start = (ssize_t)src_start + offset;
+			mag = __sm_offset_abs_start(src_start, offset, &neg);
 
-			/* Compute aligned output chunk start and intra-chunk shift */
-			ssize_t out_aligned;
-			ssize_t intra_shift;
-
-			if (new_abs_start >= 0) {
-				out_aligned =
-				    (ssize_t)__sm_get_chunk_aligned_offset(
-				        (size_t)new_abs_start);
-				intra_shift = new_abs_start - out_aligned;
+			/* Compute aligned output chunk start and intra-chunk shift.
+			 * All arithmetic is unsigned; intra_shift for the
+			 * non-negative case is a within-chunk remainder (0 ..
+			 * SM_CHUNK_MAX_CAPACITY-1), so it fits ssize_t with room to
+			 * spare.  A start below bit 0 (neg) becomes a left-shift by
+			 * `mag` bits, dropping the low bits. */
+			if (!neg) {
+				const uint64_t oa =
+				    __sm_get_chunk_aligned_offset((size_t)mag);
+				out_aligned = oa;
+				intra_shift = (ssize_t)(mag - oa);
 			} else {
-				/* new_abs_start < 0: bits below 0 get dropped, surviving bits start at 0 */
+				/* start < 0: surviving bits begin at 0, low `mag`
+				 * bits drop.  A drop of a whole source chunk
+				 * (mag >= SM_CHUNK_MAX_CAPACITY bits) leaves
+				 * nothing.  Otherwise represent it as a negative
+				 * intra_shift whose magnitude is the drop amount
+				 * (< 2048, so it fits ssize_t). */
 				out_aligned = 0;
-				intra_shift =
-				    new_abs_start; /* negative = left shift */
+				if (mag >= SM_CHUNK_MAX_CAPACITY) {
+					goto next_chunk;
+				}
+				intra_shift = -(ssize_t)mag;
 			}
-
-			/* Build the shifted 32-word arrays for main output chunk and overflow */
-			__sm_bitvec_t main_words[32] = { 0 };
-			int main_cap[32] = { 0 };
-			__sm_bitvec_t overflow_words[32] = { 0 };
-			int overflow_cap[32] = { 0 };
 
 			if (intra_shift >= 0) {
 				/* Right-shift by intra_shift bits */
@@ -5981,12 +7009,15 @@ sm_offset(const sm_t *map, ssize_t offset)
 				    (size_t)intra_shift / SM_BITS_PER_VECTOR;
 				size_t bit_rem =
 				    (size_t)intra_shift % SM_BITS_PER_VECTOR;
+				int w;
+				size_t wz;
 
-				for (int w = 31; w >= 0; w--) {
+				for (w = 31; w >= 0; w--) {
+					size_t dst;
 					if (!cf[w] && words[w] == 0)
 						continue;
 
-					size_t dst = (size_t)w + word_shift;
+					dst = (size_t)w + word_shift;
 					if (bit_rem == 0) {
 						if (dst < 32) {
 							main_words[dst] |=
@@ -6004,6 +7035,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 						__sm_bitvec_t hi = words[w] >>
 						    (SM_BITS_PER_VECTOR -
 						        bit_rem);
+						size_t dst1;
 
 						if (dst < 32) {
 							main_words[dst] |= lo;
@@ -6015,7 +7047,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 							    1;
 						}
 
-						size_t dst1 = dst + 1;
+						dst1 = dst + 1;
 						if (dst1 < 32) {
 							main_words[dst1] |= hi;
 							main_cap[dst1] = 1;
@@ -6029,17 +7061,18 @@ sm_offset(const sm_t *map, ssize_t offset)
 				}
 
 				/* Mark shifted-in zero slots as capacity */
-				for (size_t w = 0; w < word_shift && w < 32;
-				     w++) {
-					main_cap[w] = 1;
+				for (wz = 0; wz < word_shift && wz < 32;
+				     wz++) {
+					main_cap[wz] = 1;
 				}
 			} else {
 				/* intra_shift < 0: left-shift by |intra_shift| bits (dropping low bits) */
 				size_t drop = (size_t)(-intra_shift);
 				size_t word_drop = drop / SM_BITS_PER_VECTOR;
 				size_t bit_drop = drop % SM_BITS_PER_VECTOR;
+				size_t w;
 
-				for (size_t w = 0; w < 32; w++) {
+				for (w = 0; w < 32; w++) {
 					size_t src_w = w + word_drop;
 					if (src_w >= 32)
 						break;
@@ -6069,9 +7102,8 @@ sm_offset(const sm_t *map, ssize_t offset)
 				return (NULL);
 			}
 
-			bool has_overflow = false;
-			for (int w = 0; w < (int)SM_FLAGS_PER_INDEX; w++) {
-				if (overflow_cap[w] && overflow_words[w] != 0) {
+			for (ow = 0; ow < (int)SM_FLAGS_PER_INDEX; ow++) {
+				if (overflow_cap[ow] && overflow_words[ow] != 0) {
 					has_overflow = true;
 					break;
 				}
@@ -6120,6 +7152,9 @@ sm_is_empty(const sm_t *map)
 	if (map == NULL) {
 		return (true);
 	}
+	if (__sm_is_small(map)) {
+		return (__sm_small_is_empty(map));
+	}
 	__sm_check_invariants(map);
 	return (__sm_get_chunk_count(map) == 0);
 }
@@ -6134,13 +7169,16 @@ static __sm_idx_t
 __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
     uint64_t lower_excl)
 {
+	size_t v;
 	if (__sm_chunk_is_rle(chunk)) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
+		uint64_t run_lo;
+		uint64_t run_hi;
 		if (length == 0) {
 			return (SM_IDX_MAX);
 		}
-		const uint64_t run_lo = start;
-		const uint64_t run_hi = start + length - 1;
+		run_lo = start;
+		run_hi = start + length - 1;
 		if (lower_excl != UINT64_MAX && lower_excl >= run_hi) {
 			return (SM_IDX_MAX);
 		}
@@ -6150,13 +7188,17 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
 		return (lower_excl + 1);
 	}
 
-	for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+	for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 		const uint64_t vec_lo = start + v * SM_BITS_PER_VECTOR;
 		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
+		const size_t flags =
+		    SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
+		__sm_bitvec_t w;
+		uint64_t skip = 0;
+		__sm_bitvec_t masked;
 		if (lower_excl != UINT64_MAX && vec_hi <= lower_excl) {
 			continue;
 		}
-		const size_t flags = SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
 		if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
 			continue;
 		}
@@ -6167,15 +7209,13 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
 			return (lower_excl + 1);
 		}
 		/* SM_PAYLOAD_MIXED: scan the payload word for a 1-bit > lower_excl. */
-		const __sm_bitvec_t w =
-		    chunk->m_data[1 + __sm_chunk_get_position(chunk, v)];
-		uint64_t skip = 0;
+		w = chunk->m_data[1 + __sm_chunk_get_position(chunk, v)];
 		if (lower_excl != UINT64_MAX && lower_excl >= vec_lo) {
 			skip = lower_excl - vec_lo + 1;
 			if (skip >= SM_BITS_PER_VECTOR)
 				continue;
 		}
-		const __sm_bitvec_t masked = w & (~(__sm_bitvec_t)0 << skip);
+		masked = w & (~(__sm_bitvec_t)0 << skip);
 		if (masked == 0) {
 			continue;
 		}
@@ -6192,35 +7232,38 @@ static __sm_idx_t
 __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start,
     uint64_t upper_excl)
 {
+	ssize_t v;
 	if (__sm_chunk_is_rle(chunk)) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
+		uint64_t run_hi;
 		if (length == 0 || upper_excl <= start) {
 			return (SM_IDX_MAX);
 		}
-		const uint64_t run_hi = start + length - 1;
+		run_hi = start + length - 1;
 		return (upper_excl - 1 < run_hi ? upper_excl - 1 : run_hi);
 	}
 
-	for (ssize_t v = SM_FLAGS_PER_INDEX - 1; v >= 0; v--) {
+	for (v = SM_FLAGS_PER_INDEX - 1; v >= 0; v--) {
 		const uint64_t vec_lo =
 		    start + (uint64_t)v * SM_BITS_PER_VECTOR;
+		const size_t flags =
+		    SM_CHUNK_GET_FLAGS(chunk->m_data[0], (size_t)v);
+		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
+		__sm_bitvec_t w;
 		if (vec_lo >= upper_excl) {
 			continue;
 		}
-		const size_t flags =
-		    SM_CHUNK_GET_FLAGS(chunk->m_data[0], (size_t)v);
 		if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
 			continue;
 		}
-		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
 		if (flags == SM_PAYLOAD_ONES) {
 			return (
 			    upper_excl - 1 < vec_hi ? upper_excl - 1 : vec_hi);
 		}
 		/* SM_PAYLOAD_MIXED. */
-		__sm_bitvec_t w =
-		    chunk
-		        ->m_data[1 + __sm_chunk_get_position(chunk, (size_t)v)];
+		w = chunk
+		        ->m_data[1 +
+		            __sm_chunk_get_position(chunk, (size_t)v)];
 		if (upper_excl - 1 < vec_hi) {
 			const uint64_t bits_to_keep = upper_excl - vec_lo;
 			if (bits_to_keep == 0)
@@ -6241,51 +7284,85 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 {
 	if (map == NULL)
 		return (SM_IDX_MAX);
+	if (__sm_is_small(map)) {
+		/* First set bit strictly greater than prev_idx (SM_IDX_MAX
+		 * means "from the start"). */
+		const uint64_t *words = __sm_small_words(map);
+		const size_t n = __sm_small_nwords(map);
+		const uint64_t from = (prev_idx == SM_IDX_MAX) ? 0
+		                                               : prev_idx + 1;
+		size_t w;
+		uint64_t word;
+		if (prev_idx != SM_IDX_MAX &&
+		    prev_idx >= (uint64_t)n * 64)
+			return (SM_IDX_MAX);
+		w = (size_t)(from / 64);
+		if (w >= n)
+			return (SM_IDX_MAX);
+		word = words[w] & (~(uint64_t)0 << (from % 64));
+		for (;;) {
+			if (word != 0)
+				return ((uint64_t)w * 64 +
+				    (uint64_t)SM_CTZ64(word));
+			if (++w >= n)
+				return (SM_IDX_MAX);
+			word = words[w];
+		}
+	}
 	__sm_check_invariants(map);
-	const size_t count = __sm_get_chunk_count(map);
-	if (count == 0)
-		return (SM_IDX_MAX);
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		uint8_t *base;
+		uint8_t *p;
+		size_t stream_end;
+		if (count == 0)
+			return (SM_IDX_MAX);
 
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
-	const size_t stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
+		base = __sm_get_chunk_data(map, 0);
+		p = base;
+		stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
 
-	/*
-	 * Cursor fast-path.  Sequential forward iteration
-	 *   while ((i = sm_next_member(map, i, &c)) != SM_IDX_MAX) ...
-	 * is the dominant scan-side hot path.  Without a cursor each
-	 * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
-	 * Resume from the cached chunk when prev_idx is not earlier than
-	 * that chunk's start.
-	 */
-	if (prev_idx != SM_IDX_MAX && cur != NULL &&
-	    cur->offset != SIZE_MAX && cur->offset < stream_end &&
-	    cur->start_idx <= prev_idx) {
-		p = base + cur->offset;
-	}
-
-	while ((size_t)(p - base) < stream_end) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		/* Skip chunks entirely below the lower bound. */
-		if (prev_idx != SM_IDX_MAX && start + cap - 1 <= prev_idx) {
-			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-			continue;
+		/*
+		 * Cursor fast-path.  Sequential forward iteration
+		 *   while ((i = sm_next_member(map, i, &c)) != SM_IDX_MAX) ...
+		 * is the dominant scan-side hot path.  Without a cursor each
+		 * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
+		 * Resume from the cached chunk when prev_idx is not earlier than
+		 * that chunk's start.
+		 */
+		if (prev_idx != SM_IDX_MAX && cur != NULL &&
+		    cur->offset != SIZE_MAX && cur->offset < stream_end &&
+		    cur->start_idx <= prev_idx) {
+			p = base + cur->offset;
 		}
-		const uint64_t hit =
-		    __sm_chunk_next_set(&chunk, start, prev_idx);
-		if (hit != SM_IDX_MAX) {
-			if (cur != NULL) {
-				cur->offset = (size_t)(p - base);
-				cur->start_idx = start;
+
+		while ((size_t)(p - base) < stream_end) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)p);
+			__sm_chunk_t chunk;
+			size_t cap;
+			uint64_t hit;
+			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+			cap = __sm_chunk_get_capacity(&chunk);
+			/* Skip chunks entirely below the lower bound. */
+			if (prev_idx != SM_IDX_MAX &&
+			    start + cap - 1 <= prev_idx) {
+				p += SM_SIZEOF_OVERHEAD +
+				    __sm_chunk_get_size(&chunk);
+				continue;
 			}
-			return (hit);
+			hit = __sm_chunk_next_set(&chunk, start, prev_idx);
+			if (hit != SM_IDX_MAX) {
+				if (cur != NULL) {
+					cur->offset = (size_t)(p - base);
+					cur->start_idx = start;
+				}
+				return (hit);
+			}
+			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		}
-		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		return (SM_IDX_MAX);
 	}
-	return (SM_IDX_MAX);
 }
 
 uint64_t
@@ -6297,68 +7374,105 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	(void)cur;
 	if (map == NULL)
 		return (SM_IDX_MAX);
-	__sm_check_invariants(map);
-	const size_t count = __sm_get_chunk_count(map);
-	if (count == 0)
-		return (SM_IDX_MAX);
-
-	/* SM_IDX_MAX as input means "start past the end". */
-	const uint64_t upper_excl =
-	    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
-
-	/* Walk forward to the last chunk that starts before upper_excl,
-	 * remembering each chunk so we can step back if needed. */
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	/* Track up to `count` candidate chunk pointers. */
-	uint8_t *last = NULL;
-	size_t last_idx = 0;
-	for (size_t i = 0; i < count; i++) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		if (start >= upper_excl)
-			break;
-		last = p;
-		last_idx = i;
-		__sm_chunk_t tmp;
-		__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
-		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
-	}
-	if (last == NULL)
-		return (SM_IDX_MAX);
-
-	/* Step back through chunks until we find a hit. */
-	while (true) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)last);
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
-		const uint64_t hit =
-		    __sm_chunk_prev_set(&chunk, start, upper_excl);
-		if (hit != SM_IDX_MAX)
-			return (hit);
-		if (last_idx == 0)
-			break;
-		/* Walk forward to find the chunk preceding `last`. */
-		uint8_t *q = __sm_get_chunk_data(map, 0);
-		for (size_t j = 0; j + 1 < last_idx; j++) {
-			__sm_chunk_t tmp;
-			__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
-			q += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+	if (__sm_is_small(map)) {
+		/* Highest set bit strictly less than prev_idx (SM_IDX_MAX
+		 * means "from the end"). */
+		const uint64_t *words = __sm_small_words(map);
+		const size_t n = __sm_small_nwords(map);
+		uint64_t upper_excl;
+		uint64_t last;
+		size_t w;
+		uint64_t word;
+		if (n == 0)
+			return (SM_IDX_MAX);
+		upper_excl =
+		    (prev_idx == SM_IDX_MAX) ? (uint64_t)n * 64 : prev_idx;
+		if (upper_excl == 0)
+			return (SM_IDX_MAX);
+		last = upper_excl - 1;
+		if (last >= (uint64_t)n * 64)
+			last = (uint64_t)n * 64 - 1;
+		w = (size_t)(last / 64);
+		word = words[w] & (~(uint64_t)0 >> (63 - (last % 64)));
+		for (;;) {
+			if (word != 0)
+				return ((uint64_t)w * 64 +
+				    (63 - (uint64_t)SM_CLZ64(word)));
+			if (w == 0)
+				return (SM_IDX_MAX);
+			w--;
+			word = words[w];
 		}
-		last = q;
-		last_idx--;
 	}
-	return (SM_IDX_MAX);
+	__sm_check_invariants(map);
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		/* SM_IDX_MAX as input means "start past the end". */
+		const uint64_t upper_excl =
+		    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
+		/* Walk forward to the last chunk that starts before upper_excl,
+		 * remembering each chunk so we can step back if needed. */
+		uint8_t *p = __sm_get_chunk_data(map, 0);
+		/* Track up to `count` candidate chunk pointers. */
+		uint8_t *last = NULL;
+		size_t last_idx = 0;
+		size_t i;
+		if (count == 0)
+			return (SM_IDX_MAX);
+		for (i = 0; i < count; i++) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)p);
+			__sm_chunk_t tmp;
+			if (start >= upper_excl)
+				break;
+			last = p;
+			last_idx = i;
+			__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
+			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+		}
+		if (last == NULL)
+			return (SM_IDX_MAX);
+
+		/* Step back through chunks until we find a hit. */
+		while (true) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)last);
+			__sm_chunk_t chunk;
+			uint64_t hit;
+			uint8_t *q;
+			size_t j;
+			__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
+			hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
+			if (hit != SM_IDX_MAX)
+				return (hit);
+			if (last_idx == 0)
+				break;
+			/* Walk forward to find the chunk preceding `last`. */
+			q = __sm_get_chunk_data(map, 0);
+			for (j = 0; j + 1 < last_idx; j++) {
+				__sm_chunk_t tmp;
+				__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
+				q += SM_SIZEOF_OVERHEAD +
+				    __sm_chunk_get_size(&tmp);
+			}
+			last = q;
+			last_idx--;
+		}
+		return (SM_IDX_MAX);
+	}
 }
 
 bool
 sm_is_subset(const sm_t *a, const sm_t *b)
 {
+	uint64_t ia, ib;
 	if (a == NULL || sm_is_empty(a))
 		return (true);
 	if (b == NULL || sm_is_empty(b))
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX) {
 		while (ib != SM_IDX_MAX && ib < ia) {
 			ib = sm_next_member(b, ib, NULL);
@@ -6379,13 +7493,14 @@ sm_is_superset(const sm_t *a, const sm_t *b)
 bool
 sm_overlap(const sm_t *a, const sm_t *b)
 {
+	uint64_t ia, ib;
 	if (a == NULL || b == NULL)
 		return (false);
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
 		if (ia == ib)
 			return (true);
@@ -6400,24 +7515,26 @@ sm_overlap(const sm_t *a, const sm_t *b)
 sm_membership_t
 sm_membership(const sm_t *map)
 {
+	uint64_t first, second;
 	if (map == NULL || sm_is_empty(map))
 		return (SM_EMPTY);
-	const uint64_t first = sm_next_member(map, SM_IDX_MAX, NULL);
+	first = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (first == SM_IDX_MAX)
 		return (SM_EMPTY);
-	const uint64_t second = sm_next_member(map, first, NULL);
+	second = sm_next_member(map, first, NULL);
 	return ((second == SM_IDX_MAX) ? SM_SINGLETON : SM_MULTIPLE);
 }
 
 uint64_t
 sm_singleton_member(const sm_t *map)
 {
+	uint64_t first, second;
 	if (map == NULL || sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t first = sm_next_member(map, SM_IDX_MAX, NULL);
+	first = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (first == SM_IDX_MAX)
 		return (SM_IDX_MAX);
-	const uint64_t second = sm_next_member(map, first, NULL);
+	second = sm_next_member(map, first, NULL);
 	return ((second == SM_IDX_MAX) ? first : SM_IDX_MAX);
 }
 
@@ -6440,12 +7557,21 @@ sm_singleton_member(const sm_t *map)
  * how long, and a sparse chunk yields at most a chunk's worth of runs
  * (<= 2048 bits, physically present).
  *
- * Runs are decomposed per chunk and are NOT merged across chunk
- * boundaries.  That is deliberate: chunk windows are fixed 2048-aligned
- * spans, so any two maps that compare equal under sm_equals() occupy
- * the same chunks and decompose into the identical run sequence --
- * which is all the content hash and the interval sweeps below require.
- * Merging across chunks would add state for no correctness gain.
+ * Runs are MAXIMAL and CANONICAL: __sm_run_next coalesces any two
+ * adjacent runs whose spans touch (this run's hi == the next run's
+ * lo), including across the per-chunk run-list seam and across chunk
+ * boundaries.  This is required for correctness, not just tidiness:
+ * the SAME logical set can be stored with a contiguous range
+ * straddling a 2048-aligned chunk boundary (e.g. sm_union stitching
+ * two split halves back together, or an RLE run abutting the next
+ * chunk) OR entirely within a single chunk.  Without seam-coalescing
+ * those two encodings decompose into DIFFERENT run sequences
+ * ([.,2048)+[2048,.) vs one run), which made sm_equals / sm_hash /
+ * sm_compare -- all of which require the decomposition to be canonical
+ * -- disagree for logically-equal maps.  Coalescing stays O(chunks):
+ * __sm_run_next_raw yields each physically-present run exactly once
+ * and __sm_run_next only extends across a seam when the runs actually
+ * abut, so a 2^31-bit RLE run is still a single yielded run.
  */
 typedef struct {
 	const sm_t *map;
@@ -6460,6 +7586,12 @@ typedef struct {
 	uint64_t run_hi[SM_CHUNK_MAX_CAPACITY / 2 + 1];
 	size_t nruns;
 	size_t next_run;
+	/* One-run lookahead for seam-coalescing in __sm_run_next: the first
+	 * raw run that did NOT abut the run just yielded, held for the next
+	 * call so no run is dropped. */
+	bool have_peek;
+	uint64_t peek_lo;
+	uint64_t peek_hi;
 } __sm_run_iter_t;
 
 static void
@@ -6469,6 +7601,49 @@ __sm_run_iter_init(__sm_run_iter_t *it, const sm_t *map)
 	it->map = map;
 	if (map == NULL || sm_is_empty(map)) {
 		it->count = 0;
+		return;
+	}
+	if (__sm_is_small(map)) {
+		/* Decode the whole small map into the run buffer up front and
+		 * leave count == 0 so __sm_run_next just drains it.  A small
+		 * map spans < SM_SMALL_MAX_BITS (<= 1024) bits, whose worst
+		 * case (alternating) is <= 512 runs -- well within the buffer.
+		 * run_hi is exclusive here, matching __sm_run_decode_chunk. */
+		const uint64_t *w = __sm_small_words(map);
+		const size_t n = __sm_small_nwords(map);
+		bool open = false;
+		uint64_t cur_lo = 0, cur_hi = 0;
+		size_t i;
+		it->count = 0;
+		it->nruns = 0;
+		it->next_run = 0;
+		for (i = 0; i < n; i++) {
+			const uint64_t base = (uint64_t)i * 64;
+			uint64_t word = w[i];
+			int b;
+			for (b = 0; b < 64; b++) {
+				if ((word >> b) & 1u) {
+					const uint64_t bit = base + (uint64_t)b;
+					if (open && cur_hi == bit) {
+						cur_hi = bit + 1;
+					} else {
+						if (open) {
+							it->run_lo[it->nruns] =
+							    cur_lo;
+							it->run_hi[it->nruns++] =
+							    cur_hi;
+						}
+						cur_lo = bit;
+						cur_hi = bit + 1;
+						open = true;
+					}
+				}
+			}
+		}
+		if (open) {
+			it->run_lo[it->nruns] = cur_lo;
+			it->run_hi[it->nruns++] = cur_hi;
+		}
 		return;
 	}
 	it->count = __sm_get_chunk_count(map);
@@ -6483,6 +7658,11 @@ static void
 __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 {
 	__sm_chunk_t chunk;
+	__sm_bitvec_t desc;
+	size_t pos = 1; /* payload-word cursor for MIXED slots */
+	bool open = false;
+	uint64_t cur_lo = 0, cur_hi = 0;
+	size_t v;
 	__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
 	it->nruns = 0;
 	it->next_run = 0;
@@ -6500,11 +7680,8 @@ __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 	/* Sparse: walk the 32 flags, coalescing adjacent set bits.  ONES is
 	 * a full 64-bit run; MIXED decodes its payload word bit-by-bit
 	 * (bounded, 64 bits); ZEROS / NONE break any open run. */
-	const __sm_bitvec_t desc = chunk.m_data[0];
-	size_t pos = 1; /* payload-word cursor for MIXED slots */
-	bool open = false;
-	uint64_t cur_lo = 0, cur_hi = 0;
-	for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+	desc = chunk.m_data[0];
+	for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 		const size_t flags = SM_CHUNK_GET_FLAGS(desc, v);
 		const uint64_t base = start + (uint64_t)v * SM_BITS_PER_VECTOR;
 		if (flags == SM_PAYLOAD_ONES) {
@@ -6521,7 +7698,8 @@ __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 			}
 		} else if (flags == SM_PAYLOAD_MIXED) {
 			__sm_bitvec_t w = chunk.m_data[pos++];
-			for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
+			int b;
+			for (b = 0; b < SM_BITS_PER_VECTOR; b++) {
 				if ((w >> b) & 1u) {
 					const uint64_t bit = base + (uint64_t)b;
 					if (open && cur_hi == bit) {
@@ -6555,10 +7733,12 @@ __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 }
 
 /*
- * Yield the next run.  Returns false when exhausted.
+ * Yield the next physically-present run, exactly as decoded (per-chunk,
+ * NOT coalesced across seams).  Returns false when exhausted.  This is
+ * the raw producer; __sm_run_next layers seam-coalescing on top.
  */
 static bool
-__sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
+__sm_run_next_raw(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
 {
 	for (;;) {
 		/* Drain runs already decoded from the current chunk. */
@@ -6572,16 +7752,65 @@ __sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
 		if (it->idx >= it->count) {
 			return (false);
 		}
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)it->p);
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_bytes =
-		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-		__sm_run_decode_chunk(it, start);
-		it->p += chunk_bytes;
-		it->idx++;
+		{
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)it->p);
+			__sm_chunk_t chunk;
+			size_t chunk_bytes;
+			__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
+			chunk_bytes =
+			    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+			__sm_run_decode_chunk(it, start);
+			it->p += chunk_bytes;
+			it->idx++;
+		}
 		/* loop back to drain the freshly-decoded run list */
 	}
+}
+
+/*
+ * Yield the next MAXIMAL run.  Returns false when exhausted.
+ *
+ * Coalesces adjacent raw runs: once the current run [lo, hi) is in
+ * hand, keep pulling the next raw run and, while it begins exactly
+ * where the accumulated run ends (raw_lo == hi), absorb it by advancing
+ * hi.  The first raw run that does NOT abut is stashed in the iterator
+ * (it->have_peek) and returned on the next call, so nothing is dropped
+ * and each raw run is examined once.  Raw runs are ascending and
+ * disjoint within a map (per-chunk decode is ordered; chunks are
+ * ordered), so a peeked run with raw_lo > hi genuinely starts a new
+ * maximal run.  Cost stays O(raw runs) = O(chunks + physical sparse
+ * runs); a giant RLE run is one raw run and one yielded run.
+ */
+static bool
+__sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
+{
+	uint64_t cur_lo, cur_hi;
+	if (it->have_peek) {
+		cur_lo = it->peek_lo;
+		cur_hi = it->peek_hi;
+		it->have_peek = false;
+	} else if (!__sm_run_next_raw(it, &cur_lo, &cur_hi)) {
+		return (false);
+	}
+	for (;;) {
+		uint64_t nlo, nhi;
+		if (!__sm_run_next_raw(it, &nlo, &nhi)) {
+			break; /* no more raw runs; current run is final */
+		}
+		if (nlo == cur_hi) {
+			cur_hi = nhi; /* abuts: absorb and keep extending */
+			continue;
+		}
+		/* Does not abut: stash for the next call and stop. */
+		it->peek_lo = nlo;
+		it->peek_hi = nhi;
+		it->have_peek = true;
+		break;
+	}
+	*lo = cur_lo;
+	*hi = cur_hi;
+	return (true);
 }
 
 /*
@@ -6602,12 +7831,13 @@ __sm_run_pair_counts(const sm_t *a, const sm_t *b, uint64_t *cnt_a,
     uint64_t *cnt_b, uint64_t *inter, uint64_t *uni)
 {
 	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	uint64_t ca = 0, cb = 0, ci = 0;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
-	uint64_t ca = 0, cb = 0, ci = 0;
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	/* Intersection by interval sweep: at each step add the overlap of
 	 * the two active runs, then consume whichever ends first so the
 	 * other can still overlap the consumed side's later runs.  Runs
@@ -6643,11 +7873,11 @@ __sm_run_pair_counts(const sm_t *a, const sm_t *b, uint64_t *cnt_a,
 size_t
 sm_union_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t uni = 0;
 	if (sm_is_empty(a))
 		return (b ? sm_cardinality((sm_t *)b) : 0);
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-	uint64_t uni = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, NULL, &uni);
 	return ((size_t)uni);
 }
@@ -6655,9 +7885,9 @@ sm_union_cardinality(const sm_t *a, const sm_t *b)
 size_t
 sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t inter = 0;
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (0);
-	uint64_t inter = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, &inter, NULL);
 	return ((size_t)inter);
 }
@@ -6665,11 +7895,11 @@ sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 size_t
 sm_difference_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t ca = 0, inter = 0;
 	if (sm_is_empty(a))
 		return (0);
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-	uint64_t ca = 0, inter = 0;
 	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
 	return ((size_t)(ca - inter));
 }
@@ -6677,11 +7907,11 @@ sm_difference_cardinality(const sm_t *a, const sm_t *b)
 bool
 sm_nonempty_difference(const sm_t *a, const sm_t *b)
 {
+	uint64_t ca = 0, inter = 0;
 	if (sm_is_empty(a))
 		return (false);
 	if (sm_is_empty(b))
 		return (true);
-	uint64_t ca = 0, inter = 0;
 	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
 	return (ca > inter);
 }
@@ -6689,9 +7919,9 @@ sm_nonempty_difference(const sm_t *a, const sm_t *b)
 double
 sm_jaccard_index(const sm_t *a, const sm_t *b)
 {
+	uint64_t inter = 0, uni = 0;
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0.0);
-	uint64_t inter = 0, uni = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, &inter, &uni);
 	return (uni == 0 ? 0.0 : (double)inter / (double)uni);
 }
@@ -6731,11 +7961,14 @@ sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 		return (false);
 	memcpy(sorted, arr, n * sizeof(uint64_t));
 	qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
-	sm_cursor_t cur = SM_CURSOR_INIT;
-	for (size_t i = 0; i < n; i++) {
-		if (__sm_add_c(map, sorted[i], &cur) == SM_IDX_MAX) {
-			ok = false;
-			break;
+	{
+		sm_cursor_t cur = SM_CURSOR_INIT;
+		size_t i;
+		for (i = 0; i < n; i++) {
+			if (__sm_add_c(map, sorted[i], &cur) == SM_IDX_MAX) {
+				ok = false;
+				break;
+			}
 		}
 	}
 	__sm_free(sorted);
@@ -6766,32 +7999,38 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 	memcpy(sorted, arr, n * sizeof(uint64_t));
 	if (n > 1)
 		qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
-	sm_cursor_t cur = SM_CURSOR_INIT;
-	for (size_t i = 0; i < n; i++) {
-		int retries = 0;
-		sm_t *before = *map;
-		while (__sm_add_c(*map, sorted[i], &cur) == SM_IDX_MAX) {
-			if (++retries > 16) {
-				ok = false;
-				break;
+	{
+		sm_cursor_t cur = SM_CURSOR_INIT;
+		size_t i;
+		for (i = 0; i < n; i++) {
+			int retries = 0;
+			sm_t *before = *map;
+			while (__sm_add_c(*map, sorted[i], &cur) ==
+			    SM_IDX_MAX) {
+				size_t new_cap;
+				sm_t *grown;
+				if (++retries > 16) {
+					ok = false;
+					break;
+				}
+				/* ENOSPC: grow geometrically with a 4 KiB floor. */
+				new_cap = sm_get_capacity(*map) * 2;
+				if (new_cap < 4096)
+					new_cap = 4096;
+				grown = sm_set_data_size(*map, NULL, new_cap);
+				if (grown == NULL) {
+					ok = false;
+					break;
+				}
+				*map = grown;
 			}
-			/* ENOSPC: grow geometrically with a 4 KiB floor. */
-			size_t new_cap = sm_get_capacity(*map) * 2;
-			if (new_cap < 4096)
-				new_cap = 4096;
-			sm_t *grown = sm_set_data_size(*map, NULL, new_cap);
-			if (grown == NULL) {
-				ok = false;
+			if (!ok)
 				break;
-			}
-			*map = grown;
+			/* A grow may have relocated the buffer; the cursor's byte
+			 * offset is then meaningless.  Reset it when *map moved. */
+			if (*map != before)
+				__sm_cursor_reset(&cur);
 		}
-		if (!ok)
-			break;
-		/* A grow may have relocated the buffer; the cursor's byte
-		 * offset is then meaningless.  Reset it when *map moved. */
-		if (*map != before)
-			cur = (sm_cursor_t)SM_CURSOR_INIT;
 	}
 	__sm_free(sorted);
 	return (ok);
@@ -6814,10 +8053,12 @@ __sm_add_run_grow(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 void
 sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 {
+	size_t cap;
+	size_t written = 0;
+	uint64_t i = SM_IDX_MAX;
 	if (n_out == NULL)
 		return;
-	const size_t cap = (out == NULL) ? 0 : *n_out;
-	size_t written = 0;
+	cap = (out == NULL) ? 0 : *n_out;
 
 	if (out == NULL) {
 		/* Query: just count. */
@@ -6825,7 +8066,6 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 		return;
 	}
 
-	uint64_t i = SM_IDX_MAX;
 	while ((i = sm_next_member(map, i, NULL)) != SM_IDX_MAX) {
 		if (written >= cap)
 			break;
@@ -6842,9 +8082,10 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 bool
 sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
+	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi); /* empty range = OK */
-	for (uint64_t i = lo; i < hi; i++) {
+	for (i = lo; i < hi; i++) {
 		if (sm_add(map, i) == SM_IDX_MAX) {
 			return (false);
 		}
@@ -6855,9 +8096,10 @@ sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 bool
 sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
+	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
-	for (uint64_t i = lo; i < hi; i++) {
+	for (i = lo; i < hi; i++) {
 		if (sm_remove(map, i) == SM_IDX_MAX) {
 			return (false);
 		}
@@ -6868,6 +8110,16 @@ sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi)
 sm_t *
 sm_xor(const sm_t *a, const sm_t *b)
 {
+	size_t cap;
+	sm_t *r;
+	__sm_emitter_t em;
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	/* pos = left edge of the not-yet-emitted portion of the current
+	 * a/b runs; overlaps cancel, gaps in exactly one survive. */
+	uint64_t pos = 0;
+	bool have_pos = false;
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (NULL);
 	if (sm_is_empty(a))
@@ -6876,8 +8128,8 @@ sm_xor(const sm_t *a, const sm_t *b)
 		return (sm_copy(a));
 
 	/* Allocate a result big enough for the union (upper bound). */
-	const size_t cap = sm_get_capacity(a) + sm_get_capacity(b);
-	sm_t *r = sm_create(cap > 1024 ? cap : 1024);
+	cap = sm_get_capacity(a) + sm_get_capacity(b);
+	r = sm_create(cap > 1024 ? cap : 1024);
 	if (r == NULL)
 		return (NULL);
 
@@ -6886,32 +8138,27 @@ sm_xor(const sm_t *a, const sm_t *b)
 	 * size of the operands, not their popcount, so a 2^31-bit run is
 	 * one iteration rather than 2^31.  Each survivor is emitted whole
 	 * through the ordered emitter, so a giant run costs O(chunks). */
-	__sm_emitter_t em;
 	memset(&em, 0, sizeof(em));
 	em.resultp = &r;
-	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
-	/* pos = left edge of the not-yet-emitted portion of the current
-	 * a/b runs; overlaps cancel, gaps in exactly one survive. */
-	uint64_t pos = 0;
-	bool have_pos = false;
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a || have_b) {
 		/* The next boundary among the two active runs. */
 		uint64_t lo = have_a ? alo : blo;
+		bool in_a;
+		bool in_b;
+		uint64_t next = UINT64_MAX;
 		if (have_b && blo < lo)
 			lo = blo;
 		if (!have_pos || pos < lo) {
 			pos = lo;
 			have_pos = true;
 		}
-		const bool in_a = have_a && pos >= alo && pos < ahi;
-		const bool in_b = have_b && pos >= blo && pos < bhi;
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
 		/* End of the current homogeneous segment. */
-		uint64_t next = UINT64_MAX;
 		if (have_a) {
 			if (pos < alo && alo < next)
 				next = alo;
@@ -6947,6 +8194,7 @@ sm_xor(const sm_t *a, const sm_t *b)
 		sm_free(r);
 		return (NULL);
 	}
+	__sm_try_demote(r);
 	return (r);
 }
 
@@ -6971,15 +8219,20 @@ sm_andnot(const sm_t *a, const sm_t *b)
 sm_t *
 sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 {
+	size_t cap;
+	sm_t *r;
+	__sm_emitter_t em;
+	__sm_run_iter_t it;
+	uint64_t rlo = 0, rhi = 0;
 	if (map == NULL || sm_is_empty(map) || lo >= hi)
 		return (NULL);
 
 	/* Estimate result capacity from the input -- worst case is the same
 	 * shape, capped to the requested range size. */
-	size_t cap = sm_get_size((sm_t *)map) + 64;
+	cap = sm_get_size((sm_t *)map) + 64;
 	if (cap < 1024)
 		cap = 1024;
-	sm_t *r = sm_create(cap);
+	r = sm_create(cap);
 	if (r == NULL)
 		return (NULL);
 
@@ -6987,19 +8240,18 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 	 * Run-based, so a 2^31-bit run outside the window costs one
 	 * iteration rather than 2^31 bit lookups, and a run inside the
 	 * window is emitted whole in O(chunks) via the ordered emitter. */
-	__sm_emitter_t em;
 	memset(&em, 0, sizeof(em));
 	em.resultp = &r;
-	__sm_run_iter_t it;
 	__sm_run_iter_init(&it, map);
-	uint64_t rlo = 0, rhi = 0;
 	while (__sm_run_next(&it, &rlo, &rhi)) {
+		uint64_t clip_lo;
+		uint64_t clip_hi;
 		if (rhi <= lo)
 			continue;
 		if (rlo >= hi)
 			break; /* runs are ascending; nothing more overlaps */
-		const uint64_t clip_lo = rlo < lo ? lo : rlo;
-		const uint64_t clip_hi = rhi > hi ? hi : rhi;
+		clip_lo = rlo < lo ? lo : rlo;
+		clip_hi = rhi > hi ? hi : rhi;
 		if (!__sm_add_run_grow(&em, clip_lo, clip_hi)) {
 			sm_free(r);
 			return (NULL);
@@ -7016,19 +8268,20 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 		sm_free(r);
 		return (NULL);
 	}
+	__sm_try_demote(r);
 	return (r);
 }
 
 size_t
 sm_xor_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t inter = 0, uni = 0;
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0);
 	if (sm_is_empty(a))
 		return (sm_cardinality((sm_t *)b));
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-	uint64_t inter = 0, uni = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, &inter, &uni);
 	return ((size_t)(uni - inter));
 }
@@ -7093,21 +8346,22 @@ sm_hash(const sm_t *map)
 	 * sequence and so hash to the same value.  Hashing runs rather
 	 * than individual bits keeps this O(runs), so a 2^31-bit run costs
 	 * one iteration instead of 2^31. */
-	uint64_t h = 0xcbf29ce484222325ULL;
+	uint64_t h = UINT64_C(0xcbf29ce484222325);
+	__sm_run_iter_t it;
+	uint64_t lo = 0, hi = 0;
+	int b;
 	if (sm_is_empty(map))
 		return (h);
-	__sm_run_iter_t it;
 	__sm_run_iter_init(&it, map);
-	uint64_t lo = 0, hi = 0;
 	while (__sm_run_next(&it, &lo, &hi)) {
 		/* Mix both endpoints of the run (8 bytes each). */
-		for (int b = 0; b < 8; b++) {
-			h ^= (lo >> (b * 8)) & 0xffULL;
-			h *= 0x100000001b3ULL;
+		for (b = 0; b < 8; b++) {
+			h ^= (lo >> (b * 8)) & UINT64_C(0xff);
+			h *= UINT64_C(0x100000001b3);
 		}
-		for (int b = 0; b < 8; b++) {
-			h ^= (hi >> (b * 8)) & 0xffULL;
-			h *= 0x100000001b3ULL;
+		for (b = 0; b < 8; b++) {
+			h ^= (hi >> (b * 8)) & UINT64_C(0xff);
+			h *= UINT64_C(0x100000001b3);
 		}
 	}
 	return (h);
@@ -7118,6 +8372,9 @@ sm_equals(const sm_t *a, const sm_t *b)
 {
 	const bool a_empty = (a == NULL) || sm_is_empty(a);
 	const bool b_empty = (b == NULL) || sm_is_empty(b);
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
 	if (a_empty && b_empty)
 		return (true);
 	if (a_empty != b_empty)
@@ -7127,12 +8384,10 @@ sm_equals(const sm_t *a, const sm_t *b)
 	 * identical interval sequence.  Walk both run streams in lockstep
 	 * (see __sm_run_iter_t), so a 2^31-bit run is one comparison rather
 	 * than 2^31 bit lookups. */
-	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a && have_b) {
 		if (alo != blo || ahi != bhi)
 			return (false);
@@ -7153,23 +8408,29 @@ sm_compare(const sm_t *a, const sm_t *b)
 	 * advancing over shared prefixes a whole run at a time, so a
 	 * 2^31-bit run costs O(chunks) rather than O(cardinality). */
 	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	uint64_t pa, pb;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	/* pa/pb are the next unconsumed member of the current a/b run. */
-	uint64_t pa = alo, pb = blo;
+	pa = alo;
+	pb = blo;
 	while (have_a && have_b) {
+		uint64_t a_rem;
+		uint64_t b_rem;
+		uint64_t step;
 		if (pa < pb)
 			return (-1);
 		if (pa > pb)
 			return (1);
 		/* pa == pb: both runs share consecutive members up to the
 		 * shorter run's end; skip that common prefix at once. */
-		const uint64_t a_rem = ahi - pa;
-		const uint64_t b_rem = bhi - pb;
-		const uint64_t step = a_rem < b_rem ? a_rem : b_rem;
+		a_rem = ahi - pa;
+		b_rem = bhi - pb;
+		step = a_rem < b_rem ? a_rem : b_rem;
 		pa += step;
 		pb += step;
 		if (pa >= ahi) {
@@ -7191,33 +8452,36 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 {
 	bool a_subset_b = true; /* every bit in a is in b */
 	bool b_subset_a = true; /* every bit in b is in a */
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	/* pos = left edge of the not-yet-classified region. */
+	uint64_t pos = 0;
+	bool have_pos = false;
 
 	/* Interval sweep over the two run streams (see __sm_run_iter_t): a
 	 * span present in exactly one map witnesses that map is not a
 	 * subset of the other.  Once both witnesses fire the answer is
 	 * DIFFERENT.  Run-based, so a 2^31-bit run costs O(chunks) rather
 	 * than O(cardinality). */
-	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
-	/* pos = left edge of the not-yet-classified region. */
-	uint64_t pos = 0;
-	bool have_pos = false;
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a || have_b) {
 		uint64_t lo = have_a ? alo : blo;
+		bool in_a;
+		bool in_b;
+		uint64_t next = UINT64_MAX;
 		if (have_b && blo < lo)
 			lo = blo;
 		if (!have_pos || pos < lo) {
 			pos = lo;
 			have_pos = true;
 		}
-		const bool in_a = have_a && pos >= alo && pos < ahi;
-		const bool in_b = have_b && pos >= blo && pos < bhi;
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
 		/* End of the current homogeneous segment. */
-		uint64_t next = UINT64_MAX;
 		if (have_a) {
 			if (pos < alo && alo < next)
 				next = alo;
@@ -7252,9 +8516,10 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 uint64_t
 sm_pop_first(sm_t *map)
 {
+	uint64_t lowest;
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t lowest = sm_next_member(map, SM_IDX_MAX, NULL);
+	lowest = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (lowest == SM_IDX_MAX)
 		return (SM_IDX_MAX);
 	if (sm_remove(map, lowest) == SM_IDX_MAX) {
@@ -7268,9 +8533,10 @@ sm_pop_first(sm_t *map)
 uint64_t
 sm_pop_last(sm_t *map)
 {
+	uint64_t highest;
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t highest = sm_prev_member(map, SM_IDX_MAX, NULL);
+	highest = sm_prev_member(map, SM_IDX_MAX, NULL);
 	if (highest == SM_IDX_MAX)
 		return (SM_IDX_MAX);
 	if (sm_remove(map, highest) == SM_IDX_MAX)
@@ -7296,12 +8562,13 @@ sm_pop_last(sm_t *map)
 static sm_t *
 __sm_replace_buffer(sm_t *dst, sm_t *result)
 {
+	size_t result_size;
 	if (result == NULL) {
 		/* Empty result -- clear dst. */
 		sm_clear(dst);
 		return (dst);
 	}
-	const size_t result_size = result->m_data_used;
+	result_size = result->m_data_used;
 	if (__sm_cap(dst) < result_size) {
 		sm_t *grown = sm_set_data_size(dst, NULL, result_size + 64);
 		if (grown == NULL) {
@@ -7313,6 +8580,7 @@ __sm_replace_buffer(sm_t *dst, sm_t *result)
 	memcpy(dst->m_data, result->m_data, result_size);
 	dst->m_data_used = result_size;
 	sm_free(result);
+	__sm_try_demote(dst);
 	return (dst);
 }
 
@@ -7378,9 +8646,10 @@ sm_xor_inplace(sm_t *dst, const sm_t *src)
 bool
 sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
+	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
-	for (uint64_t i = lo; i < hi; i++) {
+	for (i = lo; i < hi; i++) {
 		const bool was_set = sm_contains(map, i, NULL);
 		if (sm_assign(map, i, !was_set) == SM_IDX_MAX) {
 			return (false);
@@ -7392,6 +8661,13 @@ sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 bool
 sm_validate(const sm_t *map)
 {
+	size_t count;
+	uint8_t *p;
+	uint8_t *end;
+	__sm_idx_t prev_start = 0;
+	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
+	bool first = true;
+	size_t i;
 	if (map == NULL)
 		return (true);
 	if (map->m_data == NULL && __sm_cap(map) > 0)
@@ -7404,21 +8680,39 @@ sm_validate(const sm_t *map)
 	if (map->m_data_used < SM_SIZEOF_OVERHEAD)
 		return (false);
 
-	const size_t count = __sm_get_chunk_count(map);
+	/* Small-set mode: the header word's top bit is set and the low
+	 * bits hold the word count.  Valid iff nwords <= the span cap and
+	 * m_data_used exactly covers the header plus that many words. */
+	if (__sm_is_small(map)) {
+		const size_t nwords = __sm_small_nwords(map);
+		if (nwords > SM_SMALL_MAX_WORDS)
+			return (false);
+		if (map->m_data_used !=
+		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t))
+			return (false);
+		/* A trailing all-zero word would mean a non-canonical form
+		 * (remove trims them); reject so equal sets have one encoding. */
+		if (nwords > 0 && __sm_small_words(map)[nwords - 1] == 0)
+			return (false);
+		return (true);
+	}
+
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (map->m_data_used == SM_SIZEOF_OVERHEAD);
 	}
 
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	uint8_t *end = map->m_data + map->m_data_used;
-	__sm_idx_t prev_start = 0;
-	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
-	bool first = true;
-	for (size_t i = 0; i < count; i++) {
+	p = __sm_get_chunk_data(map, 0);
+	end = map->m_data + map->m_data_used;
+	for (i = 0; i < count; i++) {
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		size_t chunk_size;
+		size_t capacity;
+		uint64_t chunk_end;
 		if (p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) > end) {
 			return (false);
 		}
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 		if (!first && start <= prev_start) {
 			return (false);
 		}
@@ -7426,13 +8720,12 @@ sm_validate(const sm_t *map)
 		if (start % SM_CHUNK_MAX_CAPACITY != 0) {
 			return (false);
 		}
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (p + SM_SIZEOF_OVERHEAD + chunk_size > end) {
 			return (false);
 		}
-		const size_t capacity = __sm_chunk_get_capacity(&chunk);
+		capacity = __sm_chunk_get_capacity(&chunk);
 		/* (a) an RLE chunk's run length cannot exceed its capacity. */
 		if (__sm_chunk_is_rle(&chunk) &&
 		    __sm_chunk_rle_get_length(&chunk) > capacity) {
@@ -7443,7 +8736,7 @@ sm_validate(const sm_t *map)
 		 * (start + capacity wraps to 0) is legal -- it holds the top
 		 * bits [2^64 - capacity, 2^64).  Only a wrap to a nonzero end
 		 * is an overflow. */
-		const uint64_t chunk_end = start + capacity;
+		chunk_end = start + capacity;
 		if (chunk_end != 0 && chunk_end < start) {
 			return (false);
 		}
@@ -7473,41 +8766,63 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 	if (map == NULL)
 		return;
 
+	if (__sm_is_small(map)) {
+		/* Report the small map's real footprint; derive the chunk
+		 * breakdown from a materialized view (it would occupy those
+		 * chunks were it promoted). */
+		sm_t *m = __sm_materialize(map);
+		if (m != NULL) {
+			sm_statistics(m, stats);
+			sm_free(m);
+		}
+		stats->bytes_used = sm_get_size((sm_t *)map);
+		stats->bytes_capacity = sm_get_capacity(map);
+		return;
+	}
+
 	stats->bytes_used = sm_get_size((sm_t *)map);
 	stats->bytes_capacity = sm_get_capacity(map);
 
-	const size_t count = __sm_get_chunk_count(map);
-	stats->chunks_total = count;
-	if (count == 0)
-		return;
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		uint8_t *p;
+		size_t i;
+		stats->chunks_total = count;
+		if (count == 0)
+			return;
 
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	for (size_t i = 0; i < count; i++) {
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
-		if (__sm_chunk_is_rle(&chunk)) {
-			stats->chunks_rle++;
-			stats->bits_in_rle += __sm_chunk_rle_get_length(&chunk);
-		} else {
-			stats->chunks_sparse++;
-			const __sm_bitvec_t desc = chunk.m_data[0];
-			size_t pos = 1;
-			for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
-				const size_t flags =
-				    SM_CHUNK_GET_FLAGS(desc, v);
-				if (flags == SM_PAYLOAD_ONES) {
-					stats->bits_in_sparse +=
-					    SM_BITS_PER_VECTOR;
-				} else if (flags == SM_PAYLOAD_MIXED) {
-					stats->bits_in_sparse +=
-					    (uint64_t)SM_POPCOUNT64(
-					        chunk.m_data[pos]);
-					pos++;
+		p = __sm_get_chunk_data(map, 0);
+		for (i = 0; i < count; i++) {
+			__sm_chunk_t chunk;
+			size_t chunk_size;
+			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+			chunk_size = __sm_chunk_get_size(&chunk);
+			if (__sm_chunk_is_rle(&chunk)) {
+				stats->chunks_rle++;
+				stats->bits_in_rle +=
+				    __sm_chunk_rle_get_length(&chunk);
+			} else {
+				const __sm_bitvec_t desc = chunk.m_data[0];
+				size_t pos = 1;
+				size_t v;
+				stats->chunks_sparse++;
+				for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+					const size_t flags =
+					    SM_CHUNK_GET_FLAGS(desc, v);
+					if (flags == SM_PAYLOAD_ONES) {
+						stats->bits_in_sparse +=
+						    SM_BITS_PER_VECTOR;
+					} else if (flags ==
+					    SM_PAYLOAD_MIXED) {
+						stats->bits_in_sparse +=
+						    (uint64_t)SM_POPCOUNT64(
+						        chunk.m_data[pos]);
+						pos++;
+					}
 				}
 			}
+			p += SM_SIZEOF_OVERHEAD + chunk_size;
 		}
-		p += SM_SIZEOF_OVERHEAD + chunk_size;
 	}
 	stats->bits_set = stats->bits_in_rle + stats->bits_in_sparse;
 	stats->bytes_per_set_bit = stats->bits_set == 0 ?
@@ -7518,12 +8833,13 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 sm_t *
 sm_shrink_to_fit(sm_t *map)
 {
+	size_t target;
 	if (map == NULL)
 		return (NULL);
 	if (__sm_kind(map) == SM_WRAPPED)
 		return (map);
 
-	const size_t target =
+	target =
 	    map->m_data_used > 0 ? map->m_data_used : SM_SIZEOF_OVERHEAD;
 	if (target == __sm_cap(map))
 		return (map);
@@ -7539,6 +8855,9 @@ sm_shrink_to_fit(sm_t *map)
 #define SM_WIRE_VERSION    2u
 #define SM_WIRE_HEADER_LEN 16u
 #define SM_WIRE_FLAG_LE    0x01u
+/* Reserved header byte out[6]: a documented mirror of the body's own
+ * small-set marker (the body's header top bit is authoritative). */
+#define SM_WIRE_FLAG_SMALL 0x01u
 
 static bool
 __sm_host_is_little_endian(void)
@@ -7558,23 +8877,25 @@ sm_serialized_size(const sm_t *map)
 size_t
 sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 {
+	size_t needed;
+	uint64_t cardinality;
+	uint8_t flags;
+	uint32_t magic = SM_WIRE_MAGIC;
 	if (out == NULL)
 		return (0);
-	const size_t needed = sm_serialized_size(map);
+	needed = sm_serialized_size(map);
 	if (out_size < needed)
 		return (0);
 
-	const uint64_t cardinality =
+	cardinality =
 	    (map == NULL || sm_is_empty(map)) ? 0 : sm_cardinality((sm_t *)map);
-	const uint8_t flags =
-	    __sm_host_is_little_endian() ? SM_WIRE_FLAG_LE : 0;
+	flags = __sm_host_is_little_endian() ? SM_WIRE_FLAG_LE : 0;
 
 	/* Header: writes via memcpy so it works on strict-alignment cpus. */
-	const uint32_t magic = SM_WIRE_MAGIC;
 	memcpy(out + 0, &magic, 4);
 	out[4] = SM_WIRE_VERSION;
 	out[5] = flags;
-	out[6] = 0;
+	out[6] = (map != NULL && __sm_is_small(map)) ? SM_WIRE_FLAG_SMALL : 0;
 	out[7] = 0;
 	memcpy(out + 8, &cardinality, 8);
 
@@ -7592,29 +8913,35 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 sm_t *
 sm_deserialize(const uint8_t *in, size_t n)
 {
+	uint32_t magic;
+	uint8_t version;
+	uint8_t flags;
+	bool wire_is_le;
+	bool host_is_le;
+	size_t body_len;
+	sm_t *map;
 	if (in == NULL || n < SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD) {
 		return (NULL);
 	}
-	uint32_t magic;
 	memcpy(&magic, in + 0, 4);
 	if (magic != SM_WIRE_MAGIC)
 		return (NULL);
 
-	const uint8_t version = in[4];
-	const uint8_t flags = in[5];
+	version = in[4];
+	flags = in[5];
 	if (version != SM_WIRE_VERSION)
 		return (NULL);
 
-	const bool wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
-	const bool host_is_le = __sm_host_is_little_endian();
+	wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
+	host_is_le = __sm_host_is_little_endian();
 	if (wire_is_le != host_is_le) {
 		/* Cross-endian read not yet supported. */
 		return (NULL);
 	}
 
 	/* Body: starts at offset SM_WIRE_HEADER_LEN. */
-	const size_t body_len = n - SM_WIRE_HEADER_LEN;
-	sm_t *map = sm_create(body_len + 64);
+	body_len = n - SM_WIRE_HEADER_LEN;
+	map = sm_create(body_len + 64);
 	if (map == NULL)
 		return (NULL);
 
@@ -7640,11 +8967,11 @@ sm_deserialize(const uint8_t *in, size_t n)
 static bool
 __sm_copy_chunk_to_result(sm_t **resultp, const uint8_t *chunk_ptr)
 {
-	const __sm_chunk_t chunk = { .m_data =
-		                         (__sm_bitvec_unaligned_t *)(chunk_ptr +
-		                             SM_SIZEOF_OVERHEAD) };
-	const size_t chunk_bytes =
-	    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+	__sm_chunk_t chunk;
+	size_t chunk_bytes;
+	chunk.m_data =
+	    (__sm_bitvec_unaligned_t *)(chunk_ptr + SM_SIZEOF_OVERHEAD);
+	chunk_bytes = SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 	if (!__sm_ensure_capacity(resultp, chunk_bytes)) {
 		return (false);
 	}
@@ -7669,20 +8996,37 @@ __sm_copy_chunk_to_result(sm_t **resultp, const uint8_t *chunk_ptr)
 sm_t *
 sm_intersection(const sm_t *a, const sm_t *b)
 {
+	size_t a_count;
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
 	if (a == NULL || b == NULL) {
 		return (NULL);
 	}
+	if (__sm_is_small(a) || __sm_is_small(b)) {
+		bool oa, ob;
+		const sm_t *va = __sm_chunk_view(a, &oa);
+		const sm_t *vb = __sm_chunk_view(b, &ob);
+		sm_t *r = (va == NULL || vb == NULL) ? NULL
+		                                     : sm_intersection(va, vb);
+		if (oa) sm_free((sm_t *)va);
+		if (ob) sm_free((sm_t *)vb);
+		return (r);
+	}
 
-	const size_t a_count = __sm_get_chunk_count(a);
-	const size_t b_count = __sm_get_chunk_count(b);
+	a_count = __sm_get_chunk_count(a);
+	b_count = __sm_get_chunk_count(b);
 
 	if (a_count == 0 || b_count == 0) {
 		return (NULL);
 	}
 
-	size_t cap = a->m_data_used;
+	cap = a->m_data_used;
 	{
 		size_t cap_b = b->m_data_used;
 		if (cap_b > cap)
@@ -7691,34 +9035,40 @@ sm_intersection(const sm_t *a, const sm_t *b)
 	if (cap < 1024)
 		cap = 1024;
 
-	sm_t *result = sparsemap(cap);
+	result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
 
-	uint8_t *ap = __sm_get_chunk_data(a, 0);
-	uint8_t *bp = __sm_get_chunk_data(b, 0);
-	size_t ai = 0, bi = 0;
+	ap = __sm_get_chunk_data(a, 0);
+	bp = __sm_get_chunk_data(b, 0);
 
 	while (ai < a_count && bi < b_count) {
 		/* Read chunk a metadata */
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
-		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		const size_t a_cap = __sm_chunk_get_capacity(&a_chunk);
-		const size_t a_size = __sm_chunk_get_size(&a_chunk);
-		const size_t a_end =
-		    (size_t)a_start + a_cap; /* one past last bit */
-
-		/* Read chunk b metadata */
+		bool a_rle;
+		size_t a_cap;
+		size_t a_size;
+		size_t a_end;
 		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t b_chunk;
+		bool b_rle;
+		size_t b_cap;
+		size_t b_size;
+		size_t b_end;
+		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
+		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+		a_cap = __sm_chunk_get_capacity(&a_chunk);
+		a_size = __sm_chunk_get_size(&a_chunk);
+		a_end = (size_t)a_start + a_cap; /* one past last bit */
+
+		/* Read chunk b metadata */
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-		const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-		const size_t b_cap = __sm_chunk_get_capacity(&b_chunk);
-		const size_t b_size = __sm_chunk_get_size(&b_chunk);
-		const size_t b_end = (size_t)b_start + b_cap;
+		b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+		b_cap = __sm_chunk_get_capacity(&b_chunk);
+		b_size = __sm_chunk_get_size(&b_chunk);
+		b_end = (size_t)b_start + b_cap;
 
 		/* Prefetch next chunks */
 		if (ai + 1 < a_count) {
@@ -7747,21 +9097,22 @@ sm_intersection(const sm_t *a, const sm_t *b)
 			/* Word-level AND of two aligned sparse chunks */
 			__sm_bitvec_t aw[32], bw[32];
 			int ac[32], bc[32];
+			__sm_bitvec_t rw[32];
+			int rc[32];
+			__sm_bitvec_t desc;
+			__sm_bitvec_t vecs[32];
+			int nvecs;
+			int i;
 			__sm_expand_sparse_chunk(&a_chunk, aw, ac);
 			__sm_expand_sparse_chunk(&b_chunk, bw, bc);
 
-			__sm_bitvec_t rw[32];
-			int rc[32];
 			__sm_words_and(rw, aw, bw);
-			for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+			for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 				rc[i] = (ac[i] && bc[i]) ? 1 : 0;
 				if (!rc[i])
 					rw[i] = 0;
 			}
 
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[32];
-			int nvecs;
 			if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs,
 			        &nvecs)) {
 				if (!__sm_append_sparse_chunk(&result, a_start,
@@ -7802,6 +9153,12 @@ sm_intersection(const sm_t *a, const sm_t *b)
 			    bw[SM_FLAGS_PER_INDEX];
 			int ac[SM_FLAGS_PER_INDEX], bc[SM_FLAGS_PER_INDEX];
 			__sm_idx_t result_start;
+			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
+			int rc[SM_FLAGS_PER_INDEX];
+			__sm_bitvec_t desc;
+			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+			int nvecs;
+			int i;
 
 			if (!a_rle && !b_rle) {
 				/* Both sparse but misaligned (shouldn't normally happen) */
@@ -7823,25 +9180,20 @@ sm_intersection(const sm_t *a, const sm_t *b)
 			} else {
 				/* Both RLE: already handled above, should not reach here */
 				result_start = a_start;
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					aw[i] = bw[i] = 0;
 					ac[i] = bc[i] = 0;
 				}
 			}
 
-			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
-			int rc[SM_FLAGS_PER_INDEX];
 			__sm_words_and(rw, aw, bw);
-			for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+			for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 				rc[i] = (ac[i] && bc[i]) ? 1 : 0;
 				if (!rc[i])
 					rw[i] = 0;
 			}
 
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
-			int nvecs;
 			if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs,
 			        &nvecs)) {
 				if (!__sm_append_sparse_chunk(&result,
@@ -7868,6 +9220,7 @@ sm_intersection(const sm_t *a, const sm_t *b)
 		return (NULL);
 	}
 
+	__sm_try_demote(result);
 	return (result);
 }
 
@@ -7881,6 +9234,16 @@ static bool
 __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
     __sm_idx_t chunk_start, size_t from, size_t to)
 {
+	__sm_bitvec_t words[SM_FLAGS_PER_INDEX];
+	int cap_flags[SM_FLAGS_PER_INDEX];
+	size_t rel_from;
+	size_t rel_to;
+	int start_word;
+	int end_word;
+	__sm_bitvec_t desc;
+	__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+	int nvecs;
+	int i;
 	if (from >= to)
 		return (true);
 
@@ -7899,19 +9262,17 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 	}
 
 	/* Sparse: expand, mask to [from, to) range, encode and append */
-	__sm_bitvec_t words[SM_FLAGS_PER_INDEX];
-	int cap_flags[SM_FLAGS_PER_INDEX];
 	__sm_expand_sparse_chunk(chunk, words, cap_flags);
 
 	/* Mask out bits outside [from, to) range relative to chunk_start */
-	const size_t rel_from = from - (size_t)chunk_start;
-	const size_t rel_to = to - (size_t)chunk_start;
-	const int start_word = (int)(rel_from / SM_BITS_PER_VECTOR);
-	const int end_word =
+	rel_from = from - (size_t)chunk_start;
+	rel_to = to - (size_t)chunk_start;
+	start_word = (int)(rel_from / SM_BITS_PER_VECTOR);
+	end_word =
 	    (int)((rel_to + SM_BITS_PER_VECTOR - 1) / SM_BITS_PER_VECTOR);
 
 	/* Zero words entirely before the range */
-	for (int i = 0; i < start_word && i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < start_word && i < (int)SM_FLAGS_PER_INDEX; i++) {
 		words[i] = 0;
 		cap_flags[i] = 0;
 	}
@@ -7925,7 +9286,7 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 	}
 
 	/* Zero words entirely after the range */
-	for (int i = end_word; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = end_word; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		words[i] = 0;
 		cap_flags[i] = 0;
 	}
@@ -7939,9 +9300,6 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 		}
 	}
 
-	__sm_bitvec_t desc;
-	__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
-	int nvecs;
 	if (__sm_encode_sparse_chunk(words, cap_flags, &desc, vecs, &nvecs)) {
 		if (!__sm_append_sparse_chunk(resultp, chunk_start, desc, vecs,
 		        nvecs)) {
@@ -7961,13 +9319,31 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 sm_t *
 sm_difference(const sm_t *a, const sm_t *b)
 {
+	size_t a_count;
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
 	if (a == NULL) {
 		return (NULL);
 	}
+	if (__sm_is_small(a) || __sm_is_small(b)) {
+		bool oa, ob;
+		const sm_t *va = __sm_chunk_view(a, &oa);
+		const sm_t *vb = __sm_chunk_view(b, &ob);
+		sm_t *r = (va == NULL || (b != NULL && vb == NULL))
+		    ? NULL
+		    : sm_difference(va, vb);
+		if (oa) sm_free((sm_t *)va);
+		if (ob) sm_free((sm_t *)vb);
+		return (r);
+	}
 
-	const size_t a_count = __sm_get_chunk_count(a);
+	a_count = __sm_get_chunk_count(a);
 	if (a_count == 0) {
 		return (NULL);
 	}
@@ -7977,30 +9353,36 @@ sm_difference(const sm_t *a, const sm_t *b)
 		return (sm_copy(a));
 	}
 
-	const size_t b_count = __sm_get_chunk_count(b);
+	b_count = __sm_get_chunk_count(b);
 
-	size_t cap = a->m_data_used;
+	cap = a->m_data_used;
 	if (cap < 1024)
 		cap = 1024;
 
-	sm_t *result = sparsemap(cap);
+	result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
 
-	uint8_t *ap = __sm_get_chunk_data(a, 0);
-	uint8_t *bp = __sm_get_chunk_data(b, 0);
-	size_t ai = 0, bi = 0;
+	ap = __sm_get_chunk_data(a, 0);
+	bp = __sm_get_chunk_data(b, 0);
 
 	while (ai < a_count) {
 		/* Read chunk a metadata */
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
+		size_t a_cursor;
+		uint8_t *bp_save;
+		size_t bi_save;
+		bool a_rle;
+		size_t a_cap_bits;
+		size_t a_size;
+		size_t a_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
-		const size_t a_size = __sm_chunk_get_size(&a_chunk);
-		const size_t a_end = (size_t)a_start + a_cap_bits;
+		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+		a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
+		a_size = __sm_chunk_get_size(&a_chunk);
+		a_end = (size_t)a_start + a_cap_bits;
 
 		/* Prefetch next a chunk */
 		if (ai + 1 < a_count) {
@@ -8019,23 +9401,28 @@ sm_difference(const sm_t *a, const sm_t *b)
 		}
 
 		/* Cursor: tracks how far into this a chunk we've processed */
-		size_t a_cursor = (size_t)a_start;
+		a_cursor = (size_t)a_start;
 
 		/* Save b state so we can iterate b within this a chunk */
-		uint8_t *bp_save = bp;
-		size_t bi_save = bi;
+		bp_save = bp;
+		bi_save = bi;
 
 		/* Process all b chunks that overlap with this a chunk */
 		while (bi < b_count) {
 			const __sm_idx_t b_start =
 			    __sm_load_idx((const uint8_t *)bp);
 			__sm_chunk_t b_chunk;
+			bool b_rle;
+			size_t b_cap_bits;
+			size_t ov_start;
+			size_t ov_end;
+			size_t b_size;
+			size_t b_end;
 			__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-			const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-			const size_t b_cap_bits =
-			    __sm_chunk_get_capacity(&b_chunk);
-			const size_t b_size = __sm_chunk_get_size(&b_chunk);
-			const size_t b_end = (size_t)b_start + b_cap_bits;
+			b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+			b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
+			b_size = __sm_chunk_get_size(&b_chunk);
+			b_end = (size_t)b_start + b_cap_bits;
 
 			/* b is past a: no more overlaps for this a chunk */
 			if (a_end <= (size_t)b_start)
@@ -8049,10 +9436,10 @@ sm_difference(const sm_t *a, const sm_t *b)
 			}
 
 			/* Overlap region */
-			const size_t ov_start = (size_t)b_start > a_cursor ?
+			ov_start = (size_t)b_start > a_cursor ?
 			    (size_t)b_start :
 			    a_cursor;
-			const size_t ov_end = a_end < b_end ? a_end : b_end;
+			ov_end = a_end < b_end ? a_end : b_end;
 
 			/* Emit a's surviving bits in the gap [a_cursor, ov_start) */
 			if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle,
@@ -8115,13 +9502,17 @@ sm_difference(const sm_t *a, const sm_t *b)
 			} else if (!a_rle && !b_rle && a_start == b_start) {
 				__sm_bitvec_t aw[32], bw[32];
 				int ac[32], bc[32];
+				__sm_bitvec_t rw[32];
+				int rc[32];
+				__sm_bitvec_t desc;
+				__sm_bitvec_t vecs[32];
+				int nvecs;
+				int i;
 				__sm_expand_sparse_chunk(&a_chunk, aw, ac);
 				__sm_expand_sparse_chunk(&b_chunk, bw, bc);
 
-				__sm_bitvec_t rw[32];
-				int rc[32];
 				__sm_words_andnot(rw, aw, bw);
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					if (ac[i]) {
 						if (!bc[i])
@@ -8134,9 +9525,6 @@ sm_difference(const sm_t *a, const sm_t *b)
 					}
 				}
 
-				__sm_bitvec_t desc;
-				__sm_bitvec_t vecs[32];
-				int nvecs;
 				if (__sm_encode_sparse_chunk(rw, rc, &desc,
 				        vecs, &nvecs)) {
 					if (!__sm_append_sparse_chunk(&result,
@@ -8154,6 +9542,12 @@ sm_difference(const sm_t *a, const sm_t *b)
 				int ac2[SM_FLAGS_PER_INDEX],
 				    bc2[SM_FLAGS_PER_INDEX];
 				__sm_idx_t result_start;
+				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
+				int rc2[SM_FLAGS_PER_INDEX];
+				__sm_bitvec_t desc2;
+				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
+				int nvecs2;
+				int i;
 
 				if (a_rle && !b_rle) {
 					/* a is RLE, b is sparse */
@@ -8179,17 +9573,15 @@ sm_difference(const sm_t *a, const sm_t *b)
 				} else {
 					/* Both RLE: should not reach here (handled by emit_chunk_bits path) */
 					result_start = a_start;
-					for (int i = 0;
+					for (i = 0;
 					     i < (int)SM_FLAGS_PER_INDEX; i++) {
 						aw2[i] = bw2[i] = 0;
 						ac2[i] = bc2[i] = 0;
 					}
 				}
 
-				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
-				int rc2[SM_FLAGS_PER_INDEX];
 				__sm_words_andnot(rw2, aw2, bw2);
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					if (ac2[i]) {
 						if (!bc2[i])
@@ -8202,9 +9594,6 @@ sm_difference(const sm_t *a, const sm_t *b)
 					}
 				}
 
-				__sm_bitvec_t desc2;
-				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
-				int nvecs2;
 				if (__sm_encode_sparse_chunk(rw2, rc2, &desc2,
 				        vecs2, &nvecs2)) {
 					if (!__sm_append_sparse_chunk(&result,
@@ -8251,6 +9640,7 @@ sm_difference(const sm_t *a, const sm_t *b)
 		return (NULL);
 	}
 
+	__sm_try_demote(result);
 	return (result);
 }
 
@@ -8274,14 +9664,39 @@ sm_difference(const sm_t *a, const sm_t *b)
 sm_t *
 sm_union(const sm_t *a, const sm_t *b)
 {
+	size_t a_count;
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
+	/* Cursors track how far into each current chunk we've already emitted.
+     A value of 0 means "fresh chunk" (reset after advancing).  When a
+     chunk is partially consumed, the cursor holds the absolute bit
+     position up to which bits have been emitted. */
+	size_t a_cursor = 0;
+	size_t b_cursor = 0;
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
 	if (a == NULL && b == NULL) {
 		return (NULL);
 	}
+	if (__sm_is_small(a) || __sm_is_small(b)) {
+		bool oa, ob;
+		const sm_t *va = __sm_chunk_view(a, &oa);
+		const sm_t *vb = __sm_chunk_view(b, &ob);
+		sm_t *r = ((a != NULL && va == NULL) ||
+		              (b != NULL && vb == NULL))
+		    ? NULL
+		    : sm_union(va, vb);
+		if (oa) sm_free((sm_t *)va);
+		if (ob) sm_free((sm_t *)vb);
+		return (r);
+	}
 
-	const size_t a_count = a ? __sm_get_chunk_count(a) : 0;
-	const size_t b_count = b ? __sm_get_chunk_count(b) : 0;
+	a_count = a ? __sm_get_chunk_count(a) : 0;
+	b_count = b ? __sm_get_chunk_count(b) : 0;
 
 	if (a_count == 0 && b_count == 0) {
 		return (NULL);
@@ -8294,48 +9709,48 @@ sm_union(const sm_t *a, const sm_t *b)
 	}
 
 	/* Allocate result with combined data size (worst case: no overlap). */
-	size_t cap = a->m_data_used + b->m_data_used;
+	cap = a->m_data_used + b->m_data_used;
 	if (cap < 1024)
 		cap = 1024;
 
-	sm_t *result = sparsemap(cap);
+	result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
 
-	uint8_t *ap = __sm_get_chunk_data(a, 0);
-	uint8_t *bp = __sm_get_chunk_data(b, 0);
-	size_t ai = 0, bi = 0;
-
-	/* Cursors track how far into each current chunk we've already emitted.
-     A value of 0 means "fresh chunk" (reset after advancing).  When a
-     chunk is partially consumed, the cursor holds the absolute bit
-     position up to which bits have been emitted. */
-	size_t a_cursor = 0;
-	size_t b_cursor = 0;
+	ap = __sm_get_chunk_data(a, 0);
+	bp = __sm_get_chunk_data(b, 0);
 
 	while (ai < a_count && bi < b_count) {
 		/* ---- Read chunk a metadata ---- */
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
+		bool a_rle;
+		size_t a_cap_bits;
+		size_t a_size;
+		size_t a_end;
+		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
+		__sm_chunk_t b_chunk;
+		bool b_rle;
+		size_t b_cap_bits;
+		size_t b_size;
+		size_t b_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
-		const size_t a_size = __sm_chunk_get_size(&a_chunk);
-		const size_t a_end = (size_t)a_start + a_cap_bits;
+		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+		a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
+		a_size = __sm_chunk_get_size(&a_chunk);
+		a_end = (size_t)a_start + a_cap_bits;
 
 		/* Ensure cursor is at least at chunk start. */
 		if (a_cursor < (size_t)a_start)
 			a_cursor = (size_t)a_start;
 
 		/* ---- Read chunk b metadata ---- */
-		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
-		__sm_chunk_t b_chunk;
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-		const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-		const size_t b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
-		const size_t b_size = __sm_chunk_get_size(&b_chunk);
-		const size_t b_end = (size_t)b_start + b_cap_bits;
+		b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+		b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
+		b_size = __sm_chunk_get_size(&b_chunk);
+		b_end = (size_t)b_start + b_cap_bits;
 
 		if (b_cursor < (size_t)b_start)
 			b_cursor = (size_t)b_start;
@@ -8379,6 +9794,7 @@ sm_union(const sm_t *a, const sm_t *b)
 		}
 
 		/* ---- Chunks overlap.  Compute overlap bounds. ---- */
+		{
 		const size_t ov_start =
 		    a_cursor > b_cursor ? a_cursor : b_cursor;
 		const size_t ov_end = a_end < b_end ? a_end : b_end;
@@ -8390,6 +9806,12 @@ sm_union(const sm_t *a, const sm_t *b)
 			__sm_bitvec_t aw[SM_FLAGS_PER_INDEX],
 			    bw[SM_FLAGS_PER_INDEX];
 			int ac[SM_FLAGS_PER_INDEX], bc[SM_FLAGS_PER_INDEX];
+			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
+			int rc[SM_FLAGS_PER_INDEX];
+			__sm_bitvec_t desc;
+			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+			int nvecs;
+			int i;
 			__sm_expand_sparse_chunk(&a_chunk, aw, ac);
 			__sm_expand_sparse_chunk(&b_chunk, bw, bc);
 
@@ -8397,13 +9819,13 @@ sm_union(const sm_t *a, const sm_t *b)
 			if (a_cursor > (size_t)a_start) {
 				const size_t rel = a_cursor - (size_t)a_start;
 				const int sw = (int)(rel / SM_BITS_PER_VECTOR);
-				for (int i = 0;
+				const size_t sb = rel % SM_BITS_PER_VECTOR;
+				for (i = 0;
 				     i < sw && i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					aw[i] = 0;
 					ac[i] = 0;
 				}
-				const size_t sb = rel % SM_BITS_PER_VECTOR;
 				if (sb > 0 && sw < (int)SM_FLAGS_PER_INDEX) {
 					aw[sw] &= ~((__sm_bitvec_t)0) << sb;
 				}
@@ -8413,28 +9835,23 @@ sm_union(const sm_t *a, const sm_t *b)
 			if (b_cursor > (size_t)b_start) {
 				const size_t rel = b_cursor - (size_t)b_start;
 				const int sw = (int)(rel / SM_BITS_PER_VECTOR);
-				for (int i = 0;
+				const size_t sb = rel % SM_BITS_PER_VECTOR;
+				for (i = 0;
 				     i < sw && i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					bw[i] = 0;
 					bc[i] = 0;
 				}
-				const size_t sb = rel % SM_BITS_PER_VECTOR;
 				if (sb > 0 && sw < (int)SM_FLAGS_PER_INDEX) {
 					bw[sw] &= ~((__sm_bitvec_t)0) << sb;
 				}
 			}
 
-			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
-			int rc[SM_FLAGS_PER_INDEX];
 			__sm_words_or(rw, aw, bw);
-			for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+			for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 				rc[i] = (ac[i] || bc[i]) ? 1 : 0;
 			}
 
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
-			int nvecs;
 			if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs,
 			        &nvecs)) {
 				if (!__sm_append_sparse_chunk(&result, a_start,
@@ -8564,6 +9981,12 @@ sm_union(const sm_t *a, const sm_t *b)
 				int ac2[SM_FLAGS_PER_INDEX],
 				    bc2[SM_FLAGS_PER_INDEX];
 				__sm_idx_t result_start;
+				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
+				int rc2[SM_FLAGS_PER_INDEX];
+				__sm_bitvec_t desc2;
+				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
+				int nvecs2;
+				int i;
 
 				if (a_rle && !b_rle) {
 					__sm_expand_sparse_chunk(&b_chunk, bw2,
@@ -8586,24 +10009,19 @@ sm_union(const sm_t *a, const sm_t *b)
 				} else {
 					/* Both RLE: handled above, should not reach here */
 					result_start = a_start;
-					for (int i = 0;
+					for (i = 0;
 					     i < (int)SM_FLAGS_PER_INDEX; i++) {
 						aw2[i] = bw2[i] = 0;
 						ac2[i] = bc2[i] = 0;
 					}
 				}
 
-				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
-				int rc2[SM_FLAGS_PER_INDEX];
 				__sm_words_or(rw2, aw2, bw2);
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					rc2[i] = (ac2[i] || bc2[i]) ? 1 : 0;
 				}
 
-				__sm_bitvec_t desc2;
-				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
-				int nvecs2;
 				if (__sm_encode_sparse_chunk(rw2, rc2, &desc2,
 				        vecs2, &nvecs2)) {
 					if (!__sm_append_sparse_chunk(&result,
@@ -8626,14 +10044,16 @@ sm_union(const sm_t *a, const sm_t *b)
 				}
 			}
 		}
+		}
 	}
 
 	/* Copy remaining chunks from whichever map is not exhausted. */
 	while (ai < a_count) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t c;
+		size_t sz;
 		__sm_chunk_init(&c, ap + SM_SIZEOF_OVERHEAD);
-		const size_t sz = __sm_chunk_get_size(&c);
+		sz = __sm_chunk_get_size(&c);
 		if (a_cursor > 0 && a_cursor > (size_t)start) {
 			/* Partially consumed: emit only remaining bits. */
 			const bool rle = SM_IS_CHUNK_RLE(&c);
@@ -8652,8 +10072,9 @@ sm_union(const sm_t *a, const sm_t *b)
 	while (bi < b_count) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t c;
+		size_t sz;
 		__sm_chunk_init(&c, bp + SM_SIZEOF_OVERHEAD);
-		const size_t sz = __sm_chunk_get_size(&c);
+		sz = __sm_chunk_get_size(&c);
 		if (b_cursor > 0 && b_cursor > (size_t)start) {
 			const bool rle = SM_IS_CHUNK_RLE(&c);
 			const size_t cap_bits = __sm_chunk_get_capacity(&c);
@@ -8674,6 +10095,7 @@ sm_union(const sm_t *a, const sm_t *b)
 		return (NULL);
 	}
 
+	__sm_try_demote(result);
 	return (result);
 
 fail:
@@ -8688,15 +10110,33 @@ fail:
 uint64_t
 sm_split(sm_t *map, uint64_t idx, sm_t *other)
 {
+	size_t i;
+	size_t count;
+	bool in_middle = false;
+	uint8_t *src;
+	uint8_t *dst;
+	size_t split_offset;
+	size_t chunks_to_move;
+	uint8_t *map_end;
 	if (map == NULL || other == NULL) {
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
+	/* Split walks raw chunks; give it a chunk-mode map and an empty
+	 * chunk-mode destination.  Promote in place (within capacity) if
+	 * `map` is small; the destination is cleared to chunk-empty. */
+	if (__sm_is_small(map)) {
+		if (!__sm_promote(map)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
+	}
+	if (__sm_is_small(other)) {
+		sm_clear(other);
+	}
 	__sm_check_invariants(map);
 	__sm_check_invariants(other);
-	size_t i;
-	const size_t count = __sm_get_chunk_count(map);
-	bool in_middle = false;
+	count = __sm_get_chunk_count(map);
 
 	__sm_assert(sm_cardinality(other) == 0);
 
@@ -8731,38 +10171,47 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	 * 4) Keep half in the src and insert the other half into the dst
 	 * 5) Move any remaining chunks to dst.
 	 */
-	uint8_t *src = __sm_get_chunk_data(map, 0);
-	uint8_t *dst = __sm_get_chunk_end(other);
+	src = __sm_get_chunk_data(map, 0);
+	dst = __sm_get_chunk_end(other);
 
 	/* (1): skip over chunks that are entirely to the left. */
-	uint8_t *prev = src;
 	for (i = 0; i < count; i++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)src);
+		__sm_chunk_t chunk;
 		if (start == idx) {
 			break;
 		}
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
 		if (start <= idx && start + __sm_chunk_get_capacity(&chunk) > idx) {
 			in_middle = true;
 			break;
 		}
 		if (start > idx) {
-			src = prev;
-			i--;
+			/* This chunk begins past idx, and the loop already
+			 * advanced `src` to it after the previous (below-idx)
+			 * chunk, so `src`/`i` correctly mark where the moved
+			 * region starts.  Pre-fix this rolled back to `prev`
+			 * (src = prev; i--), which pulled the last chunk that is
+			 * ENTIRELY below idx into the moved half: when idx fell in
+			 * a gap between two chunks, the whole run just below idx
+			 * ended up in `other` instead of staying in `map`,
+			 * violating the documented [start, idx) / [idx, end]
+			 * partition.  Just stop here. */
 			break;
 		}
 
-		prev = src;
 		src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 	}
 
 	/* (2): The idx falls within a chunk then it has to be split. */
 	if (in_middle) {
 		__sm_chunk_t s_chunk, d_chunk;
+		__sm_idx_t src_start;
+		size_t mid_off;
+		size_t j;
 		__sm_chunk_init(&s_chunk, src + SM_SIZEOF_OVERHEAD);
 		__sm_chunk_init(&d_chunk, dst + SM_SIZEOF_OVERHEAD);
-		__sm_idx_t src_start = __sm_load_idx((const uint8_t *)src);
+		src_start = __sm_load_idx((const uint8_t *)src);
 
 		/* (2a) Does the idx fall within the range of an RLE chunk? */
 		if (SM_IS_CHUNK_RLE(&s_chunk)) {
@@ -8780,6 +10229,10 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			SM_ALIGNAS(__sm_bitvec_t) uint8_t
 			    buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) +
 			        (sizeof(__sm_bitvec_t) * 6)] = { 0 };
+			__sm_chunk_sep_t sep;
+			int sep_rc;
+			size_t src_offset;
+			size_t rle_data_off;
 
 			/* Copy the source chunk into the buffer. */
 			memcpy(buf + SM_SIZEOF_OVERHEAD, src,
@@ -8793,16 +10246,15 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			__sm_chunk_init(&chunk, buf + (SM_SIZEOF_OVERHEAD * 2));
 
 			/* Finally, let's separate the RLE chunk at index. */
-			__sm_chunk_sep_t sep = {
-				.target = { .p = buf + SM_SIZEOF_OVERHEAD,
-				    .offset = SM_SIZEOF_OVERHEAD,
-				    .chunk = &chunk,
-				    .start = src_start,
-				    .length =
-				        __sm_chunk_rle_get_length(&s_chunk),
-				    .capacity =
-				        __sm_chunk_get_capacity(&s_chunk) }
-			};
+			memset(&sep, 0, sizeof(sep));
+			sep.target.p = buf + SM_SIZEOF_OVERHEAD;
+			sep.target.offset = SM_SIZEOF_OVERHEAD;
+			sep.target.chunk = &chunk;
+			sep.target.start = src_start;
+			sep.target.length =
+			    __sm_chunk_rle_get_length(&s_chunk);
+			sep.target.capacity =
+			    __sm_chunk_get_capacity(&s_chunk);
 			/*
 			 * Pre-fix the return value here was discarded, then sep.expand_by
 			 * was used unconditionally below.  If the separate function
@@ -8813,7 +10265,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			 * negative-size-param in __sm_insert_data and by glibc as
 			 * stack-smashing.  Now we propagate the failure up.
 			 */
-			const int sep_rc =
+			sep_rc =
 			    __sm_separate_rle_chunk(&stunt, &sep, idx, -1);
 			if (sep_rc != 0) {
 				return (SM_IDX_MAX);
@@ -8826,9 +10278,25 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			 */
 			SM_ENOUGH_SPACE(sep.expand_by);
 			/* Save src offset before insert, as insert will invalidate the pointer */
-			size_t src_offset = src - map->m_data;
+			src_offset = (size_t)(src - map->m_data);
+			/* __sm_insert_data / __sm_get_chunk_data take a
+			 * DATA-region-relative offset (they add SM_SIZEOF_OVERHEAD
+			 * for the chunk-count header themselves).  `src_offset`
+			 * above is m_data-relative -- it already includes the
+			 * header -- so the RLE chunk's data-relative offset is
+			 * `src_offset - SM_SIZEOF_OVERHEAD`.  Pre-fix the header was
+			 * counted twice (src_offset + SM_SIZEOF_OVERHEAD + ...),
+			 * inserting the expansion one word too far right: the
+			 * following chunk's start index got half-overwritten by the
+			 * subsequent memcpy, producing a chunk with a garbage,
+			 * unaligned start (sm_validate == 0) even though
+			 * cardinality was correct.  This is the same data-vs-
+			 * m_data offset convention __sm_separate_rle_chunk's own
+			 * internal insert uses (target.offset is data-relative). */
+			rle_data_off =
+			    src_offset - SM_SIZEOF_OVERHEAD;
 			__sm_insert_data(map,
-			    src_offset + SM_SIZEOF_OVERHEAD +
+			    rle_data_off + SM_SIZEOF_OVERHEAD +
 			        sizeof(__sm_bitvec_t),
 			    sep.buf + SM_SIZEOF_OVERHEAD +
 			        sizeof(__sm_bitvec_t),
@@ -8858,19 +10326,21 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		 * refuse up front with the documented ENOSPC if it will not
 		 * fit, leaving both maps untouched. */
 		{
-			const size_t max_chunk = SM_SIZEOF_OVERHEAD +
-			    sizeof(__sm_bitvec_t) *
-			        (size_t)(1 + SM_FLAGS_PER_INDEX);
-			if (other->m_data_used + max_chunk > __sm_cap(other)) {
-				errno = ENOSPC;
-				return (SM_IDX_MAX);
-			}
+		const size_t max_chunk = SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t) *
+		        (size_t)(1 + SM_FLAGS_PER_INDEX);
+		if (other->m_data_used + max_chunk > __sm_cap(other)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
 		}
 
 		/* Zero out the space we'll need at the proper location in dst. */
+		{
 		uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
 		memcpy(dst, &buf, sizeof(buf));
+		}
 
 		/* And add a chunk to the other map. */
 		__sm_set_chunk_count(other, __sm_get_chunk_count(other) + 1);
@@ -8879,24 +10349,56 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			    SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
 		}
 
-		/* Copy the bits in the sparse chunk, at most SM_CHUNK_MAX_CAPACITY. */
+		/* Copy the bits in the sparse chunk, at most SM_CHUNK_MAX_CAPACITY.
+		 * The unset loop below mutates `map`: it removes bits [idx, ...)
+		 * from the middle chunk, which SHRINKS that chunk (changing its
+		 * byte size) and, if the chunk ends up empty, REMOVES it and
+		 * decrements the chunk count -- shifting every later chunk and
+		 * potentially reallocating m_data.  So `src`, the middle chunk's
+		 * size, and the chunk count must all be re-derived AFTER the loop
+		 * from the current bytes; using the pre-mutation values left the
+		 * move loop starting at the wrong offset (a whole run above idx
+		 * stranded in `map`, or the retained map left non-canonical /
+		 * invalid when the middle chunk vanished).  Chunks BEFORE the
+		 * middle one are untouched, so its m_data offset `mid_off` is
+		 * stable across the mutation. */
+		mid_off = (size_t)(src - map->m_data);
 		__sm_store_idx((uint8_t *)dst, src_start);
-		for (size_t j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
+		for (j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
 		     j++) {
 			if (sm_contains(map, j, NULL)) {
 				__sm_map_set(other, j, false, NULL);
 				__sm_map_unset(map, j, false);
 			}
 		}
-		src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&s_chunk);
 		dst += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&d_chunk);
 		i++;
+
+		/* Re-derive where the moved region begins.  If a chunk still
+		 * lives at mid_off and it is the middle chunk (start ==
+		 * src_start), it kept bits [src_start, idx) and the move starts
+		 * just past it; otherwise the middle chunk was removed and the
+		 * move starts at mid_off. */
+		src = map->m_data + mid_off;
+		if (mid_off + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) <=
+		        map->m_data_used &&
+		    __sm_load_idx((const uint8_t *)src) == src_start) {
+			__sm_chunk_t mid;
+			__sm_chunk_init(&mid, src + SM_SIZEOF_OVERHEAD);
+			src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&mid);
+		}
 	}
 
 	/* Now continue with all remaining chunks. */
 	/* Save the offset where moved chunks start, so we can truncate map later */
-	size_t split_offset = src - map->m_data;
-	size_t chunks_to_move = count - i;
+	split_offset = (size_t)(src - map->m_data);
+	/* Upper bound on chunks to move: the mutation in the in_middle phase
+	 * can have removed the middle chunk (dropping the count) or left `i`
+	 * out of step, so `count - i` is unreliable.  The probe below
+	 * re-derives the exact movable count by byte-walking from `src` to
+	 * the current data end; seed the bound with the current chunk count,
+	 * which can never undercount. */
+	chunks_to_move = __sm_get_chunk_count(map);
 	/* The chunk stream ends here; the move must never read past it.  On
 	 * a valid-but-adversarial map the RLE-separation and sparse-split
 	 * phases above can leave `i` disagreeing with the bytes actually
@@ -8904,7 +10406,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	 * source-side over-read in __sm_append_data (ASan heap-buffer-
 	 * overflow READ, then heap corruption on reuse).  Bounding every
 	 * walk by map_end keeps the move within the source buffer. */
-	uint8_t *const map_end = map->m_data + map->m_data_used;
+	map_end = map->m_data + map->m_data_used;
 
 	/*
 	 * The destination is caller-provided and may be far smaller than
@@ -8923,14 +10425,16 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		uint8_t *probe = src;
 		size_t need = 0;
 		size_t movable = 0;
-		for (size_t j = 0; j < chunks_to_move; j++) {
+		size_t j;
+		for (j = 0; j < chunks_to_move; j++) {
+			__sm_chunk_t c;
+			size_t sz;
 			if (probe + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) >
 			    map_end) {
 				break;
 			}
-			__sm_chunk_t c;
 			__sm_chunk_init(&c, probe + SM_SIZEOF_OVERHEAD);
-			const size_t sz = SM_SIZEOF_OVERHEAD +
+			sz = SM_SIZEOF_OVERHEAD +
 			    __sm_chunk_get_size(&c);
 			if (probe + sz > map_end) {
 				break;
@@ -8946,25 +10450,31 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		}
 	}
 
-	for (size_t j = 0; j < chunks_to_move; j++) {
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
-		size_t chunk_size =
-		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+	{
+		size_t j;
+		for (j = 0; j < chunks_to_move; j++) {
+			__sm_chunk_t chunk;
+			size_t chunk_size;
+			__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
+			chunk_size =
+			    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 
-		/* Copy chunk to other.  The total was reserved before the
-		 * loop started, so this cannot fail; if it ever did, the
-		 * move would already be half-applied, so treat it as
-		 * unreachable rather than pretending it can be unwound. */
-		if (SM_UNLIKELY(!__sm_append_data(other, src, chunk_size))) {
-			__sm_assert(!"sm_split: capacity check disagreed with "
-			             "the move loop");
-			errno = ENOSPC;
-			return (SM_IDX_MAX);
+			/* Copy chunk to other.  The total was reserved before the
+			 * loop started, so this cannot fail; if it ever did, the
+			 * move would already be half-applied, so treat it as
+			 * unreachable rather than pretending it can be unwound. */
+			if (SM_UNLIKELY(!__sm_append_data(other, src,
+			        chunk_size))) {
+				__sm_assert(!"sm_split: capacity check disagreed with "
+				             "the move loop");
+				errno = ENOSPC;
+				return (SM_IDX_MAX);
+			}
+			__sm_set_chunk_count(other,
+			    __sm_get_chunk_count(other) + 1);
+
+			src += chunk_size;
 		}
-		__sm_set_chunk_count(other, __sm_get_chunk_count(other) + 1);
-
-		src += chunk_size;
 	}
 
 	/* Update chunk counts and force recalculation of data sizes */
@@ -8977,6 +10487,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	__sm_coalesce_map(map);
 	__sm_coalesce_map(other);
 
+	__sm_try_demote(map);
+	__sm_try_demote(other);
 	return (idx);
 }
 
@@ -8988,44 +10500,67 @@ sm_select(sm_t *map, uint64_t n, bool value)
 		 * the n-th unset bit is n.  Matches the count == 0 path. */
 		return (value ? SM_IDX_MAX : n);
 	}
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (value ? SM_IDX_MAX : n);
+		{
+			const uint64_t r = sm_select(m, n, value);
+			sm_free(m);
+			return (r);
+		}
+	}
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
-	const size_t count = __sm_get_chunk_count(map);
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		uint8_t *p;
+		size_t i;
 
-	if (count == 0 && value == false) {
-		return (n);
-	}
-
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-
-	for (size_t i = 0; i < count; i++) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		/* Start of this chunk is greater than n meaning there are a set of 0s
-		 * before the first 1 sufficient to consume n. */
-		if (value == false && i == 0 && start > n) {
+		if (count == 0 && value == false) {
 			return (n);
 		}
-		p += SM_SIZEOF_OVERHEAD;
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, p);
 
-		ssize_t new_n = n;
-		const size_t index =
-		    __sm_chunk_select(&chunk, n, &new_n, value);
-		if (new_n == -1) {
-			return (start + index);
+		p = __sm_get_chunk_data(map, 0);
+
+		for (i = 0; i < count; i++) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)p);
+			__sm_chunk_t chunk;
+			ssize_t new_n;
+			size_t index;
+			/* Start of this chunk is greater than n meaning there are a set of 0s
+			 * before the first 1 sufficient to consume n. */
+			if (value == false && i == 0 && start > n) {
+				return (n);
+			}
+			p += SM_SIZEOF_OVERHEAD;
+			__sm_chunk_init(&chunk, p);
+
+			new_n = (ssize_t)n;
+			index = __sm_chunk_select(&chunk, (ssize_t)n, &new_n,
+			    value);
+			if (new_n == -1) {
+				return (start + index);
+			}
+			n = (uint64_t)new_n;
+
+			p += __sm_chunk_get_size(&chunk);
 		}
-		n = new_n;
-
-		p += __sm_chunk_get_size(&chunk);
+		return (SM_IDX_MAX);
 	}
-	return (SM_IDX_MAX);
 }
 
 static size_t
 __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
     __sm_bitvec_t *vec)
 {
+	uint64_t span_width;
+	size_t width;
+	size_t count;
+	size_t set = 0;
+	uint8_t *p;
+	size_t i;
 	(void)vec; /* retained for ABI/signature compatibility */
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
@@ -9040,8 +10575,8 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 	 * count below stays meaningful.  A full-universe unset query is
 	 * degenerate (the answer is ~2^64) but must not wrap.
 	 */
-	const uint64_t span_width = end - begin;
-	const size_t width =
+	span_width = end - begin;
+	width =
 	    (span_width == UINT64_MAX) ? SIZE_MAX : (size_t)(span_width + 1);
 
 	/*
@@ -9058,30 +10593,39 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 	 * get_position / RLE property tests).  We only ever ask it for
 	 * set bits here; unset is derived once at the end.
 	 */
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (value ? 0 : width);
 	}
 
-	size_t set = 0;
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	for (size_t i = 0; i < count; i++) {
+	p = __sm_get_chunk_data(map, 0);
+	for (i = 0; i < count; i++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		size_t cap;
+		uint64_t chunk_lo;
+		uint64_t span;
+		uint64_t chunk_hi_incl;
+		uint64_t ov_lo;
+		uint64_t ov_hi_incl;
+		size_t from;
+		size_t to;
+		__sm_chunk_rank_t rank;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (i + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		const uint64_t chunk_lo = start;
+		cap = __sm_chunk_get_capacity(&chunk);
+		chunk_lo = start;
 		/* Inclusive top of the chunk's covered span.  cap >= 1, and we
 		 * form (cap - 1) as a distance so the comparison below never
 		 * overflows even when chunk_lo is near UINT64_MAX (the
 		 * top-of-universe case). */
-		const uint64_t span = (uint64_t)cap - 1;
-		const uint64_t chunk_hi_incl =
+		span = (uint64_t)cap - 1;
+		chunk_hi_incl =
 		    (chunk_lo > UINT64_MAX - span) ? UINT64_MAX
 		                                  : chunk_lo + span;
 
@@ -9098,14 +10642,12 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 		}
 
 		/* Overlap of [begin, end] with [chunk_lo, chunk_hi_incl]. */
-		const uint64_t ov_lo = begin > chunk_lo ? begin : chunk_lo;
-		const uint64_t ov_hi_incl =
-		    (end < chunk_hi_incl) ? end : chunk_hi_incl;
+		ov_lo = begin > chunk_lo ? begin : chunk_lo;
+		ov_hi_incl = (end < chunk_hi_incl) ? end : chunk_hi_incl;
 		/* Positions relative to the chunk start. */
-		const size_t from = (size_t)(ov_lo - chunk_lo);
-		const size_t to = (size_t)(ov_hi_incl - chunk_lo);
+		from = (size_t)(ov_lo - chunk_lo);
+		to = (size_t)(ov_hi_incl - chunk_lo);
 
-		__sm_chunk_rank_t rank;
 		set += __sm_chunk_rank(&rank, true, &chunk, from, to);
 		p += chunk_size;
 	}
@@ -9120,33 +10662,56 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 size_t
 sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 {
+	__sm_bitvec_t vec;
 	if (map == NULL)
 		return (0);
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (0);
+		{
+			const size_t r = sm_rank(m, begin, end, value);
+			sm_free(m);
+			return (r);
+		}
+	}
 	__sm_check_invariants(map);
-	__sm_bitvec_t vec;
 	return (__sm_rank_vec(map, begin, end, value, &vec));
 }
 
 uint64_t
 sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 {
+	__sm_bitvec_t vec = 0;
+	size_t nth;
+	uint64_t offset;
 	if (map == NULL)
 		return (SM_IDX_MAX);
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (SM_IDX_MAX);
+		{
+			const uint64_t r = sm_span(m, idx, len, value);
+			sm_free(m);
+			return (r);
+		}
+	}
 	__sm_check_invariants(map);
-	__sm_bitvec_t vec = 0;
 
 	/* When skipping forward to `idx` offset in the map we can determine how
 	 * many selects we can avoid by taking the rank of the range and starting
 	 * at that bit. */
-	size_t nth = (idx == 0) ? 0 : sm_rank(map, 0, idx - 1, value);
+	nth = (idx == 0) ? 0 : sm_rank(map, 0, idx - 1, value);
 	/* Find the first bit that matches value, then... */
-	uint64_t offset = sm_select(map, nth, value);
+	offset = sm_select(map, nth, value);
 	do {
 		/* See if the rank of the bits in the range starting at offset is equal
 		 * to the desired amount. */
 		size_t rank = (len == 1) ?
 		    1 :
 		    __sm_rank_vec(map, offset, offset + len - 1, value, &vec);
+		int amt = 1;
 		if (rank >= len) {
 			/* We've found what we're looking for, return the index of the first
 			 * bit in the range. */
@@ -9155,7 +10720,6 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 		/* Now we try to jump forward as much as possible before we look for a
 		 * new match. We do this by counting the remaining bits in the returned
 		 * vec from the call to rank_vec(). */
-		int amt = 1;
 		if (vec > 0) {
 			/* The returned vec had some set bits, let's move forward in the map as
 			 * much as possible (max: 64 bit positions). */
@@ -9166,7 +10730,7 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 				amt++;
 			}
 		}
-		nth += amt;
+		nth += (size_t)amt;
 		offset = sm_select(map, nth, value);
 	} while (SM_FOUND(offset));
 
@@ -9192,6 +10756,12 @@ void
 sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
     size_t n)
 {
+	size_t count;
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	size_t q = 0;
+	size_t i;
 	if (n == 0) {
 		return;
 	}
@@ -9200,7 +10770,7 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 		return;
 	}
 	if (map == NULL) {
-		for (size_t q = 0; q < n; q++) {
+		for (q = 0; q < n; q++) {
 			results[q] = false;
 		}
 		return;
@@ -9208,24 +10778,31 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 	/* Contract: idxs MUST be sorted ascending. */
-	for (size_t q = 1; q < n; q++) {
+	for (q = 1; q < n; q++) {
 		__sm_assert(idxs[q] >= idxs[q - 1]);
 	}
 #endif
 
-	const size_t count = __sm_get_chunk_count(map);
+	if (__sm_is_small(map)) {
+		for (q = 0; q < n; q++) {
+			results[q] = __sm_small_contains(map, idxs[q]);
+		}
+		return;
+	}
+
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
-		for (size_t q = 0; q < n; q++) {
+		for (q = 0; q < n; q++) {
 			results[q] = false;
 		}
 		return;
 	}
 
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
-	const size_t stream_end =
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
-	size_t q = 0;
+	q = 0;
 
 	/*
 	 * One left-to-right sweep.  Walk chunks in order while draining the
@@ -9235,12 +10812,15 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 	 * above start+cap belong to a later chunk, so advance the chunk.
 	 * O(chunks + n).
 	 */
-	for (size_t i = 0; i < count && q < n; i++) {
+	for (i = 0; i < count && q < n; i++) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t cap;
+		uint64_t hi;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		const uint64_t hi = (uint64_t)s + cap; /* exclusive top */
+		cap = __sm_chunk_get_capacity(&chunk);
+		hi = (uint64_t)s + cap; /* exclusive top */
 
 		/* Drain queries that fall before this chunk (gap -> false). */
 		while (q < n && idxs[q] < (uint64_t)s) {
@@ -9255,7 +10835,7 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 		}
 
 		/* Advance to the next chunk. */
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			break;
@@ -9278,10 +10858,10 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 static size_t
 __sm_isqrt(size_t x)
 {
+	size_t r = 0;
 	if (x == 0) {
 		return (0);
 	}
-	size_t r = 0;
 	while ((r + 1) * (r + 1) <= x) {
 		r++;
 	}
@@ -9294,6 +10874,9 @@ __sm_isqrt(size_t x)
 static bool
 __sm_locator_is_stale(const sm_locator_t *loc)
 {
+	uint8_t *base;
+	__sm_idx_t first;
+	__sm_idx_t last;
 	if (loc == NULL || loc->map == NULL || loc->n_sb == 0) {
 		return (true);
 	}
@@ -9306,8 +10889,8 @@ __sm_locator_is_stale(const sm_locator_t *loc)
 	 * best-effort check, not a proof of freshness -- but any miss still
 	 * yields a correct answer via the fine-walk, which self-validates
 	 * against the actual chunk bytes it reads. */
-	uint8_t *base = __sm_get_chunk_data(loc->map, 0);
-	const __sm_idx_t first = __sm_load_idx((const uint8_t *)base);
+	base = __sm_get_chunk_data(loc->map, 0);
+	first = __sm_load_idx((const uint8_t *)base);
 	if (first != loc->first_start) {
 		return (true);
 	}
@@ -9315,7 +10898,7 @@ __sm_locator_is_stale(const sm_locator_t *loc)
 	    (size_t)loc->map->m_data_used - SM_SIZEOF_OVERHEAD) {
 		return (true);
 	}
-	const __sm_idx_t last =
+	last =
 	    __sm_load_idx((const uint8_t *)(base + loc->last_offset));
 	if (last != loc->last_start) {
 		return (true);
@@ -9329,22 +10912,52 @@ sm_locator_build(const sm_t *map)
 	if (map == NULL) {
 		return (NULL);
 	}
+	/* The locator indexes the chunk stream by byte offset; a small-set
+	 * map has no chunk stream.  Return a degenerate locator (n_sb == 0)
+	 * whose staleness check always trips, so every query falls back to
+	 * the plain, small-set-aware sm_contains / sm_rank / sm_select.
+	 * (Returning NULL would violate the "NULL only for an empty map"
+	 * contract that callers rely on.) */
+	if (__sm_is_small(map)) {
+		sm_locator_t *loc = (sm_locator_t *)__sm_alloc(sizeof(*loc));
+		if (loc == NULL) {
+			return (NULL);
+		}
+		memset(loc, 0, sizeof(*loc));
+		loc->map = map; /* n_sb == 0 => __sm_locator_is_stale => fallback */
+		return (loc);
+	}
+	{
 	const size_t count = __sm_get_chunk_count(map);
+	sm_locator_t *loc;
+	size_t stride;
+	size_t n_sb;
+	uint64_t *sb_start;
+	size_t *sb_offset;
+	size_t *sb_prefix;
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	size_t running = 0; /* set bits in chunks strictly before p */
+	size_t sb = 0;
+	size_t last_offset = 0;
+	__sm_idx_t last_start = 0;
+	size_t i;
 	if (count == 0) {
 		return (NULL);
 	}
 
-	sm_locator_t *loc = (sm_locator_t *)__sm_alloc(sizeof(*loc));
+	loc = (sm_locator_t *)__sm_alloc(sizeof(*loc));
 	if (loc == NULL) {
 		return (NULL);
 	}
 
-	const size_t stride = __sm_isqrt(count) > 0 ? __sm_isqrt(count) : 1;
-	const size_t n_sb = (count + stride - 1) / stride;
+	stride = __sm_isqrt(count) > 0 ? __sm_isqrt(count) : 1;
+	n_sb = (count + stride - 1) / stride;
 
-	uint64_t *sb_start = (uint64_t *)__sm_alloc(n_sb * sizeof(uint64_t));
-	size_t *sb_offset = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
-	size_t *sb_prefix = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
+	sb_start = (uint64_t *)__sm_alloc(n_sb * sizeof(uint64_t));
+	sb_offset = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
+	sb_prefix = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
 	if (sb_start == NULL || sb_offset == NULL || sb_prefix == NULL) {
 		__sm_free(sb_start);
 		__sm_free(sb_offset);
@@ -9355,19 +10968,19 @@ sm_locator_build(const sm_t *map)
 
 	/* One O(count) walk: sample every stride-th chunk into the
 	 * superblock arrays and carry the running set-bit total. */
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
-	const size_t stream_end =
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
-	size_t running = 0; /* set bits in chunks strictly before p */
-	size_t sb = 0;
-	size_t last_offset = 0;
-	__sm_idx_t last_start = 0;
-	for (size_t i = 0; i < count; i++) {
+	for (i = 0; i < count; i++) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t off;
+		size_t cap;
+		__sm_chunk_rank_t rank;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t off = (size_t)(p - base);
+		off = (size_t)(p - base);
 		last_offset = off;
 		last_start = s;
 		if (i % stride == 0) {
@@ -9379,11 +10992,10 @@ sm_locator_build(const sm_t *map)
 		}
 		/* Accumulate this chunk's set-bit count into the running total
 		 * so the NEXT superblock's prefix is correct. */
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		__sm_chunk_rank_t rank;
+		cap = __sm_chunk_get_capacity(&chunk);
 		running += __sm_chunk_rank(&rank, true, &chunk, 0, cap - 1);
 
-		const size_t next_off =
+		next_off =
 		    off + SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			break;
@@ -9402,6 +11014,7 @@ sm_locator_build(const sm_t *map)
 	loc->sb_offset = sb_offset;
 	loc->sb_prefix = sb_prefix;
 	return (loc);
+	}
 }
 
 void
@@ -9453,23 +11066,29 @@ __sm_locator_rank_upto(const sm_locator_t *loc, uint64_t x)
 	uint8_t *p = base + loc->sb_offset[sb];
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		size_t cap;
+		uint64_t chunk_lo;
+		uint64_t span;
+		uint64_t chunk_hi_incl;
+		uint64_t ov_hi_incl;
+		size_t to;
+		__sm_chunk_rank_t rank;
+		size_t next_off;
 		if ((uint64_t)s > x) {
 			break; /* chunk starts past x: nothing more to count */
 		}
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		const uint64_t chunk_lo = (uint64_t)s;
-		const uint64_t span = (uint64_t)cap - 1;
-		const uint64_t chunk_hi_incl =
+		cap = __sm_chunk_get_capacity(&chunk);
+		chunk_lo = (uint64_t)s;
+		span = (uint64_t)cap - 1;
+		chunk_hi_incl =
 		    (chunk_lo > UINT64_MAX - span) ? UINT64_MAX
 		                                  : chunk_lo + span;
-		const uint64_t ov_hi_incl =
-		    (x < chunk_hi_incl) ? x : chunk_hi_incl;
-		const size_t to = (size_t)(ov_hi_incl - chunk_lo);
-		__sm_chunk_rank_t rank;
+		ov_hi_incl = (x < chunk_hi_incl) ? x : chunk_hi_incl;
+		to = (size_t)(ov_hi_incl - chunk_lo);
 		set += __sm_chunk_rank(&rank, true, &chunk, 0, to);
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			break;
@@ -9482,18 +11101,23 @@ __sm_locator_rank_upto(const sm_locator_t *loc, uint64_t x)
 bool
 sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 {
+	const sm_t *map;
+	uint8_t *base;
+	size_t stream_end;
+	size_t sb;
+	uint8_t *p;
 	if (__sm_locator_is_stale(loc)) {
 		__sm_assert(false);
 		return (sm_contains(loc ? loc->map : NULL, idx, NULL));
 	}
 
-	const sm_t *map = loc->map;
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	const size_t stream_end =
+	map = loc->map;
+	base = __sm_get_chunk_data(map, 0);
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
-	size_t sb = __sm_locator_find_sb(loc, idx);
-	uint8_t *p = base + loc->sb_offset[sb];
+	sb = __sm_locator_find_sb(loc, idx);
+	p = base + loc->sb_offset[sb];
 
 	/* Fine-walk at most `stride` chunks from the superblock's first
 	 * chunk to the chunk covering idx (same shape as
@@ -9501,15 +11125,17 @@ sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t cap;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
+		cap = __sm_chunk_get_capacity(&chunk);
 		if (idx < (uint64_t)s) {
 			return (false); /* gap before this chunk */
 		}
 		if (idx < (uint64_t)s + cap) {
 			return (__sm_chunk_is_set(&chunk, idx - (uint64_t)s));
 		}
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			return (false); /* past the last chunk */
@@ -9521,6 +11147,8 @@ sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 size_t
 sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 {
+	size_t hi_cnt;
+	size_t lo_cnt;
 	/* value=false and staleness both fall back to the plain path: the
 	 * unset count needs the range width (which the sqrt index does not
 	 * carry), and a stale index must never return a wrong answer. */
@@ -9548,8 +11176,8 @@ sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 	 * at most `stride` chunks from there.  That is the O(sqrt n) path;
 	 * seeding from chunk 0 as the previous version did made this an
 	 * O(chunks) no-op identical to plain sm_rank. */
-	const size_t hi_cnt = __sm_locator_rank_upto(loc, hi);
-	const size_t lo_cnt =
+	hi_cnt = __sm_locator_rank_upto(loc, hi);
+	lo_cnt =
 	    (lo == 0) ? 0 : __sm_locator_rank_upto(loc, lo - 1);
 	return (hi_cnt - lo_cnt);
 }
@@ -9557,6 +11185,12 @@ sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 uint64_t
 sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 {
+	const sm_t *map;
+	uint8_t *base;
+	size_t stream_end;
+	size_t sb = 0;
+	ssize_t rem;
+	uint8_t *p;
 	/* value=false and staleness fall back to sm_select: unset select
 	 * needs the leading-zeros / cross-chunk gap accounting the sqrt
 	 * prefix does not carry, and a stale index must stay correct. */
@@ -9573,15 +11207,14 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 		return (sm_select((sm_t *)loc->map, n, value));
 	}
 
-	const sm_t *map = loc->map;
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	const size_t stream_end =
+	map = loc->map;
+	base = __sm_get_chunk_data(map, 0);
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
 	/* Find the last superblock whose cumulative set-bit prefix is <= n,
 	 * subtract that prefix, and fine-walk from its first chunk.  The
 	 * per-chunk select semantics mirror sm_select exactly. */
-	size_t sb = 0;
 	{
 		size_t l = 0, r = loc->n_sb; /* largest sb with prefix<=n */
 		while (l < r) {
@@ -9595,20 +11228,22 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 		sb = (l == 0) ? 0 : l - 1;
 	}
 
-	ssize_t rem = (ssize_t)(n - (uint64_t)loc->sb_prefix[sb]);
-	uint8_t *p = base + loc->sb_offset[sb];
+	rem = (ssize_t)(n - (uint64_t)loc->sb_prefix[sb]);
+	p = base + loc->sb_offset[sb];
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		ssize_t new_n;
+		size_t index;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		ssize_t new_n = rem;
-		const size_t index =
-		    __sm_chunk_select(&chunk, rem, &new_n, value);
+		new_n = rem;
+		index = __sm_chunk_select(&chunk, rem, &new_n, value);
 		if (new_n == -1) {
 			return ((uint64_t)s + index);
 		}
 		rem = new_n;
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			return (SM_IDX_MAX);
@@ -9624,41 +11259,47 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 bool
 sm_contains_cached(const sm_t *map, uint64_t idx, sm_cursor_cached_t *cache)
 {
+	uint8_t w;
+	ssize_t offset;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
+	size_t cap;
+	uint8_t slot;
 	if (map == NULL) {
 		return (false);
 	}
-	if (cache == NULL) {
+	if (cache == NULL || __sm_is_small(map)) {
 		return (sm_contains(map, idx, NULL));
 	}
 
 	/* 1. Probe the <=8 valid ways for a covering chunk (a hit). */
-	for (uint8_t w = 0; w < SM_CACHE_WAYS; w++) {
+	for (w = 0; w < SM_CACHE_WAYS; w++) {
 		if ((cache->valid & (uint8_t)(1u << w)) == 0) {
 			continue;
 		}
 		if (idx >= cache->start_idx[w] && idx < cache->end_idx[w]) {
-			uint8_t *p =
+			uint8_t *hp =
 			    __sm_get_chunk_data(map, cache->offset[w]);
-			__sm_chunk_t chunk;
-			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-			return (__sm_chunk_is_set(&chunk,
+			__sm_chunk_t hc;
+			__sm_chunk_init(&hc, hp + SM_SIZEOF_OVERHEAD);
+			return (__sm_chunk_is_set(&hc,
 			    idx - cache->start_idx[w]));
 		}
 	}
 
 	/* 2. Miss: walk from the head, then insert the located chunk. */
-	const ssize_t offset = __sm_get_chunk_offset(map, idx, NULL);
+	offset = __sm_get_chunk_offset(map, idx, NULL);
 	if (offset == -1) {
 		return (false);
 	}
-	uint8_t *p = __sm_get_chunk_data(map, (size_t)offset);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-	__sm_chunk_t chunk;
+	p = __sm_get_chunk_data(map, (size_t)offset);
+	start = __sm_load_idx((const uint8_t *)p);
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	const size_t cap = __sm_chunk_get_capacity(&chunk);
+	cap = __sm_chunk_get_capacity(&chunk);
 
 	/* 3. Insert (start, start+cap, offset) at the round-robin slot. */
-	const uint8_t slot = cache->mru;
+	slot = cache->mru;
 	cache->start_idx[slot] = (uint64_t)start;
 	cache->end_idx[slot] = (uint64_t)start + cap;
 	cache->offset[slot] = (size_t)offset;
