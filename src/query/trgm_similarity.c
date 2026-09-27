@@ -88,10 +88,14 @@ trgm_set(const char *str, int len)
     {
         int         clen = pg_mblen(p);
         pg_wchar    wc;
+        /* pg_mb2wchar_with_len() writes up to clen wchars AND a
+         * terminating 0 -- a scalar destination overflows by one. */
+        pg_wchar    wbuf[MAX_MULTIBYTE_CHAR_LEN + 1];
 
         if (clen <= 0 || p + clen > end)
             clen = 1;
-        (void) pg_mb2wchar_with_len(p, &wc, clen);
+        (void) pg_mb2wchar_with_len(p, wbuf, clen);
+        wc = wbuf[0];
 
         /*
          * Lowercase ASCII A-Z; leave other codepoints as-is
@@ -337,10 +341,12 @@ pos_trgm(const char *str, int len, bool want_bounds)
     {
         int         clen = pg_mblen(p);
         pg_wchar    wc;
+        pg_wchar    wbuf[MAX_MULTIBYTE_CHAR_LEN + 1];   /* see trgm_set() */
 
         if (clen <= 0 || p + clen > end)
             clen = 1;
-        (void) pg_mb2wchar_with_len(p, &wc, clen);
+        (void) pg_mb2wchar_with_len(p, wbuf, clen);
+        wc = wbuf[0];
         if (wc >= 'A' && wc <= 'Z')
             wc += ('a' - 'A');
         if (ncp >= cap)

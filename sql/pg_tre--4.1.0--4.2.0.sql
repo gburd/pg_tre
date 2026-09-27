@@ -1,0 +1,50 @@
+-- pg_tre 4.1.0 -> 4.2.0 upgrade.
+--
+-- No catalog changes: `diff sql/pg_tre--4.1.0.sql sql/pg_tre--4.2.0.sql`
+-- differs only in the header comment's version string.
+--
+-- 4.2.0 refreshes the vendored sparsemap from v5.6.0 to v5.7.0.  The sparsemap
+-- wire format is unchanged (still version 2), so **upgrading needs no REINDEX**:
+-- 5.7.0 reads every byte 5.6.0 wrote, verified across ten map shapes through
+-- both of pg_tre's read paths.
+--
+-- ---------------------------------------------------------------------------
+-- DOWNGRADE, on the other hand, REQUIRES A REINDEX.  Read this before rolling
+-- back.
+-- ---------------------------------------------------------------------------
+--
+-- v5.7.0 adds "small-set mode": a posting map confined to the low 1024 bits
+-- may be stored as a bare uint64 word array instead of the chunk form, flagged
+-- by the top bit of its 8-byte header.  pg_tre packs a TID as
+-- (blk << 16) | off, so this covers heap block 0 with low offsets -- small
+-- tables especially -- and pg_tre starts writing such pages as soon as 4.2.0
+-- is installed.
+--
+-- sparsemap 5.6.0 has no knowledge of that flag.  Measured, not assumed:
+-- downgrading the extension back to 4.1.0 and reading a small-mode page gives
+--
+--   * sm_open_copy  -> NULL (rejected), and
+--   * sm_wrap+sm_open -> an empty map
+--
+-- and NO silent misreads: 4 of 10 shapes rejected, 6 read fine, 0 wrong
+-- answers.  Because pg_tre 4.1.0 already ships the size cross-check guard,
+-- the rejected pages surface as
+--
+--   ERROR:  pg_tre: corrupt inline sparsemap in posting for this trigram
+--   HINT:   REINDEX the index to rebuild it.
+--
+-- which is a loud, actionable error rather than missing rows.  That is the
+-- good outcome, but it does mean a rollback leaves affected indexes erroring
+-- until you REINDEX them.  If you may need to roll back without a REINDEX
+-- window, do not upgrade yet.
+--
+-- (Downgrading to anything OLDER than 4.1.0 is worse: those versions lack the
+-- guard, so a small-mode page would read as zero TIDs silently.  REINDEX is
+-- mandatory in that case.)
+--
+-- Also in this release, from upstream: sm_split could emit a structurally
+-- invalid map when the moved half contained a gap; sm_offset had a signed
+-- overflow on large offsets; sm_equals/sm_hash/sm_compare mis-compared
+-- logically-equal maps built differently (pg_tre does not call those three, so
+-- that one was latent here); and a crafted length-1 RLE chunk no longer
+-- reports a full-capacity run.  All were pre-existing in 4.1.0.
