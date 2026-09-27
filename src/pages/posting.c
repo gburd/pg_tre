@@ -858,7 +858,35 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sm_t **out,
         memcpy(buf, s->inline_data, s->inline_bytes);
         s->smap = sm_wrap(buf, s->inline_bytes);
         if (s->smap != NULL)
+        {
             sm_open(s->smap, buf, s->inline_bytes);
+
+            /*
+             * Guard the inline posting blob.  This is the COMMON case -- most
+             * postings live inline in an upper leaf and never occupy a
+             * posting_leaf page at all -- so it is the site that matters most.
+             *
+             * sparsemap 5.6.0 validates on open, and because sm_open() returns
+             * void it cannot report failure: it substitutes an EMPTY map for
+             * bytes it rejects.  Unchecked, a damaged blob then reads as zero
+             * TIDs with no error.
+             *
+             * The test is sm_get_size() != the length we handed it, NOT
+             * sm_validate().  sm_validate is useless here: the substituted
+             * empty map is itself structurally valid, so it returns true on
+             * every corruption (verified -- 0 of 4 detected).  The
+             * substitution resets m_data_used to the empty-map overhead, so a
+             * size mismatch detects it exactly: 4 of 4 corruptions caught,
+             * with no false positive on any map shape pg_tre emits.
+             */
+            if (s->inline_bytes > 0 &&
+                sm_get_size(s->smap) != s->inline_bytes)
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("pg_tre: corrupt inline sparsemap in posting "
+                                "for this trigram"),
+                         errhint("REINDEX the index to rebuild it.")));
+        }
         s->served_inline = true;
         *out = s->smap;
         if (min_tid_blk) *min_tid_blk = 0;
@@ -893,7 +921,30 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sm_t **out,
 
         s->smap = sm_wrap(copy, hdr->sparsemap_bytes);
         if (s->smap != NULL)
+        {
+            BlockNumber bad_blk = s->cur_blk;
+
             sm_open(s->smap, copy, hdr->sparsemap_bytes);
+
+            /*
+             * Same guard as the inline path above: a size mismatch means
+             * sparsemap 5.6.0 rejected these bytes and substituted an empty
+             * map, which would otherwise read as zero TIDs with no error.
+             * (sm_validate cannot be used for this -- the substituted map is
+             * valid.)  A page pg_tre wrote always matches, because
+             * sparsemap_bytes is exactly sm_get_size() at write time.
+             */
+            if (hdr->sparsemap_bytes > 0 &&
+                sm_get_size(s->smap) != hdr->sparsemap_bytes)
+            {
+                UnlockReleaseBuffer(buf);
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("pg_tre: corrupt sparsemap in posting leaf "
+                                "at block %u", bad_blk),
+                         errhint("REINDEX the index to rebuild it.")));
+            }
+        }
         s->pinned_buf = InvalidBuffer;   /* already copied; release */
         UnlockReleaseBuffer(buf);
 
@@ -1646,7 +1697,22 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
      */
     smap = sm_wrap(sm_bytes, smap_size);
     if (smap != NULL)
+    {
         sm_open(smap, sm_bytes, smap_size);
+
+        /*
+         * Same guard: sparsemap 5.6.0's sm_open replaces bytes it rejects with
+         * an empty map, and this loop would then repack the leaf as though it
+         * genuinely held no TIDs -- turning a corrupt page into PERMANENT
+         * silent data loss.  Fail loudly instead.
+         */
+        if (smap_size > 0 && sm_get_size(smap) != smap_size)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("pg_tre: corrupt sparsemap in posting leaf "
+                            "at block %u during vacuum", blkno),
+                     errhint("REINDEX the index to rebuild it.")));
+    }
 
     member = SM_IDX_MAX;
     {
