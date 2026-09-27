@@ -65,7 +65,7 @@ DATA         = sql/pg_tre--4.1.0.sql sql/pg_tre--3.2.0.sql sql/pg_tre--3.1.0.sql
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density density_scaling vacuum_repack reloptions testregex custom_costs utf8_fuzzy amvalidate parallel_build upgrade_online surf_prefix pending_reclaim merge_page_reclaim churned_heap_scan sparsemap_corrupt_guard
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density density_scaling vacuum_repack reloptions testregex custom_costs utf8_fuzzy amvalidate parallel_build upgrade_online surf_prefix pending_reclaim merge_page_reclaim churned_heap_scan sparsemap_corrupt_guard sparsemap_smallset
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
