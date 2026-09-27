@@ -293,7 +293,6 @@ pg_tre_upgrade_index(PG_FUNCTION_ARGS)
         Buffer buf;
         Page page;
         PageTreOpaque opq;
-        bool changed;
 
         CHECK_FOR_INTERRUPTS();
 

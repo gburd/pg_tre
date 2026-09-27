@@ -1556,7 +1556,7 @@ pg_tre_pending_merge(Relation index)
         int          n_new = 0;
         BlockNumber *new_pages = pg_tre_run_collect_pages(index, new_root,
                                                           &n_new);
-        int i, w = 0;
+        int w = 0;
 
         /*
          * Both arrays come back sorted+deduped from pg_tre_run_collect_pages,
