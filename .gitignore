@@ -85,3 +85,6 @@ vendor/tre/.pg_tre-patched
 
 # direnv flake cache
 .direnv/
+
+# Local per-project agent steering (not part of the release).
+.agent-steering-domains.md
