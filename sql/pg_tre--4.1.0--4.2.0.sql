@@ -3,7 +3,11 @@
 -- No catalog changes: `diff sql/pg_tre--4.1.0.sql sql/pg_tre--4.2.0.sql`
 -- differs only in the header comment's version string.
 --
--- 4.2.0 refreshes the vendored sparsemap from v5.6.0 to v5.7.0.  The sparsemap
+-- 4.2.0 fixes a backend abort in the trigram-similarity functions
+-- (tre_trgm_similarity, tre_word_similarity and friends -- a one-word stack
+-- overwrite per decoded character, present since 1.9.0; C-only fix, the SQL
+-- definitions are unchanged) and refreshes the vendored sparsemap from v5.6.0
+-- to v5.7.0.  The sparsemap
 -- wire format is unchanged (still version 2), so **upgrading needs no REINDEX**:
 -- 5.7.0 reads every byte 5.6.0 wrote, verified across ten map shapes through
 -- both of pg_tre's read paths.

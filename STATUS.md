@@ -1,10 +1,30 @@
 # pg_tre status
 
-Released: **4.1.0** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.2.0** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
 
-4.1.0 is a correctness fix: a plain Index Scan silently
+4.2.0 fixes a backend abort in the trigram-similarity family:
+`tre_trgm_similarity('foo','foobar')` could kill the backend
+(stack smashing, SIGABRT), in every release since 1.9.0.  Each
+character was decoded into a single `pg_wchar` while
+`pg_mb2wchar_with_len` also writes a terminator, so one 4-byte
+store landed past the variable on every character.  Harmless or
+fatal depending on stack layout -- silent on the qualification
+rig, fatal on the reporter's -- and confirmed with an
+ASan-instrumented server at both call sites.  The index AM,
+regex/LIKE/ILIKE and Levenshtein never used the affected code.
+It also vendors sparsemap v5.7.0, which adds a small-set encoding
+pg_tre writes for low-TID postings: upgrading needs no REINDEX,
+but a DOWNGRADE to 4.1.0 does (4.1.0's corruption guard turns the
+unreadable pages into a loud REINDEX error rather than missing
+rows; anything older than 4.1.0 would read them as empty).  See
+`CHANGELOG.md` and `doc/reports/similarity-stack-overwrite-2026-09.md`.
+
+4.1.0 vendored sparsemap v5.6.0 (security hardening) and added
+detection for corrupt on-page sparsemaps.
+
+4.0.2 is a correctness fix: a plain Index Scan silently
 under-returned rows on a heap with HOT updates.  The scan handed
 the executor the TID of a heap-only tuple version instead of its
 HOT-chain root, and `heap_hot_search_buffer` cannot reach a chain

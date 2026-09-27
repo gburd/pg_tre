@@ -6,6 +6,124 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.0] - 2026-09-27 - similarity-family backend abort fixed; vendored sparsemap v5.7.0
+
+**Upgrade needs no REINDEX. A downgrade to 4.1.0 does -- see below.**
+
+### Fixed
+
+- **Backend abort in the trigram-similarity functions** (every release since
+  1.9.0).  `SELECT tre_trgm_similarity('foo','foobar')` could terminate the
+  backend with *stack smashing detected* / SIGABRT and force server recovery,
+  on plain ASCII input with no table or index involved.  `trgm_set()` and
+  `pos_trgm()` decoded each character into a single `pg_wchar`, but
+  `pg_mb2wchar_with_len()` always appends a terminating zero, so every decoded
+  character wrote one `pg_wchar` past the variable.  Whether that is harmless
+  or fatal depends on the compiler's frame layout -- it never fired on the
+  qualification rig, and fired every time on the reporter's.  Fixed by
+  decoding into a `MAX_MULTIBYTE_CHAR_LEN + 1` buffer.
+
+  Confirmed, not inferred: against a PostgreSQL built with
+  `-fsanitize=address`, the reporter's exact statement on the unfixed code
+  kills the backend with an ASan `stack-buffer-overflow` in
+  `pg_utf2wchar_with_len` <- `trgm_set` (`trgm_similarity.c:94`), and
+  `tre_word_similarity('foo','foo bar')` hits the second site in `pos_trgm`
+  (`:343`) the same way.  The fixed build is ASan-clean.  Stock `-O2` builds,
+  with or without `-fstack-protector-all`, did not reproduce -- nor did ASan
+  applied to the extension alone, because the offending store is in the
+  server's code.
+
+  Affected: `tre_trgm_similarity`, `tre_trgm_distance`, `tre_trgm_sim_op`,
+  `tre_word_similarity`, `tre_strict_word_similarity`, `tre_word_sim_op`,
+  `tre_word_dist_op`, `tre_strict_word_sim_op`, `tre_strict_word_dist_op`.
+  **Not affected:** the index access method, regex / `LIKE` / `ILIKE`
+  matching, Levenshtein.  Full write-up:
+  `doc/reports/similarity-stack-overwrite-2026-09.md`.
+
+- `test/expected/pending_reclaim.out` was never committed, so
+  `run-regress.sh` regenerated it every run and the test asserted nothing.
+  Now committed, after checking that index and seq-scan agree in it.
+
+### Changed
+
+- **Vendored sparsemap v5.6.0 -> v5.7.0**, verbatim apart from the include
+  path.  Upstream fixes, all pre-existing in 4.1.0: `sm_split` could emit a
+  structurally invalid map; `sm_offset` had a signed-integer overflow on large
+  offsets; `sm_equals` / `sm_hash` / `sm_compare` mis-compared logically-equal
+  maps built differently (pg_tre does not call these three, so this one was
+  latent); a crafted length-1 RLE chunk reported a full-capacity run.
+- **New small-set encoding.**  v5.7.0 can store a map confined to the low
+  1024 bits as a bare word array (PostgreSQL's `Bitmapset` layout) when that
+  is the smallest of its three encodings.  pg_tre packs a TID as
+  `(blk << 16) | off`, so postings on heap block 0 -- small tables -- start
+  being written this way as soon as 4.2.0 is installed.
+
+### Upgrade and downgrade
+
+- **Upgrade: no REINDEX.**  The wire format is unchanged.  Bytes written by
+  5.6.0 and reopened by 5.7.0 through both of pg_tre's read paths return
+  identical cardinality across ten shapes chosen to straddle the 1024-bit cap
+  (10/10).
+- **Downgrade to 4.1.0: REINDEX required.**  5.6.0 does not know the
+  small-set flag.  Reading 5.7.0-written maps with 5.6.0: 4 of 10 shapes are
+  rejected, 6 read correctly, **0 are silently misread**.  4.1.0's corruption
+  guard catches all 4 rejections as `ERROR: pg_tre: corrupt inline sparsemap
+  ... HINT: REINDEX`, so a rollback gives loud, fixable errors rather than
+  missing rows.  Anything **older than 4.1.0** lacks that guard and would read
+  those postings as empty -- do not downgrade past 4.1.0 without a REINDEX.
+- The 4.1.0 guard itself does not false-positive on the new encoding:
+  `sm_get_size()` matches the serialized length for all 10 shapes, 4 of them
+  genuinely small-mode.  That was checked first, since getting it wrong would
+  make every small index raise a spurious corruption error.
+
+### Added
+
+- `test/sql/similarity_multibyte.sql`: the reporter's statement,
+  empty/identical/disjoint controls, 1- to 4-byte UTF-8 through all nine
+  similarity entry points, and a 10,000-character input.  In a normal build it
+  cannot see the overwrite, which is silent there.  It is load-bearing
+  against an ASan server, which is how it was validated.
+- `test/sql/sparsemap_smallset.sql`: pure small-mode, promote/demote across
+  the cap through VACUUM, and the RLE-run encoding, each checked against
+  seq-scan truth through both `amgettuple` and `amgetbitmap`.  It passes
+  identically on a 5.6.0 control, so it does not detect the version.  What it
+  does catch is a size mismatch in the new encoding tripping the 4.1.0 guard
+  (simulated against the library: the guard fires on it and stays quiet on
+  healthy maps).
+
+### Qualified
+
+Debian 12 / gcc 12 / PostgreSQL 18.0, EC2 `c7i.4xlarge`:
+
+- **47/47** regression tests; clean build, **zero warnings** (two pre-existing
+  gcc 12 `-Wshadow` / unused-variable warnings removed).
+- **TAP 17/17** -- concurrency 2/2, crash recovery 10/10 across two `kill -9`
+  cycles plus Hanoi merge, replication 5/5 with standby promotion (8,187 s).
+  The first attempt was killed by a 7,800 s harness timeout.  That was not a
+  hang: `crash_recovery.pl` checks each of ~1,060 committed batches with an
+  indexed probe over a pending list of ~13,000 pages (3.5-4.9 s each), and the
+  run needs about 2h15m on this EBS-backed rig.  Timed per probe; the file
+  is unchanged since 4.0.2.  4.1.0 took 5,379 s on the same instance type and
+  the cause of the gap is not isolated -- the sparsemap swap alone measured
+  +2% per probe, too small to explain it.
+- Upstream sparsemap suite against the **vendored** copy: all 17 suites,
+  including the five new in 5.7.0 -- `test_smallset_api` (70,909 checks),
+  `test_rle_transitions` (17,639), `test_smallset_transitions` (15,250, 8 mode
+  crossings), `test_equals_hash`, `test_offset_overflow` -- plus 175,543
+  coverage expectations.  Upstream's zero-warnings claim reproduced under
+  `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow`.
+  `SPARSEMAP_PREFIX`: 85 prefixed symbols, 0 leaks.
+- Pending-list scan latency, sparsemap 5.6.0 vs 5.7.0 on the same pg_tre
+  source: 415 ms vs 423 ms per probe on a 4,452-page pending list (+2%).
+
+### Acknowledgements
+
+- The downstream qualification team, for a report that named the exact call
+  sites, was careful to label its root-cause lead as unvalidated, and asked
+  for the multibyte and sanitizer coverage this release adds.
+
+---
+
 ## [4.1.0] - 2026-09-27 - vendored sparsemap v5.6.0 (security hardening) + corruption detection
 
 Library-refresh release.  The vendored sparsemap goes from **v5.5.0 to
