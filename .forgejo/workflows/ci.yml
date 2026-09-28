@@ -85,6 +85,72 @@ jobs:
             /var/log/postgresql/
           retention-days: 7
 
+  asan:
+    # Regression suite inside an AddressSanitizer-instrumented PostgreSQL.
+    # The SERVER is instrumented, not just pg_tre: the 4.2.0 similarity
+    # crash was an out-of-bounds store made by PostgreSQL's own
+    # pg_mb2wchar_with_len() into a pg_tre stack variable, which ASan on
+    # pg_tre.so alone does not see.  scripts/asan-check.sh is the whole
+    # recipe, so a local run is the same check as CI.
+    #
+    # Validated: against the 4.1.0 similarity code this job exits 2 with
+    # "stack-buffer-overflow ... trgm_set src/query/trgm_similarity.c:94";
+    # against HEAD it passes 47/47 with no report.
+    #
+    # Exit codes: 1 = test failure, 2 = sanitizer report, 3 = setup.
+    name: ASan (instrumented PG${{ matrix.pg }})
+    runs-on: docker
+    container:
+      image: debian:12
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['18.0']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl bzip2 build-essential pkg-config git \
+              flex bison autoconf automake libtool gettext autopoint m4 \
+              locales
+
+      - name: Cache ASan PostgreSQL ${{ matrix.pg }}
+        id: cache-pg
+        uses: actions/cache@v4
+        with:
+          path: /opt/pg-asan-${{ matrix.pg }}
+          key: pg-asan-${{ matrix.pg }}-debian12-${{ hashFiles('scripts/asan-check.sh') }}
+
+      - name: Build + run under ASan
+        env:
+          PG_VERSION: ${{ matrix.pg }}
+          ASAN_PREFIX: /opt/pg-asan-${{ matrix.pg }}
+          ASAN_WORK: /tmp/pg_tre-asan
+        run: |
+          # initdb refuses to run as root; the container runs as root.
+          useradd -m builder
+          mkdir -p "$ASAN_PREFIX" "$ASAN_WORK"
+          chown -R builder "$ASAN_PREFIX" "$ASAN_WORK" "$GITHUB_WORKSPACE"
+          su builder -c "PG_VERSION=$PG_VERSION ASAN_PREFIX=$ASAN_PREFIX \
+              ASAN_WORK=$ASAN_WORK bash scripts/asan-check.sh"
+
+      - name: Upload sanitizer reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: asan-pg${{ matrix.pg }}
+          path: |
+            /tmp/pg_tre-asan/reports/
+            /tmp/pg_tre-asan/server.log
+            /tmp/pg_tre-asan/regress.log
+            test/results/
+          retention-days: 14
   format-check:
     name: clang-format on changed files
     runs-on: docker
