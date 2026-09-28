@@ -163,37 +163,61 @@ for my $cycle (1 .. $N_CYCLES) {
     $node->start;
 
     # ----------------------------------------------------------
-    # Differential check: every batch in commit_log must be
-    # findable via both index and seq-scan, exactly the same
-    # set of rows.
+    # Differential check: every committed batch must be findable via both the
+    # index and a sequential scan, exactly the same rows, in the state WAL
+    # replay produced (before any VACUUM -- a VACUUM here would merge the
+    # pending list into runs and we would no longer be testing what replay
+    # left behind).
+    #
+    # Done as ONE grouped query per scan method, not one query per batch.  The
+    # per-batch loop scanned the whole (unmerged, replay-produced) pending-list
+    # overlay once for each of ~1000 batches, which is O(batches x pending) and
+    # ran for over two hours in cycle 2 on an EBS runner.  A single grouped
+    # query scans that same overlay once and buckets by batch, giving the
+    # identical per-batch index-vs-seq comparison ~1000x faster.  See
+    # doc/reports/tap-crash-recovery-timing-2026-09.md.
     # ----------------------------------------------------------
-    my $batches = $node->safe_psql('postgres', qq{
+    my $expected = $node->safe_psql('postgres', qq{
         SELECT batch_id, seq_lo, seq_hi FROM commit_log
          WHERE cycle = $cycle ORDER BY batch_id;
     });
-    my $checked = 0;
-    my $diffs   = 0;
-    for my $line (split /\n/, $batches // '') {
+    my %want;   # batch_id => 1, the batches that committed before the crash
+    for my $line (split /\n/, $expected // '') {
         next unless $line;
         my ($bid, $lo, $hi) = split /\|/, $line;
-        next unless defined $hi;
+        $want{$bid} = 1 if defined $hi;
+    }
 
-        my $idx = $node->safe_psql('postgres', qq{
-            SET enable_seqscan = off;
-            SELECT count(*) FROM crash_test
-             WHERE cycle = $cycle AND seq BETWEEN $lo AND $hi
-               AND body %~~ tre_pattern('crash_cycle$cycle', 0);
-        });
-        my $seq = $node->safe_psql('postgres', qq{
-            SET enable_indexscan = off;
-            SET enable_bitmapscan = off;
-            SELECT count(*) FROM crash_test
-             WHERE cycle = $cycle AND seq BETWEEN $lo AND $hi
-               AND tre_amatch(body, 'crash_cycle$cycle', 0);
-        });
+    # Bucket every matching row by its batch (seq / 100 == batch_id), via the
+    # index and via a seq-scan, in one query each.
+    my $idx_rows = $node->safe_psql('postgres', qq{
+        SET enable_seqscan = off;
+        SELECT (seq / 100)::int AS batch, count(*) FROM crash_test
+         WHERE cycle = $cycle
+           AND body %~~ tre_pattern('crash_cycle$cycle', 0)
+         GROUP BY 1 ORDER BY 1;
+    });
+    my $seq_rows = $node->safe_psql('postgres', qq{
+        SET enable_indexscan = off;
+        SET enable_bitmapscan = off;
+        SELECT (seq / 100)::int AS batch, count(*) FROM crash_test
+         WHERE cycle = $cycle
+           AND tre_amatch(body, 'crash_cycle$cycle', 0)
+         GROUP BY 1 ORDER BY 1;
+    });
+    my %idx = map { my ($b, $c) = split /\|/; ($b => $c) }
+              grep { length } split /\n/, $idx_rows // '';
+    my %seq = map { my ($b, $c) = split /\|/; ($b => $c) }
+              grep { length } split /\n/, $seq_rows // '';
+
+    my $checked = 0;
+    my $diffs   = 0;
+    for my $bid (sort { $a <=> $b } keys %want) {
         $checked++;
-        if ((defined $idx ? $idx : '') ne (defined $seq ? $seq : '')) {
-            diag("cycle=$cycle batch=$bid seq=[$lo..$hi] idx=$idx seq=$seq");
+        my $i = $idx{$bid} // 0;
+        my $s = $seq{$bid} // 0;
+        if ($i ne $s) {
+            diag("cycle=$cycle batch=$bid idx=$i seq=$s");
             $diffs++;
         }
     }
