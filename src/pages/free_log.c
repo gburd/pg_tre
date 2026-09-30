@@ -496,8 +496,10 @@ free_log_reclaim_one(
 
 BlockNumber
 pg_tre_free_log_drain(
-		Relation index, Relation heaprel, BlockNumber *out_pending)
+		Relation index, Relation heaprel, BlockNumber *out_pending,
+		FullTransactionId logged_before, BlockNumber *out_pinned)
 {
+	BlockNumber		  pinned	= 0;
 	PgTreMetaPageData meta;
 	BlockNumber		  logblk;
 	BlockNumber		  reclaimed = 0;
@@ -547,6 +549,8 @@ pg_tre_free_log_drain(
 			else
 			{
 				pending++;
+				if (FullTransactionIdPrecedes(fxid, logged_before))
+					pinned++;
 				slot++;
 			}
 		}
@@ -628,5 +632,7 @@ pg_tre_free_log_drain(
 
 	if (out_pending)
 		*out_pending = pending;
+	if (out_pinned)
+		*out_pinned = pinned;
 	return reclaimed;
 }

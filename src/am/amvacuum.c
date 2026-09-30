@@ -28,6 +28,7 @@
 
 #include "access/amapi.h"
 #include "access/genam.h"
+#include "access/transam.h"
 #include "commands/vacuum.h"
 #include "storage/bufmgr.h"
 #include "utils/elog.h"
@@ -105,6 +106,8 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     uint64      merged;
     BlockNumber recycled;
     BlockNumber pending = 0;
+    BlockNumber pinned = 0;
+    FullTransactionId start_fxid;
 
     /* Nothing to scan (e.g. cleanup-only with an all-visible heap). */
     if (info->index == NULL)
@@ -121,6 +124,9 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
     if (stats == NULL)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+
+    /* Pages freed from here on cannot be reusable until XIDs move past this. */
+    start_fxid = ReadNextFullTransactionId();
 
     /* Drain the pending list into the posting trees. */
     merged = pg_tre_pending_merge(info->index);
@@ -185,7 +191,7 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
         BlockNumber freelog_pending = 0;
         BlockNumber freelog_recycled =
             pg_tre_free_log_drain(info->index, info->heaprel,
-                                  &freelog_pending);
+                                  &freelog_pending, start_fxid, &pinned);
         recycled += freelog_recycled;
         pending += freelog_pending;
     }
@@ -199,6 +205,27 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     stats->num_pages = RelationGetNumberOfBlocks(info->index);
     stats->pages_free += recycled;
     stats->pages_deleted += pending;
+
+    /*
+     * Every merge rewrites the posting tier and frees the old copy only once
+     * no snapshot can still see it.  An old snapshot therefore pins one full
+     * copy per merge, and the index grows without bound until it ends.  Say
+     * so, rather than let the file quietly reach 800x the heap (field report
+     * 2026-09-29).  Count only pages an EARLIER VACUUM freed: this pass's
+     * merge always leaves its own copy waiting, snapshot or not.  Threshold:
+     * at least half the index, and >= 128 MB.
+     */
+    if (pinned >= stats->num_pages / 2 &&
+        pinned >= (BlockNumber) (128 * 1024 * 1024 / BLCKSZ))
+        ereport(WARNING,
+                (errmsg("pg_tre: %u of %u pages in index \"%s\" are waiting "
+                        "for old snapshots to end before they can be reused",
+                        pinned, stats->num_pages,
+                        RelationGetRelationName(info->index)),
+                 errhint("End long-running or idle-in-transaction sessions "
+                         "and prepared transactions, then VACUUM again.  "
+                         "REINDEX INDEX CONCURRENTLY returns the space to "
+                         "the operating system.")));
 
     /*
      * If ambulkdelete already ran in this VACUUM it left num_index_tuples

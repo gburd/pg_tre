@@ -42,6 +42,7 @@
 
 #include "postgres.h"
 
+#include "access/transam.h"
 #include "storage/block.h"
 #include "utils/rel.h"
 
@@ -68,12 +69,15 @@ pg_tre_free_log_append(Relation index, const BlockNumber *blocks, int n);
  *
  * Returns the number of blocks reclaimed; *out_pending (optional)
  * receives the count of logged blocks not yet reclaimable (still within
- * the visibility horizon).  Call from amvacuumcleanup after the
+ * the visibility horizon); *out_pinned (optional) receives how many of
+ * those were logged before `logged_before`, i.e. by an earlier VACUUM
+ * and still held back by some snapshot.  Call from amvacuumcleanup after the
  * posting-leaf recycle.  Caller holds a lock excluding concurrent
  * catalog writers.
  */
 extern BlockNumber pg_tre_free_log_drain(
-		Relation index, Relation heaprel, BlockNumber *out_pending);
+		Relation index, Relation heaprel, BlockNumber *out_pending,
+		FullTransactionId logged_before, BlockNumber *out_pinned);
 
 /*
  * Collect every page reachable from a run's upper-tree root (upper
