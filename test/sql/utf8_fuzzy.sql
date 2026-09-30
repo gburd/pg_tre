@@ -43,4 +43,15 @@ SELECT id FROM u8_t WHERE body %~~ tre_pattern('日本語のテスト', 1) ORDER
 RESET enable_indexscan;
 RESET enable_bitmapscan;
 
+-- Edits are counted in characters, whatever the database's LC_CTYPE.
+-- Under a C/POSIX ctype TRE used to count bytes: 'café' was 2 edits from
+-- 'cafe' and キ (3 bytes) was 3 edits from ス, so the k=1 queries above
+-- returned different rows on a C and a C.UTF-8 database.
+SELECT tre_amatch_cost('cafe', 'café', 5) AS cost_e_acute,
+       tre_amatch_cost('日本語のテキスト', '日本語のテスト', 5) AS cost_cjk,
+       tre_amatch_cost('naïve', 'naive', 5) AS cost_i_diaeresis;
+-- Match offsets stay byte offsets (callers slice the text by bytes).
+SELECT match_start, match_end
+  FROM tre_amatch_detail('xx café yy', 'café', 0);
+
 DROP TABLE u8_t CASCADE;

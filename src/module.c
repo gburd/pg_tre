@@ -12,6 +12,7 @@
 
 #include "fmgr.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -444,6 +445,12 @@ pg_tre_match_guarded(void *compiled, const char *str, int str_len,
 
     pg_tre_check_match_timeout(&result);
     return result;
+}
+
+int
+pg_tre_db_is_utf8(void)
+{
+    return GetDatabaseEncoding() == PG_UTF8;
 }
 
 /* ---- _PG_init ---- */

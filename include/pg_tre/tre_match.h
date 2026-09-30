@@ -100,4 +100,11 @@ const char *tre_errmsg(int errcode);
  */
 const char *pg_tre_tre_version(void);
 
+/*
+ * True when the current database's encoding is UTF-8.  Defined in
+ * module.c (which has postgres.h); tre_match.c uses it to make TRE count
+ * characters rather than bytes regardless of LC_CTYPE.
+ */
+int pg_tre_db_is_utf8(void);
+
 #endif /* TRE_FUNCS_H */
