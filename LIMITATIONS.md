@@ -238,3 +238,29 @@ empties a leaf accumulates allocated pages. This mirrors nbtree (which also
 needs REINDEX to reclaim half-empty pages) and never affects correctness.
 **Churn-heavy deployments should schedule periodic
 `REINDEX INDEX CONCURRENTLY`.**
+
+### Old snapshots pin every merge's old copy
+
+Each VACUUM merge rewrites the posting tier; the old copy is freed only once
+no snapshot could still be reading it (nbtree's rule for deleted pages).
+A long transaction, an idle-in-transaction session or a forgotten prepared
+transaction therefore pins **one full copy per merge**, and the index grows
+without bound until it ends. Measured (4.2.1): six ingest+VACUUM rounds of
+source files under one open `REPEATABLE READ` snapshot took the index from
+140 MB to 1.6 GB against 75 MB of heap; every page came back once the
+snapshot ended. Since 4.2.1 VACUUM raises a `WARNING` when pages held this
+way pass half the index (and 128 MB). End the session, VACUUM again; to
+return the space to the OS, `REINDEX INDEX CONCURRENTLY`.
+
+### Upgrading does not repair an index damaged by an earlier version
+
+"No REINDEX required" means the on-disk format is unchanged — not that an
+index already damaged by a defect is repaired by installing the fix. Up to
+4.2.0: a stale FSM after a crash could wedge `INSERT` on
+`LWLock:BufferContent` (repeatedly, across restarts), and dead TIDs from
+the pending list were never removed (scans could fail with
+`could not read blocks N..N ... read only 0 of 8192 bytes`, and the index
+never shrank). 4.2.1 fixes all three going forward, and an existing index
+stops wedging once 4.2.1 is loaded. **Dead TIDs already merged into an index
+by an earlier version stay there: REINDEX any `tre` index that has shown a
+read error or grew far larger than its heap.**
