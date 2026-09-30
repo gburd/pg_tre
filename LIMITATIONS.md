@@ -264,3 +264,12 @@ never shrank). 4.2.1 fixes all three going forward, and an existing index
 stops wedging once 4.2.1 is loaded. **Dead TIDs already merged into an index
 by an earlier version stay there: REINDEX any `tre` index that has shown a
 read error or grew far larger than its heap.**
+
+### Non-UTF-8 databases: ASCII only
+
+The trigram tokenizer decodes text as UTF-8 regardless of the database
+encoding. In a `LATIN1` (or other single-byte) database, building an index
+over, or querying with, any non-ASCII character fails with
+`invalid UTF-8 sequence at byte offset N`. This is not a data-loss risk; the
+statement errors out. Pure-ASCII text works. Use a UTF-8 database for
+non-ASCII text. (Found while qualifying 4.2.2; present in every release.)

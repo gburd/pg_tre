@@ -203,6 +203,7 @@ restart:
 | 4.0.2   | 4.1.0   | ✅ Yes       | Vendored sparsemap v5.6.0 + corruption detection; no on-disk change, no REINDEX |
 | 4.1.0   | 4.2.0   | ✅ Yes       | sparsemap v5.7.0 + similarity crash fix; no REINDEX to upgrade; **downgrade to 4.1.0 needs REINDEX** |
 | 4.2.0   | 4.2.1   | ⚠️ Yes, but  | No on-disk change, no REINDEX to upgrade — but REINDEX any index that already raised `could not read blocks` or grew far past a fresh build: earlier versions left dead TIDs merged in, which the fix does not remove |
+| 4.2.1   | 4.2.2   | ✅ Yes       | No on-disk change, no REINDEX either way. UTF-8 databases with a C ctype: fuzzy queries over non-ASCII text now count characters and may return more (correct) rows |
 
 When releasing a version with breaking changes:
 

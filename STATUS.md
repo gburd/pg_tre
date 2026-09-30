@@ -1,8 +1,16 @@
 # pg_tre status
 
-Released: **4.2.1** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.2.2** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.2.2 makes fuzzy matching count edits in characters on every
+UTF-8 database.  Under a C/POSIX `LC_CTYPE`, TRE counted bytes,
+so `'cafe'` was 2 edits from `'café'` and the same `k=1` query
+returned different rows depending on the cluster's locale.  It
+also vendors sparsemap v5.8.0 (a heap over-read fix in shared
+set-operation code; faster posting builds).  No on-disk change,
+no REINDEX either way.
 
 4.2.1 fixes three write-path defects from one field report.
 INSERT could deadlock on its own pending-list tail after a crash

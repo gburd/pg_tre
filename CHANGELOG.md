@@ -6,6 +6,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.2] - 2026-09-30 - fuzzy matching counts characters under any locale; vendored sparsemap v5.8.0
+
+**No on-disk format change; no REINDEX to upgrade or to downgrade to 4.2.1.**
+Index pages written by 4.2.1 and by 4.2.2 are byte-identical.
+
+### Fixed
+
+- **Fuzzy matching counted bytes instead of characters on UTF-8 databases
+  with a C/POSIX `LC_CTYPE`.**  TRE picks its unit from the backend's
+  ctype, so `'cafe'` was 2 edits from `'café'` (é is 2 bytes) and キ was 3
+  edits from ス.  The same `k=1` query returned different rows on a
+  `C` and a `C.UTF-8` cluster, and the byte answer disagreed with the
+  index, whose trigrams are built from characters.  On UTF-8 databases
+  pg_tre now runs TRE under a thread-local `C.UTF-8` ctype, so edits are
+  always counted in characters.  Other encodings are unchanged; match
+  offsets from `tre_amatch_detail` stay byte offsets.  **Behaviour change:**
+  on a UTF-8 database with a `C` ctype, fuzzy (`k>0`) queries over
+  non-ASCII text can return more rows than before -- the rows they always
+  should have.  No REINDEX: the index already worked in characters.
+- `test/expected/utf8_fuzzy.out` had recorded the byte behaviour, so the
+  test failed on every `C.UTF-8` cluster.  3.1.0 committed the character
+  answer; 3.2.0 regenerated the file on a `C` cluster and silently turned it
+  into the byte answer.  It now expects characters again, pinned by
+  `tre_amatch_cost` checks that give different numbers for bytes.  CI runs
+  the suite a second time in a `C.UTF-8` database
+  (`run-regress.sh` honours `CREATEDB_OPTS`), so a locale-dependent
+  expected file can no longer land.
+
+### Changed
+
+- **Vendored sparsemap v5.7.0 -> v5.8.0**, verbatim apart from the include
+  path.  Fixes a heap over-read in `__sm_coalesce_map`, shared by every set
+  operation pg_tre uses (results were already correct; the read was
+  undefined behaviour).  `sm_add_many_grow`, which builds every posting,
+  now merges sorted runs instead of inserting bit by bit: VACUUM of
+  200,000 short rows went from 18.4 s to 15.7 s and a fresh `CREATE INDEX`
+  from 18.6 s to 16.1 s (medians of 3, same pg_tre source).  Source-file
+  workloads, INSERT and query latency are unchanged.  `sizeof(sm_t)` grows
+  from 24 to 32 bytes; pg_tre never embeds it by value, so this is a
+  recompile only.
+
+### Qualified
+
+Debian 12 / gcc 12.2 / PostgreSQL 18.6, EC2 `c7i.4xlarge`, `--enable-cassert`:
+**49/49** regression tests under both `--no-locale` and `--locale=C.UTF-8`,
+with identical output across the two; all tests other than `utf8_fuzzy`
+match 4.2.1's output in both.  Also 49/49 with the database locale set
+per-database each way on the opposite cluster.  **TAP 22/22**
+(`fsm_stale` 5, `concurrency` 2, `replication` 5, `crash_recovery` 10).
+ASan-instrumented server: 49/49, 0 reports.  Upstream sparsemap suite
+against the vendored copy: 21/21, 0 warnings.  An index built by 4.2.1 and
+read by 4.2.2 gives identical results on 9 queries, and index = seq-scan.
+Zero compiler warnings.
+
+---
+
 ## [4.2.1] - 2026-09-30 - INSERT wedge on LWLock:BufferContent; dead TIDs left by VACUUM
 
 Three write-path fixes from one field report, plus a VACUUM warning.
