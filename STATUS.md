@@ -1,8 +1,22 @@
 # pg_tre status
 
-Released: **4.2.0** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.2.1** (2026-09).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.2.1 fixes three write-path defects from one field report.
+INSERT could deadlock on its own pending-list tail after a crash
+(the FSM is not WAL-logged and could offer a page the backend
+already held): LWLock:BufferContent, no blocker, immune to
+cancel/terminate, recurring after restart.  VACUUM never removed
+dead TIDs that were still in the pending list, so scans could hit
+`could not read blocks ... read only 0 of 8192 bytes` after the
+heap truncated.  And aminsert wrote one pending entry per trigram
+occurrence instead of per distinct trigram, ~9x the list on source
+text.  VACUUM also warns now when old snapshots pin most of an
+index.  No on-disk change; REINDEX only indexes already damaged
+(see `CHANGELOG.md` and
+`doc/reports/insert-wedge-and-ghost-tids-2026-09.md`).
 
 4.2.0 fixes a backend abort in the trigram-similarity family:
 `tre_trgm_similarity('foo','foobar')` could kill the backend

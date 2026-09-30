@@ -6,6 +6,74 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.1] - 2026-09-30 - INSERT wedge on LWLock:BufferContent; dead TIDs left by VACUUM
+
+Three write-path fixes from one field report, plus a VACUUM warning.
+Full write-up: `doc/reports/insert-wedge-and-ghost-tids-2026-09.md`.
+
+**No on-disk format change; upgrading needs no REINDEX.**  But upgrading
+does not repair an index an earlier version already damaged: **REINDEX any
+`tre` index that has raised `could not read blocks ... read only 0 of 8192
+bytes`, or that is far larger than a fresh build.**  Downgrade to 4.2.0 needs
+no REINDEX (and brings the bugs back).
+
+### Fixed
+
+- **INSERT could wait forever on its own buffer lock** (since 1.5.5).
+  `pg_tre_extend_fork` took an unconditional lock on each block the index FSM
+  offered, while the caller held the meta page and the full pending tail.  The
+  FSM is not WAL-logged, so after a crash it can offer a page that is in use --
+  including that tail.  Symptoms: `LWLock:BufferContent`,
+  `pg_blocking_pids() = {}`, immune to `pg_cancel_backend` and
+  `pg_terminate_backend`, every writer and the checkpointer queued behind it,
+  and it came back after every restart.  The lock is now conditional and a busy
+  block is skipped, as nbtree's `_bt_allocbuf` does.  This was not caused by
+  pages from an older version, and installing 4.2.1 is enough to stop it.
+- **VACUUM left dead TIDs from the pending list in the index.**
+  `ambulkdelete` checked only the base posting tree.  A row inserted and
+  deleted between two VACUUMs was still in the pending list, so it survived,
+  was merged into the tree, and stayed there after the heap freed or truncated
+  its block.  Scans then read past the end of the heap (the reported error).
+  VACUUM now merges the pending list before removing dead TIDs, as GIN does,
+  and checks every live run, which also covers `pg_tre.flush_to_run`.
+- **aminsert wrote one pending entry per trigram occurrence**, not one per
+  distinct trigram as the bulk build does.  The position is never read.  On
+  source files the pending list was ~9x larger than necessary: 3,749 files went
+  from 1,504 MB to 165 MB of pending list, INSERT from 12.5 s to 2.9 s, and
+  VACUUM from 74 s to 15 s.  Short rows (mail subjects) are unchanged.
+
+### Added
+
+- VACUUM `WARNING` when pages freed by an earlier VACUUM are still held by an
+  old snapshot and make up half the index (and at least 128 MB).  Each merge's
+  old copy can only be reused once no snapshot can see it, so a long or idle
+  transaction pins one copy per merge.  One held snapshot over six ingest
+  rounds took an index to 1.6 GB against 75 MB of heap, with no message.
+  `LIMITATIONS.md` documents it.
+- `tap/fsm_stale.pl` reproduces the wedge; 4.2.0 hangs with the field
+  signature.  `test/sql/vacuum_pending_dead.sql` covers the read-past-EOF
+  error, directly and via `flush_to_run`; 4.2.0 fails both cases.
+  `test/sql/pending_distinct.sql` covers the per-occurrence entries: 89
+  pending pages drop to 1.
+
+### Qualified
+
+Debian 12 / gcc 12.2 / PostgreSQL 18.6, EC2 `c7i.4xlarge`, `--enable-cassert`:
+**49/49** regression tests, **TAP 22/22** (`fsm_stale` 5, `concurrency` 2,
+`replication` 5, `crash_recovery` 10), zero compiler warnings (`-O1` cassert
+and `-O2`).  `concurrency.pl` takes ~640 s on both 4.2.0 and 4.2.1, dominated
+by its quiesced check over an unmerged ~94,000-page pending list.  A/B
+benchmark against 4.2.0 (three alternating runs, medians) is in the report.
+
+### Not reproduced
+
+The report's 137 GB index over 163 MB of source files.  The last two fixes
+and the snapshot warning each reproduce part of it and together explain its
+shape.  A fresh `CREATE INDEX` over the same kind of data is 269 MB and
+agrees with a seq-scan.
+
+---
+
 ## [4.2.0] - 2026-09-27 - similarity-family backend abort fixed; vendored sparsemap v5.7.0
 
 **Upgrade needs no REINDEX. A downgrade to 4.1.0 does -- see below.**

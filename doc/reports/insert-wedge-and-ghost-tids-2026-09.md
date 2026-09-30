@@ -150,6 +150,15 @@ Under one held `REPEATABLE READ` snapshot, six ingest+VACUUM rounds of 11,247
 source files grew the index from 140 MB to 1.6 GB against 75 MB of heap. Once
 the snapshot ended, all 83,574 held pages went back to the FSM.
 
+Growth continues without a snapshot too, at about half the rate. Four rounds
+of 3,749 files, each inserted and then VACUUMed, went from 33,315 to 143,475
+pages, while the FSM held 44,600 free pages that the next round would reuse.
+Each merge frees the last merge's copy, and that copy becomes reusable one
+VACUUM later, so a steadily growing table carries about one spare copy of its
+posting tier. The upgraded warning stayed silent in all four of those rounds.
+It fired in round 4 with a snapshot held (1,547 MB against 1,121 MB without
+one).
+
 ## What an existing deployment should do
 
 - Install 4.2.1. The wedge cannot recur once the fixed library is loaded, and
