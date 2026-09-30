@@ -61,6 +61,20 @@ pg_tre_extend_fork(Relation index, ForkNumber forknum, PageTreKind kind)
      * we drop it and ask the FSM for the next candidate; if the FSM is
      * exhausted we fall through to a physical extension.  This closes the
      * double-hand-out window without relying on a relation-extension lock.
+     *
+     * The lock MUST be conditional.  Callers hold other pg_tre buffers
+     * exclusively while they extend -- the meta page and the current
+     * pending tail in acquire_tail, the meta page in the free-log and
+     * run-catalog appends -- and the FSM is not WAL-logged, so after a
+     * crash it can list a block that has since been reused, including the
+     * very tail this backend holds.  An unconditional LockBuffer then waits
+     * on our own LWLock forever: uninterruptible, invisible to
+     * pg_blocking_pids(), and holding the meta page, so every writer and
+     * the checkpointer pile up behind it and it recurs after restart
+     * because the stale FSM does too (field report, 2026-09-29).  nbtree's
+     * _bt_allocbuf documents the same hazard and the same answer: a page
+     * somebody holds is not free; skip it and let a later VACUUM re-record
+     * it if it really is.
      */
     if (forknum == MAIN_FORKNUM)
     {
@@ -71,7 +85,12 @@ pg_tre_extend_fork(Relation index, ForkNumber forknum, PageTreKind kind)
             CHECK_FOR_INTERRUPTS();
 
             buf = ReadBuffer(index, reuse);
-            LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+            if (!ConditionalLockBuffer(buf))
+            {
+                /* Held -- by a peer or by us.  Not free; next candidate. */
+                ReleaseBuffer(buf);
+                continue;
+            }
             page = BufferGetPage(buf);
 
             /*
