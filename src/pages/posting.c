@@ -51,6 +51,7 @@
 #include "pg_tre/page.h"
 #include "pg_tre/posting.h"
 #include "pg_tre/pg_tre.h"
+#include "pg_tre/run_catalog.h"
 #include "pg_tre/sparsemap.h"
 
 /* Usable bytes per posting leaf for the sparsemap blob. */
@@ -2257,18 +2258,48 @@ pg_tre_posting_bulk_delete(Relation index,
                            BlockNumber *out_pages,
                            BlockNumber *out_deleted)
 {
-    PgTreMetaPageData meta;
     uint64  tuples_removed = 0;
     uint64  tuples_remaining = 0;
     BlockNumber posting_pages = 0;
     BlockNumber pages_deleted = 0;
 
-    pg_tre_meta_read(index, &meta);
+    PgTreRunIter *it;
+    PgTreRun    run;
+    BlockNumber *seen = NULL;
+    int         n_seen = 0, cap_seen = 0, i;
 
-    if (BlockNumberIsValid(meta.root_upper))
-        posting_upper_walk(index, meta.root_upper, callback, callback_state,
+    /*
+     * Every live run, not just the base tree: with pg_tre.flush_to_run the
+     * pending list drains into catalog runs, and a dead TID left in one
+     * outlives its heap tuple exactly as an unmerged pending entry did.
+     * Runs can share a root (tre_debug_append_run aliases the base), so
+     * walk each root once.
+     */
+    it = pg_tre_run_catalog_open(index);
+    while (pg_tre_run_catalog_next(it, &run))
+    {
+        if (!BlockNumberIsValid(run.root_upper))
+            continue;
+        for (i = 0; i < n_seen; i++)
+            if (seen[i] == run.root_upper)
+                break;
+        if (i < n_seen)
+            continue;
+        if (n_seen == cap_seen)
+        {
+            cap_seen = cap_seen ? cap_seen * 2 : 8;
+            seen = seen ? repalloc(seen, cap_seen * sizeof(BlockNumber))
+                        : palloc(cap_seen * sizeof(BlockNumber));
+        }
+        seen[n_seen++] = run.root_upper;
+
+        posting_upper_walk(index, run.root_upper, callback, callback_state,
                            &tuples_removed, &tuples_remaining, &posting_pages,
                            &pages_deleted);
+    }
+    pg_tre_run_catalog_close(it);
+    if (seen)
+        pfree(seen);
 
     if (out_remaining)
         *out_remaining = tuples_remaining;

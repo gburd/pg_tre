@@ -56,6 +56,18 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
         return stats;
 
     /*
+     * Merge the pending list first, as ginbulkdelete does.  The walk below
+     * only sees posting trees, so a dead TID still sitting in the pending
+     * list survived this VACUUM, was merged into a tree by amvacuumcleanup
+     * a moment later, and stayed there for good -- while the heap freed its
+     * line pointer and could truncate its block away.  A later scan then
+     * fetched a TID past EOF: "could not read blocks N..N ... read only 0
+     * of 8192 bytes" (field report 2026-09-29).  Merged now, those TIDs are
+     * in the trees the callback is about to strip.
+     */
+    (void) pg_tre_pending_merge(info->index);
+
+    /*
      * C2: strip dead TIDs from every posting tree reachable via the
      * upper tree.  The callback decides which TIDs are dead; removed
      * leaves are repacked in place and WAL-logged.
