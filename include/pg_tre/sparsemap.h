@@ -214,9 +214,32 @@ typedef SSIZE_T ssize_t;
  * one address space without colliding at link time.  Only C
  * identifiers that become linker symbols (the public functions) and
  * the public type names are renamed; compile-time macros
- * (SM_IDX_MAX, the SM_VERSION_* values, enum constants) are
- * unaffected because they never reach the linker.  The serialized
- * wire format does not change.
+ * (SM_IDX_MAX, SM_FOUND, SM_NOT_FOUND, SM_CURSOR_INIT,
+ * SM_CURSOR_CACHED_INIT, SM_CACHE_WAYS, the SM_VERSION_* values, and
+ * the enum constants) are NOT renamed and keep their canonical
+ * spelling.  This is a hard limitation of the C preprocessor, not a
+ * policy choice: functions are prefixed by rewriting the reference at
+ * the call site (#define sm_add SM__P(sm_add)) because the definition
+ * emits the prefixed name as an actual linker symbol.  A value macro
+ * has no such definition site -- reaching it under a prefixed spelling
+ * would require a #define whose NAME is <PREFIX>SM_IDX_MAX, and the
+ * preprocessor cannot form a macro name by token-pasting in a #define
+ * name position (only the replacement list is pasted).  A prefixed
+ * value macro therefore has to be spelled out literally, which needs
+ * the prefix token known when this header is authored -- impossible
+ * for an arbitrary caller-chosen SPARSEMAP_PREFIX.  A consumer that
+ * wants prefixed macro spellings can add them itself, since it knows
+ * its own prefix literally, e.g.:
+ *
+ *	#define myapp_SM_IDX_MAX  SM_IDX_MAX
+ *	#define myapp_SM_FOUND(x) SM_FOUND(x)
+ *
+ * The compile toggles SM_EXPOSE_STRUCT and SM_INTERNAL are likewise
+ * not prefixed: they are read by this header's own #ifdefs, so a
+ * prefixed spelling would only work if the header also tested the
+ * prefixed name -- which again requires a literal, not-arbitrary
+ * prefix.  Keep defining them under their canonical names.  The
+ * serialized wire format does not change.
  */
 #ifdef SPARSEMAP_PREFIX
 #define SM__CAT2(a, b) a##b
@@ -327,9 +350,9 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "5.7.0"
+#define SM_VERSION_STRING "5.8.0"
 #define SM_VERSION_MAJOR  5
-#define SM_VERSION_MINOR  7
+#define SM_VERSION_MINOR  8
 #define SM_VERSION_PATCH  0
 
 /** Handle to a sparsemap instance.
@@ -400,19 +423,33 @@ void sm_set_allocator(sm_allocator_t a);
  * one place so the embedded-copy use case cannot drift from the
  * library's own definition.
  *
- * sm_t is three machine words.  The allocation-lineage tag (how
+ * sm_t is four machine words.  The allocation-lineage tag (how
  * m_data was provisioned) is folded into the low bits of m_capacity:
  * capacity is always rounded up to an 8-byte boundary, so its low 3
  * bits are free.  Use the internal __sm_cap() / __sm_kind() accessors
  * rather than touching m_capacity directly.  There is no per-map
  * allocator and no stored cursor; reads accelerate through a
- * caller-owned sm_cursor_t (see below).  Nothing here is serialized.
+ * caller-owned sm_cursor_t (see below).
+ *
+ * m_card_plus1 is a RUNTIME-ONLY lazy cache of sm_cardinality(): it is
+ * NOT serialized and NOT copied to the wire.  It is stored biased by
+ * one so that the all-zero state (a calloc'd or zeroed struct) reads as
+ * "unknown": 0 == cache invalid, otherwise the cached count is
+ * (m_card_plus1 - 1).  Every membership-changing operation invalidates
+ * it (sets it to 0); sm_cardinality recomputes it via the chunk walk on
+ * the first query after a mutation and caches the result.  Because the
+ * value is derived purely from m_data, a fresh map with an invalid
+ * cache is always correct.  This is the ONLY field that is not part of
+ * the serialized state; sizeof(sm_t) grows from 24 to 32 bytes.
  */
 #if defined(SM_INTERNAL) || defined(SM_EXPOSE_STRUCT)
 struct SM_ALIGNED(8) sparsemap {
-	size_t m_capacity;  /* (capacity & ~7) bytes; low 3 bits = lineage */
-	size_t m_data_used; /* used size of m_data, in bytes */
-	uint8_t *m_data;    /* the serialized bitmap data */
+	size_t m_capacity;   /* (capacity & ~7) bytes; low 3 bits = lineage */
+	size_t m_data_used;  /* used size of m_data, in bytes */
+	uint8_t *m_data;     /* the serialized bitmap data */
+	size_t m_card_plus1; /* runtime-only lazy cardinality cache, biased
+	                      * by one: 0 = unknown, else count + 1.  Never
+	                      * serialized. */
 };
 #endif
 

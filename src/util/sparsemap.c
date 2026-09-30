@@ -937,6 +937,47 @@ __sm_set_kind(sm_t *m, uint8_t kind)
 	m->m_capacity = (m->m_capacity & ~(size_t)7) | (kind & 7u);
 }
 
+/* -------------------------------------------------------------------
+ * Lazy cardinality cache (runtime-only; see the struct comment in sm.h)
+ *
+ * m_card_plus1 caches sm_cardinality() biased by one so that the
+ * all-zero state means "unknown": 0 = invalid, otherwise the cached
+ * count is (m_card_plus1 - 1).  The cache is derived purely from
+ * m_data, so an invalid cache is always safe -- the next query just
+ * recomputes it.  Every membership-changing path calls
+ * __sm_card_invalidate(); sm_cardinality fills it on the first query
+ * after a mutation.  Never serialized, never sent to the wire.
+ * ------------------------------------------------------------------- */
+
+static inline void
+__sm_card_invalidate(sm_t *m)
+{
+	if (m != NULL)
+		m->m_card_plus1 = 0;
+}
+
+static inline bool
+__sm_card_is_valid(const sm_t *m)
+{
+	return (m->m_card_plus1 != 0);
+}
+
+static inline size_t
+__sm_card_get(const sm_t *m)
+{
+	return (m->m_card_plus1 - 1u);
+}
+
+static inline void
+__sm_card_store(sm_t *m, size_t count)
+{
+	/* count + 1 cannot wrap in practice (count <= SM_IDX_MAX bits), but
+	 * guard: a would-be-wrapping count simply stays uncached. */
+	if (m != NULL && count != SIZE_MAX)
+		m->m_card_plus1 = count + 1u;
+}
+
+
 /*
  * Internal-invariant check.  No-op in production builds; under
  * SPARSEMAP_TESTING / SPARSEMAP_DIAGNOSTIC it asserts:
@@ -2979,11 +3020,28 @@ __sm_coalesce_map(sm_t *map)
 	uint8_t *p = __sm_get_chunk_data(map, offset);
 
 	while (count > 1) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_idx_t start;
 		size_t chunk_size;
 		size_t before;
 		size_t amt;
 		size_t after;
+		/*
+		 * The stored chunk count is the only bound on this walk, but a
+		 * coalesce shrinks m_data_used (via __sm_remove_data) while the
+		 * count can transiently over-report the chunks actually present
+		 * in the buffer (seen when sm_add_range feeds an emitter-built
+		 * map through here: count > real chunks, so p walked off the
+		 * end -- ASan heap-buffer-overflow in __sm_load_idx).  The
+		 * buffer's true extent is m_data_used; stop when p reaches it
+		 * regardless of the count.  A chunk needs at least the index
+		 * word plus one descriptor word, so anything short of that is
+		 * past the data.
+		 */
+		if ((size_t)(p - map->m_data) + SM_SIZEOF_OVERHEAD +
+		        SM_SIZEOF_OVERHEAD > map->m_data_used) {
+			break;
+		}
+		start = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		chunk_size = __sm_chunk_get_size(&chunk);
 		if (count > 1) {
@@ -3676,6 +3734,7 @@ sm_clear(sm_t *map)
 	memset(map->m_data, 0, __sm_cap(map));
 	map->m_data_used = SM_SIZEOF_OVERHEAD;
 	__sm_set_chunk_count(map, 0);
+	__sm_card_invalidate(map);
 }
 
 /**
@@ -3852,6 +3911,7 @@ sm_wrap(uint8_t *data, const size_t size)
 		map->m_data = data;
 		map->m_data_used = 0;
 		__sm_set_cap_kind(map, size, SM_WRAPPED);
+		__sm_card_invalidate(map);
 	}
 	return (map);
 }
@@ -3876,6 +3936,7 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 	map->m_data = data;
 	map->m_data_used = 0;
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
+	__sm_card_invalidate(map);
 	/*
 	 * Caller-allocated struct + caller-allocated buffer.  The buffer is
 	 * not owned by the library; sm_set_data_size will treat any
@@ -3906,6 +3967,7 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 		return;
 	}
 	map->m_data = data;
+	__sm_card_invalidate(map);
 	/*
 	 * Set m_capacity and a temporary m_data_used = capacity *before*
 	 * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
@@ -4920,6 +4982,7 @@ sm_remove(sm_t *map, const uint64_t idx)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
+	__sm_card_invalidate(map);
 	if (__sm_is_small(map)) {
 		const size_t w = (size_t)(idx / 64);
 		if (w < __sm_small_nwords(map)) {
@@ -5349,6 +5412,8 @@ __sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	const bool empty_chunk = !small &&
 	    (map->m_data_used < SM_SIZEOF_OVERHEAD ||
 	        __sm_get_chunk_count(map) == 0);
+
+	__sm_card_invalidate(map);
 
 	if ((small || empty_chunk) && idx < SM_SMALL_MAX_BITS) {
 		uint64_t rc;
@@ -5801,9 +5866,17 @@ sm_get_size(sm_t *map)
 size_t
 sm_cardinality(sm_t *map)
 {
-	if (map != NULL && __sm_is_small(map))
-		return ((size_t)__sm_small_cardinality(map));
-	return (sm_rank(map, 0, SM_IDX_MAX, true));
+	size_t count;
+	if (map == NULL)
+		return (sm_rank(map, 0, SM_IDX_MAX, true));
+	if (__sm_card_is_valid(map))
+		return (__sm_card_get(map));
+	if (__sm_is_small(map))
+		count = (size_t)__sm_small_cardinality(map);
+	else
+		count = sm_rank(map, 0, SM_IDX_MAX, true);
+	__sm_card_store(map, count);
+	return (count);
 }
 
 /* -------------------------------------------------------------------
@@ -7935,12 +8008,187 @@ __sm_cmp_u64(const void *a, const void *b)
 	return ((x > y) - (x < y));
 }
 
+/* Defined further down with the in-place set ops; forward-declared so the
+ * bulk builder can swap its freshly-emitted buffer into an existing map. */
+static sm_t *__sm_replace_buffer(sm_t *dst, sm_t *result);
+
+/*
+ * Coalesce a sorted (ascending) index array into maximal half-open runs
+ * [lo, hi), consecutive integers becoming one run, duplicates collapsing.
+ * Writes the runs into run_lo/run_hi (each at most n long) and returns the
+ * run count.  n must be > 0 and arr must be sorted ascending.
+ */
+static size_t
+__sm_coalesce_sorted(const uint64_t *arr, size_t n, uint64_t *run_lo,
+    uint64_t *run_hi)
+{
+	size_t nruns = 0;
+	uint64_t lo = arr[0];
+	uint64_t hi = arr[0] + 1;
+	size_t i;
+	for (i = 1; i < n; i++) {
+		const uint64_t v = arr[i];
+		if (v <= hi) {
+			/* Duplicate (v < hi) or consecutive (v == hi): extend. */
+			if (v == hi)
+				hi = v + 1;
+			continue;
+		}
+		run_lo[nruns] = lo;
+		run_hi[nruns++] = hi;
+		lo = v;
+		hi = v + 1;
+	}
+	run_lo[nruns] = lo;
+	run_hi[nruns++] = hi;
+	return (nruns);
+}
+
+/*
+ * Build a fresh map that is the union of an existing map's set bits and a
+ * list of ascending, non-overlapping runs, emitting the whole result in one
+ * ordered pass through __sm_emitter_t -- the same machinery sm_union and
+ * sm_add_range use.  This makes the merge O(#existing chunks + #runs)
+ * regardless of where the new bits land.
+ *
+ * The per-element __sm_add_c path threads a cursor, so an ASCENDING bulk
+ * build that only appends new chunks at the tail was already near-linear.
+ * The quadratic case it does NOT cover is inserting sparse bits INTO an
+ * already-large map: each insert byte-shifts the tail of the buffer
+ * (O(#chunks) memmove), so N such inserts cost O(N * #chunks) -- measured
+ * at ~37 s for 50k inserts into a 50k-chunk map, ~2750x the ~13 ms this
+ * single-pass rebuild takes, and scaling ~4x per doubling (this path ~2x).
+ *
+ * Interval-union sweep of the map's run stream and the run array (identical
+ * to sm_xor's sweep but emitting wherever EITHER side is set).  Returns the
+ * new buffer (caller swaps it in) or NULL on allocation failure.
+ */
+static sm_t *
+__sm_union_runs(const sm_t *map, const uint64_t *run_lo,
+    const uint64_t *run_hi, size_t nruns)
+{
+	size_t cap;
+	sm_t *r;
+	__sm_emitter_t em;
+	__sm_run_iter_t ia;
+	uint64_t alo = 0, ahi = 0;
+	bool have_a;
+	size_t bi = 0;
+	uint64_t pos = 0;
+	bool have_pos = false;
+
+	/* Result upper bound: existing bytes plus ~24 per input run. */
+	cap = sm_is_empty(map) ? 0 : sm_get_size((sm_t *)map);
+	cap += nruns * 24 + 64;
+	if (cap < 1024)
+		cap = 1024;
+	r = sm_create(cap);
+	if (r == NULL)
+		return (NULL);
+
+	memset(&em, 0, sizeof(em));
+	em.resultp = &r;
+	__sm_run_iter_init(&ia, map);
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	while (have_a || bi < nruns) {
+		const bool have_b = bi < nruns;
+		uint64_t blo = have_b ? run_lo[bi] : 0;
+		uint64_t bhi = have_b ? run_hi[bi] : 0;
+		uint64_t lo = have_a ? alo : blo;
+		bool in_a;
+		bool in_b;
+		uint64_t next = UINT64_MAX;
+		if (have_b && blo < lo)
+			lo = blo;
+		if (!have_pos || pos < lo) {
+			pos = lo;
+			have_pos = true;
+		}
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
+		if (have_a) {
+			if (pos < alo && alo < next)
+				next = alo;
+			if (pos >= alo && ahi < next)
+				next = ahi;
+		}
+		if (have_b) {
+			if (pos < blo && blo < next)
+				next = blo;
+			if (pos >= blo && bhi < next)
+				next = bhi;
+		}
+		/* Union: any span set in either side is emitted.  __sm_emit_run
+		 * is the ordered emitter primitive __sm_add_run_grow wraps. */
+		if (in_a || in_b) {
+			if (!__sm_emit_run(&em, pos, next)) {
+				sm_free(r);
+				return (NULL);
+			}
+		}
+		pos = next;
+		if (have_a && pos >= ahi)
+			have_a = __sm_run_next(&ia, &alo, &ahi);
+		if (have_b && pos >= bhi)
+			bi++;
+	}
+	if (!__sm_emit_flush(&em)) {
+		sm_free(r);
+		return (NULL);
+	}
+	r = *em.resultp;
+	__sm_coalesce_map(r);
+	return (r);
+}
+
+/*
+ * Shared bulk-insert core for sm_add_many / sm_add_many_grow.  Sorts a
+ * private copy of the input, coalesces it into runs, unions those runs with
+ * the map's existing bits via the ordered emitter in one pass, and swaps the
+ * result into *mapp with __sm_replace_buffer (which grows, demotes to
+ * small-set mode when the result fits, and frees the scratch buffer).
+ */
+static bool
+__sm_add_many_core(sm_t **mapp, const uint64_t *arr, size_t n)
+{
+	uint64_t *sorted;
+	uint64_t *run_lo;
+	uint64_t *run_hi;
+	size_t nruns;
+	sm_t *result;
+	sm_t *swapped;
+
+	sorted = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
+	run_lo = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
+	run_hi = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
+	if (sorted == NULL || run_lo == NULL || run_hi == NULL) {
+		__sm_free(sorted);
+		__sm_free(run_lo);
+		__sm_free(run_hi);
+		return (false);
+	}
+	memcpy(sorted, arr, n * sizeof(uint64_t));
+	qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
+	nruns = __sm_coalesce_sorted(sorted, n, run_lo, run_hi);
+	__sm_free(sorted);
+
+	result = __sm_union_runs(*mapp, run_lo, run_hi, nruns);
+	__sm_free(run_lo);
+	__sm_free(run_hi);
+	if (result == NULL)
+		return (false);
+
+	swapped = __sm_replace_buffer(*mapp, result);
+	if (swapped == NULL)
+		return (false);
+	*mapp = swapped;
+	return (true);
+}
+
 bool
 sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 {
-	uint64_t *sorted;
-	bool ok = true;
-
+	sm_t *m;
 	if (map == NULL || (arr == NULL && n > 0))
 		return (false);
 	if (n == 0)
@@ -7949,91 +8197,41 @@ sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 		return (sm_add(map, arr[0]) != SM_IDX_MAX);
 
 	/*
-	 * Sort a private copy ascending before inserting.  The bulk path
-	 * threads an internal cursor that only makes ascending inserts O(N)
-	 * total; for unsorted input each insert would fall back to a full
-	 * chunk walk plus a byte-shift, making the loop O(N^2).  Sorting
-	 * first guarantees O(N log N + N) regardless of caller order.  The
-	 * caller's array is const and left untouched.
+	 * Bulk build: coalesce the input into runs and union them with the
+	 * existing bits in one O(N + #chunks) emitter pass.  The per-element
+	 * cursor path is already near-linear for a pure tail-append build, but
+	 * degrades to O(N * #chunks) when the new bits land inside an existing
+	 * map (each insert memmoves the buffer tail); the single-pass rebuild
+	 * is linear either way.
+	 *
+	 * sm_add_many keeps the sm_t* signature and must not relocate the
+	 * caller's buffer: __sm_replace_buffer reuses *map's allocation when
+	 * it is large enough and only grows in place otherwise, so *m stays
+	 * == map.  A result that outgrows the buffer cannot be reported here
+	 * (no sm_t**), so it fails -- callers that need growth use
+	 * sm_add_many_grow.
 	 */
-	sorted = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
-	if (sorted == NULL)
+	m = map;
+	if (!__sm_add_many_core(&m, arr, n))
 		return (false);
-	memcpy(sorted, arr, n * sizeof(uint64_t));
-	qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
-	{
-		sm_cursor_t cur = SM_CURSOR_INIT;
-		size_t i;
-		for (i = 0; i < n; i++) {
-			if (__sm_add_c(map, sorted[i], &cur) == SM_IDX_MAX) {
-				ok = false;
-				break;
-			}
-		}
-	}
-	__sm_free(sorted);
-	return (ok);
+	return (m == map);
 }
 
 /*
- * Growing bulk insert: like sm_add_many but takes sm_t** and uses
- * sm_add_grow, so the buffer is realloc'd geometrically on ENOSPC
- * instead of failing.  Sorts a private copy first (same O(N) rationale
- * as sm_add_many).  Returns true on success; false only if a scratch
- * allocation fails or sm_add_grow exhausts its grow retries.
+ * Growing bulk insert: like sm_add_many but takes sm_t** so
+ * __sm_replace_buffer may relocate the buffer when the emitted result
+ * outgrows it, instead of failing.
  */
 bool
 sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 {
-	uint64_t *sorted;
-	bool ok = true;
-
 	if (map == NULL || *map == NULL || (arr == NULL && n > 0))
 		return (false);
 	if (n == 0)
 		return (true);
-
-	sorted = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
-	if (sorted == NULL)
-		return (false);
-	memcpy(sorted, arr, n * sizeof(uint64_t));
-	if (n > 1)
-		qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
-	{
-		sm_cursor_t cur = SM_CURSOR_INIT;
-		size_t i;
-		for (i = 0; i < n; i++) {
-			int retries = 0;
-			sm_t *before = *map;
-			while (__sm_add_c(*map, sorted[i], &cur) ==
-			    SM_IDX_MAX) {
-				size_t new_cap;
-				sm_t *grown;
-				if (++retries > 16) {
-					ok = false;
-					break;
-				}
-				/* ENOSPC: grow geometrically with a 4 KiB floor. */
-				new_cap = sm_get_capacity(*map) * 2;
-				if (new_cap < 4096)
-					new_cap = 4096;
-				grown = sm_set_data_size(*map, NULL, new_cap);
-				if (grown == NULL) {
-					ok = false;
-					break;
-				}
-				*map = grown;
-			}
-			if (!ok)
-				break;
-			/* A grow may have relocated the buffer; the cursor's byte
-			 * offset is then meaningless.  Reset it when *map moved. */
-			if (*map != before)
-				__sm_cursor_reset(&cur);
-		}
-	}
-	__sm_free(sorted);
-	return (ok);
+	if (n == 1)
+		return (sm_add_grow(map, arr[0]) != SM_IDX_MAX);
+	return (__sm_add_many_core(map, arr, n));
 }
 
 /*
@@ -8079,17 +8277,201 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
  * hashing and ordering, destructive iteration
  * ------------------------------------------------------------------- */
 
+/*
+ * add_range fast path: OR the literal run [lo, hi) into an existing
+ * map's run stream and re-emit, instead of touching every bit.
+ *
+ * The old body was `for (i = lo; i < hi; i++) sm_add(map, i)`, which is
+ * O(hi - lo) -- a [0, 1e6) add cost ~14 ms even though the result is a
+ * single 24-byte RLE run.  Here add_range is `map = union(map, [lo,hi))`:
+ * we merge the map's existing (ascending, maximal) runs with the single
+ * literal run using interval-union semantics, then feed each merged run
+ * to the same ordered emitter set-ops already use (__sm_add_run_grow ->
+ * __sm_emit_run), which lays whole output chunks as RLE and only touches
+ * the sub-chunk head/tail bit-by-bit.  Cost is O(existing_chunks +
+ * run_chunks), and a giant run stays a ~24-byte RLE map.
+ *
+ * The emitter demands runs delivered ascending and non-overlapping, so
+ * the interval merge below coalesces the literal run against the map's
+ * runs (and against each other across the seam) before emitting.
+ *
+ * Contract preserved from the old loop: the map is written in place and
+ * does NOT relocate (sm_add_range returns bool, so a relocated struct
+ * pointer could not reach the caller).  If the merged result does not
+ * fit the map's current buffer, we fail with errno = ENOSPC -- exactly
+ * as the old per-bit loop's sm_add did on a too-small SM_OWNED_CONTIGUOUS
+ * map.
+ */
 bool
 sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
-	uint64_t i;
+	__sm_emitter_t em;
+	__sm_run_iter_t it;
+	sm_t *r;
+	size_t cap;
+	size_t result_size;
+	uint64_t rlo = 0, rhi = 0;
+	bool have_run;
+	/* Pending merged run being accumulated (interval union). */
+	uint64_t cur_lo = 0, cur_hi = 0;
+	bool have_cur = false;
+	/* Track whether the whole merged result is a single run and, if so,
+	 * its span -- so a run within one chunk starting at a chunk boundary
+	 * can be laid down as a compact RLE chunk (matching the old per-bit
+	 * loop's small-mode->__sm_promote_run_as_rle footprint) instead of
+	 * the emitter's sparse encoding, which never RLEs a sub-chunk run. */
+	size_t nemitted = 0;
+	uint64_t first_lo = 0, first_hi = 0;
+	/* The single literal run [lo, hi), consumed once when the ascending
+	 * merge reaches its position. */
+	bool lit_pending;
+
 	if (map == NULL || lo >= hi)
 		return (lo >= hi); /* empty range = OK */
-	for (i = lo; i < hi; i++) {
-		if (sm_add(map, i) == SM_IDX_MAX) {
+	lit_pending = true;
+
+	__sm_check_invariants(map);
+
+	/* Result capacity upper bound: the map's current encoding plus the
+	 * new run's worst-case chunk footprint.  A run spanning K output
+	 * chunks needs at most K * (SM_SIZEOF_OVERHEAD + one descriptor +
+	 * two vectors); RLE collapses most of that, so this is generous. */
+	cap = sm_get_size(map) + 128;
+	if (cap < 1024)
+		cap = 1024;
+	r = sm_create(cap);
+	if (r == NULL)
+		return (false);
+
+	memset(&em, 0, sizeof(em));
+	em.resultp = &r;
+	__sm_run_iter_init(&it, map);
+	have_run = __sm_run_next(&it, &rlo, &rhi);
+
+	/*
+	 * Ascending interval-union merge of the map's runs with the single
+	 * literal run.  At each step pick the next-starting interval among
+	 * {current map run, literal run}, then either extend the pending
+	 * merged run (overlap or abut) or flush it and start a new one.
+	 */
+	for (;;) {
+		uint64_t nlo, nhi;
+		bool take_lit;
+		if (!have_run && !lit_pending)
+			break;
+		if (have_run && lit_pending)
+			take_lit = (lo <= rlo);
+		else
+			take_lit = lit_pending;
+		if (take_lit) {
+			nlo = lo;
+			nhi = hi;
+			lit_pending = false;
+		} else {
+			nlo = rlo;
+			nhi = rhi;
+			have_run = __sm_run_next(&it, &rlo, &rhi);
+		}
+		if (!have_cur) {
+			cur_lo = nlo;
+			cur_hi = nhi;
+			have_cur = true;
+		} else if (nlo <= cur_hi) {
+			/* Overlap or abut: extend. */
+			if (nhi > cur_hi)
+				cur_hi = nhi;
+		} else {
+			/* Gap: flush the pending run and open a new one. */
+			if (nemitted == 0) {
+				first_lo = cur_lo;
+				first_hi = cur_hi;
+			}
+			nemitted++;
+			if (!__sm_add_run_grow(&em, cur_lo, cur_hi)) {
+				sm_free(r);
+				return (false);
+			}
+			cur_lo = nlo;
+			cur_hi = nhi;
+		}
+	}
+	if (have_cur) {
+		if (nemitted == 0) {
+			first_lo = cur_lo;
+			first_hi = cur_hi;
+		}
+		nemitted++;
+		if (!__sm_add_run_grow(&em, cur_lo, cur_hi)) {
+			sm_free(r);
 			return (false);
 		}
 	}
+	if (!__sm_emit_flush(&em)) {
+		sm_free(r);
+		return (false);
+	}
+	r = *em.resultp;
+	__sm_coalesce_map(r);
+
+	/*
+	 * Footprint parity with the old loop: a single run that starts on a
+	 * chunk boundary but does not fill the chunk (0 < span < 2048) is
+	 * emitted by __sm_emit_run as a sparse chunk (the emitter must not
+	 * advertise RLE capacity it cannot fill, since a later source could
+	 * land in that chunk -- but here the map is complete, so that concern
+	 * does not apply).  The old loop routed such a run through
+	 * __sm_promote_run_as_rle and got a 24-byte RLE chunk.  Reproduce it:
+	 * if the whole result is one run [first_lo, first_hi) that lives in a
+	 * single chunk aligned to its start, replace the buffer with one RLE
+	 * chunk.  Multi-chunk runs already went out with an RLE body.
+	 */
+	if (nemitted == 1 &&
+	    (first_lo % SM_CHUNK_MAX_CAPACITY) == 0 &&
+	    (first_hi - first_lo) < SM_CHUNK_MAX_CAPACITY) {
+		__sm_chunk_t chunk;
+		const __sm_idx_t cstart = (__sm_idx_t)first_lo;
+		const size_t run_len = (size_t)(first_hi - first_lo);
+		const size_t need = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t);
+		if (need <= __sm_cap(r)) {
+			__sm_set_chunk_count(r, 1);
+			__sm_store_idx(&r->m_data[SM_SIZEOF_OVERHEAD], cstart);
+			__sm_chunk_init(&chunk,
+			    &r->m_data[SM_SIZEOF_OVERHEAD +
+			        SM_SIZEOF_OVERHEAD]);
+			chunk.m_data[0] = 0;
+			__sm_chunk_set_rle(&chunk);
+			__sm_chunk_rle_set_capacity(&chunk,
+			    SM_CHUNK_MAX_CAPACITY);
+			__sm_chunk_rle_set_length(&chunk, run_len);
+			r->m_data_used = need;
+		}
+	}
+
+	/*
+	 * Copy the merged result into the map's existing buffer in place.
+	 * Do NOT use __sm_replace_buffer here: it grows via sm_set_data_size,
+	 * which relocates an SM_OWNED_CONTIGUOUS struct and returns a new
+	 * pointer that sm_add_range cannot hand back.  Refuse (ENOSPC) if the
+	 * result does not fit, matching the old loop's sm_add behaviour.
+	 */
+	result_size = r->m_data_used;
+	if (result_size > __sm_cap(map)) {
+		sm_free(r);
+		errno = ENOSPC;
+		return (false);
+	}
+	memcpy(map->m_data, r->m_data, result_size);
+	map->m_data_used = result_size;
+	/* Membership changed: the run-emitter path swaps the buffer in place
+	 * (it does NOT route through __sm_add_dispatch or __sm_replace_buffer,
+	 * which are the other invalidation points), so invalidate the lazy
+	 * cardinality cache here. */
+	__sm_card_invalidate(map);
+	sm_free(r);
+	/* Keep a near-zero result in small mode (footprint parity with the
+	 * old loop, whose per-bit sm_add demotes). */
+	__sm_try_demote(map);
 	return (true);
 }
 
@@ -8579,6 +8961,7 @@ __sm_replace_buffer(sm_t *dst, sm_t *result)
 	}
 	memcpy(dst->m_data, result->m_data, result_size);
 	dst->m_data_used = result_size;
+	__sm_card_invalidate(dst);
 	sm_free(result);
 	__sm_try_demote(dst);
 	return (dst);
@@ -10122,6 +10505,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
+	__sm_card_invalidate(map);
+	__sm_card_invalidate(other);
 	/* Split walks raw chunks; give it a chunk-mode map and an empty
 	 * chunk-mode destination.  Promote in place (within capacity) if
 	 * `map` is small; the destination is cleared to chunk-empty. */
@@ -10138,7 +10523,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	__sm_check_invariants(other);
 	count = __sm_get_chunk_count(map);
 
-	__sm_assert(sm_cardinality(other) == 0);
+	__sm_assert(sm_rank(other, 0, SM_IDX_MAX, true) == 0);
 
 	/*
 	 * According to the API when idx is SM_IDX_MAX the client is
