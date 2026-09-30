@@ -132,6 +132,20 @@ jobs:
               PG_CONFIG=$(which pg_config) make localcheck
           done
 
+      - name: Regression tests in a C.UTF-8 database
+        # The cluster above uses the runner's default locale.  Fuzzy
+        # matching used to count bytes under a C ctype and characters
+        # under a UTF-8 one, and utf8_fuzzy's expected file silently
+        # encoded whichever the author's cluster had.  Run the suite again
+        # in an explicitly C.UTF-8 database so both are always covered;
+        # the expected files are identical for the two.
+        if: runner.os == 'Linux'
+        env:
+          PGPORT: "5432"
+        run: |
+          CREATEDB_OPTS="-T template0 -E UTF8 --locale=C.UTF-8" \
+              PG_CONFIG=$(which pg_config) bash scripts/run-regress.sh
+
       - name: Upload regression artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4

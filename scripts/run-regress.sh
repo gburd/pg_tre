@@ -29,7 +29,8 @@ mkdir -p test/results
 rm -f test/results/*.out test/results/*.diff
 
 "$DROPDB" --if-exists "$DBNAME" >/dev/null
-"$CREATEDB" "$DBNAME"
+# CREATEDB_OPTS: e.g. "-T template0 -E UTF8 --locale=C.UTF-8" (CI runs both).
+"$CREATEDB" ${CREATEDB_OPTS:-} "$DBNAME"
 
 fail=0
 for t in "${TESTS[@]}"; do
