@@ -181,10 +181,18 @@ pg_tre_amcostestimate(struct PlannerInfo *root, struct IndexPath *path,
 		index_close(index, AccessShareLock);
 	}
 
+	/*
+	 * Unfilterable pattern: the scan hands back the whole heap as a lossy
+	 * bitmap.  Cost it above any realistic plan, so an enabled seq scan
+	 * always wins, but below a DISABLED one, so enable_seqscan = off still
+	 * forces the index.  PG18 counts disabled nodes apart from cost, so
+	 * plain disable_cost behaved that way there; on PG17 it tied with the
+	 * disabled seq scan (both ~1e10) and the planner took the seq scan.
+	 */
 	if (have_query && q.always_true)
 	{
-		*indexStartupCost = disable_cost;
-		*indexTotalCost = disable_cost;
+		*indexStartupCost = disable_cost / 2;
+		*indexTotalCost = disable_cost / 2;
 		*indexSelectivity = 1.0;
 		*indexCorrelation = 0.0;
 		*indexPages = 0.0;

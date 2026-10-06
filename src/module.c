@@ -487,122 +487,294 @@ pg_tre_db_max_char_len(void)
  * (patches/tre-mbdecoder.patch, tre_set_ctype_ops).  TRE's own versions
  * call iswalpha()/towlower(), which follow the backend's LC_CTYPE, not the
  * text: under a C ctype [[:alpha:]], \w and (?i) ignored every non-ASCII
- * letter.  These follow PostgreSQL's regex engine for the DATABASE default
- * collation (regc_pg_locale.c): a C/POSIX ctype classifies ASCII only, as
- * core's ~ does there; the builtin and ICU providers use Unicode
- * properties (and are UTF-8 only); libc uses the collation's locale_t,
- * wide functions for UTF-8 and the single-byte ones otherwise.  The
- * characters handed in are pg_wchar values from pg_tre_mbdecode, so for
- * non-UTF-8 encodings only the libc single-byte path can classify
- * non-ASCII, exactly as in core.
+ * letter.  These mirror PostgreSQL's regex engine
+ * (src/backend/regex/regc_pg_locale.c) of the major we are built against:
+ * pgt_set_collation() is pg_set_regex_collation(), the pgt_* functions are
+ * pg_wc_isalpha() and friends, strategy for strategy.  The characters
+ * handed in are pg_wchar values from pg_tre_mbdecode, exactly what core's
+ * regex engine sees, so for non-UTF-8 encodings only the libc single-byte
+ * path classifies non-ASCII, as in core.
+ *
+ * Strategy names follow PG18.  PG17 additionally distinguishes the default
+ * collation of a libc database (no locale_t: plain <wctype.h> / <ctype.h>
+ * under the backend's LC_CTYPE) from other libc collations (locale_t);
+ * PG18 has a locale_t for the default collation too and marks it
+ * is_default.  Either way the default collation forces ASCII case rules.
  */
 typedef enum
 {
-    PGT_CT_C,                   /* ASCII only */
-    PGT_CT_UNICODE,             /* builtin / ICU: Unicode properties */
-    PGT_CT_LIBC_WIDE,           /* libc, UTF-8: towlower_l & co */
-    PGT_CT_LIBC_1BYTE           /* libc, other encodings: tolower_l & co */
-} PgTreCtStrategy;
+    PGT_STRATEGY_C,             /* C/POSIX ctype: hard-wired ASCII */
+    PGT_STRATEGY_BUILTIN,       /* builtin provider: Unicode properties */
+    PGT_STRATEGY_LIBC_WIDE,     /* libc, UTF-8: locale_t <wctype.h> */
+    PGT_STRATEGY_LIBC_1BYTE,    /* libc, other encodings: locale_t <ctype.h> */
+#if PG_VERSION_NUM < 180000
+    PGT_STRATEGY_WIDE,          /* PG17 default collation, UTF-8: <wctype.h> */
+    PGT_STRATEGY_1BYTE,         /* PG17 default collation, other: <ctype.h> */
+#endif
+    PGT_STRATEGY_ICU            /* ICU provider */
+} PgtStrategy;
 
-static PgTreCtStrategy pgt_ct;
-static pg_locale_t     pgt_ct_locale;
+static PgtStrategy pgt_strategy;
+static pg_locale_t pgt_locale;
 
-#define PGT_ASCII_CLASS(c, fn) ((c) <= 127 && fn((unsigned char) (c)))
+/*
+ * pg_set_regex_collation(), per major.  Raises the same errors.
+ */
+static void
+pgt_set_collation(Oid collation)
+{
+    PgtStrategy strategy;
+    pg_locale_t locale = 0;
 
-#define PGT_CLASS(name, cfn, ufn, wfn, bfn) \
-static int \
-pgt_##name(wint_t c) \
-{ \
-    pg_wchar wc = (pg_wchar) c; \
-    switch (pgt_ct) \
-    { \
-        case PGT_CT_UNICODE: \
-            return ufn; \
-        case PGT_CT_LIBC_WIDE: \
-            return wfn((wint_t) wc, pgt_ct_locale->info.lt) != 0; \
-        case PGT_CT_LIBC_1BYTE: \
-            return wc <= UCHAR_MAX && \
-                bfn((unsigned char) wc, pgt_ct_locale->info.lt) != 0; \
-        default: \
-            return PGT_ASCII_CLASS(wc, cfn) != 0; \
-    } \
+    if (!OidIsValid(collation))
+        ereport(ERROR,
+                (errcode(ERRCODE_INDETERMINATE_COLLATION),
+                 errmsg("could not determine which collation to use for regular expression"),
+                 errhint("Use the COLLATE clause to set the collation explicitly.")));
+
+#if PG_VERSION_NUM >= 180000
+    if (collation == C_COLLATION_OID)
+        strategy = PGT_STRATEGY_C;
+    else
+    {
+        locale = pg_newlocale_from_collation(collation);
+
+        if (!locale->deterministic)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("nondeterministic collations are not supported for regular expressions")));
+
+        if (locale->ctype_is_c)
+        {
+            strategy = PGT_STRATEGY_C;
+            locale = 0;
+        }
+        else if (locale->provider == COLLPROVIDER_BUILTIN)
+            strategy = PGT_STRATEGY_BUILTIN;
+#ifdef USE_ICU
+        else if (locale->provider == COLLPROVIDER_ICU)
+            strategy = PGT_STRATEGY_ICU;
+#endif
+        else if (GetDatabaseEncoding() == PG_UTF8)
+            strategy = PGT_STRATEGY_LIBC_WIDE;
+        else
+            strategy = PGT_STRATEGY_LIBC_1BYTE;
+    }
+#else
+    if (lc_ctype_is_c(collation))
+        strategy = PGT_STRATEGY_C;
+    else
+    {
+        locale = pg_newlocale_from_collation(collation);
+
+        if (!pg_locale_deterministic(locale))
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("nondeterministic collations are not supported for regular expressions")));
+
+#ifdef USE_ICU
+        if (locale && locale->provider == COLLPROVIDER_ICU)
+            strategy = PGT_STRATEGY_ICU;
+        else
+#endif
+        if (GetDatabaseEncoding() == PG_UTF8)
+        {
+            if (locale)
+            {
+                if (locale->provider == COLLPROVIDER_BUILTIN)
+                    strategy = PGT_STRATEGY_BUILTIN;
+                else
+                    strategy = PGT_STRATEGY_LIBC_WIDE;
+            }
+            else
+                strategy = PGT_STRATEGY_WIDE;
+        }
+        else
+        {
+            if (locale)
+                strategy = PGT_STRATEGY_LIBC_1BYTE;
+            else
+                strategy = PGT_STRATEGY_1BYTE;
+        }
+    }
+#endif
+
+    pgt_strategy = strategy;
+    pgt_locale = locale;
 }
 
-PGT_CLASS(isalnum,  isalnum,  pg_u_isalnum(wc, true),  iswalnum_l,  isalnum_l)
-PGT_CLASS(isalpha,  isalpha,  pg_u_isalpha(wc),        iswalpha_l,  isalpha_l)
-PGT_CLASS(isblank,  isblank,  pg_u_isblank(wc),        iswblank_l,  isblank_l)
-PGT_CLASS(iscntrl,  iscntrl,  pg_u_iscntrl(wc),        iswcntrl_l,  iscntrl_l)
-PGT_CLASS(isdigit,  isdigit,  pg_u_isdigit(wc, true),  iswdigit_l,  isdigit_l)
-PGT_CLASS(isgraph,  isgraph,  pg_u_isgraph(wc),        iswgraph_l,  isgraph_l)
-PGT_CLASS(islower,  islower,  pg_u_islower(wc),        iswlower_l,  islower_l)
-PGT_CLASS(isprint,  isprint,  pg_u_isprint(wc),        iswprint_l,  isprint_l)
-PGT_CLASS(ispunct,  ispunct,  pg_u_ispunct(wc, true),  iswpunct_l,  ispunct_l)
-PGT_CLASS(isspace,  isspace,  pg_u_isspace(wc),        iswspace_l,  isspace_l)
-PGT_CLASS(isupper,  isupper,  pg_u_isupper(wc),        iswupper_l,  isupper_l)
-PGT_CLASS(isxdigit, isxdigit, pg_u_isxdigit(wc, true), iswxdigit_l, isxdigit_l)
+/* regc_pg_locale.c pg_char_properties[] (the C strategy), as code. */
+#define PG_ISDIGIT  0x01
+#define PG_ISALPHA  0x02
+#define PG_ISALNUM  (PG_ISDIGIT | PG_ISALPHA)
+#define PG_ISUPPER  0x04
+#define PG_ISLOWER  0x08
+#define PG_ISGRAPH  0x10
+#define PG_ISPRINT  0x20
+#define PG_ISPUNCT  0x40
+#define PG_ISSPACE  0x80
+#define PG_ISBLANK  0x100           /* only until blank is hard-wired */
+#define PG_ISCNTRL  0x200           /* only until cntrl is hard-wired */
+#define PG_ISXDIGIT 0x400           /* only until xdigit is hard-wired */
 
-static wint_t
-pgt_tolower(wint_t c)
+static int
+pgt_c_props(pg_wchar c)
 {
-    pg_wchar wc = (pg_wchar) c;
+    int         p = 0;
 
-    switch (pgt_ct)
-    {
-        case PGT_CT_UNICODE:
-            return (wint_t) unicode_lowercase_simple(wc);
-        case PGT_CT_LIBC_WIDE:
-            return (wint_t) towlower_l((wint_t) wc, pgt_ct_locale->info.lt);
-        case PGT_CT_LIBC_1BYTE:
-            if (wc <= UCHAR_MAX)
-                return (wint_t) tolower_l((unsigned char) wc,
-                                              pgt_ct_locale->info.lt);
-            return c;
-        default:
-            return wc <= 127 ? (wint_t) pg_ascii_tolower((unsigned char) wc) : c;
-    }
-}
-
-static wint_t
-pgt_toupper(wint_t c)
-{
-    pg_wchar wc = (pg_wchar) c;
-
-    switch (pgt_ct)
-    {
-        case PGT_CT_UNICODE:
-            return (wint_t) unicode_uppercase_simple(wc);
-        case PGT_CT_LIBC_WIDE:
-            return (wint_t) towupper_l((wint_t) wc, pgt_ct_locale->info.lt);
-        case PGT_CT_LIBC_1BYTE:
-            if (wc <= UCHAR_MAX)
-                return (wint_t) toupper_l((unsigned char) wc,
-                                              pgt_ct_locale->info.lt);
-            return c;
-        default:
-            return wc <= 127 ? (wint_t) pg_ascii_toupper((unsigned char) wc) : c;
-    }
+    if (c >= '0' && c <= '9')
+        p = PG_ISDIGIT | PG_ISGRAPH | PG_ISPRINT;
+    else if (c >= 'A' && c <= 'Z')
+        p = PG_ISALPHA | PG_ISUPPER | PG_ISGRAPH | PG_ISPRINT;
+    else if (c >= 'a' && c <= 'z')
+        p = PG_ISALPHA | PG_ISLOWER | PG_ISGRAPH | PG_ISPRINT;
+    else if (c >= '!' && c <= '~')
+        p = PG_ISGRAPH | PG_ISPRINT | PG_ISPUNCT;
+    else if (c == ' ')
+        p = PG_ISPRINT | PG_ISSPACE | PG_ISBLANK;
+    else if (c >= '\t' && c <= '\r')
+        p = PG_ISSPACE | (c == '\t' ? PG_ISBLANK : 0) | PG_ISCNTRL;
+    else if (c < ' ' || c == 0x7F)
+        p = PG_ISCNTRL;
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+        p |= PG_ISXDIGIT;
+    return p;
 }
 
 /*
- * Choose the strategy from the database default collation, as
- * pg_set_regex_collation does for DEFAULT_COLLATION_OID.  Called once per
- * backend, from tre_match.c, before the first compile.
+ * The <wctype.h> / <ctype.h> cases of pg_wc_is<name>(), per major.  Core
+ * falls through from WIDE to 1BYTE for code points a 16-bit wchar_t
+ * cannot hold; spelled out here because a FALL THRU comment does not
+ * survive macro expansion.
+ */
+#define PGT_WIDE(wexpr, bexpr) \
+    return (sizeof(wchar_t) >= 4 || c <= (pg_wchar) 0xFFFF) ? (wexpr) != 0 : \
+        (c <= (pg_wchar) UCHAR_MAX && (bexpr))
+#define PGT_1BYTE(bexpr) \
+    return (c <= (pg_wchar) UCHAR_MAX && (bexpr))
+
+#if PG_VERSION_NUM >= 180000
+#define PGT_LIBC_CASES(name) \
+        case PGT_STRATEGY_LIBC_WIDE: \
+            PGT_WIDE(isw##name##_l((wint_t) c, pgt_locale->info.lt), \
+                     is##name##_l((unsigned char) c, pgt_locale->info.lt)); \
+        case PGT_STRATEGY_LIBC_1BYTE: \
+            PGT_1BYTE(is##name##_l((unsigned char) c, pgt_locale->info.lt));
+#else
+#define PGT_LIBC_CASES(name) \
+        case PGT_STRATEGY_WIDE: \
+            PGT_WIDE(isw##name((wint_t) c), is##name((unsigned char) c)); \
+        case PGT_STRATEGY_1BYTE: \
+            PGT_1BYTE(is##name((unsigned char) c)); \
+        case PGT_STRATEGY_LIBC_WIDE: \
+            PGT_WIDE(isw##name##_l((wint_t) c, pgt_locale->info.lt), \
+                     is##name##_l((unsigned char) c, pgt_locale->info.lt)); \
+        case PGT_STRATEGY_LIBC_1BYTE: \
+            PGT_1BYTE(is##name##_l((unsigned char) c, pgt_locale->info.lt));
+#endif
+
+/* pg_wc_is<name>(): C bits, builtin and ICU expressions, libc functions. */
+#define PGT_CLASS(name, cbits, builtin_expr, icu_expr) \
+static int \
+pgt_is##name(wint_t wc) \
+{ \
+    pg_wchar    c = (pg_wchar) wc; \
+\
+    switch (pgt_strategy) \
+    { \
+        case PGT_STRATEGY_C: \
+            return (c <= (pg_wchar) 127 && (pgt_c_props(c) & (cbits))); \
+        case PGT_STRATEGY_BUILTIN: \
+            return builtin_expr; \
+        PGT_LIBC_CASES(name) \
+        case PGT_STRATEGY_ICU: \
+            return icu_expr; \
+    } \
+    return 0; \
+}
+
+PGT_CLASS(alnum,  PG_ISALNUM,  pg_u_isalnum(c, true),  pg_u_isalnum(c, true))
+PGT_CLASS(alpha,  PG_ISALPHA,  pg_u_isalpha(c),        pg_u_isalpha(c))
+PGT_CLASS(blank,  PG_ISBLANK,  pg_u_isblank(c),        pg_u_isblank(c))
+PGT_CLASS(cntrl,  PG_ISCNTRL,  pg_u_iscntrl(c),        pg_u_iscntrl(c))
+PGT_CLASS(digit,  PG_ISDIGIT,  pg_u_isdigit(c, true),  pg_u_isdigit(c, true))
+PGT_CLASS(graph,  PG_ISGRAPH,  pg_u_isgraph(c),        pg_u_isgraph(c))
+PGT_CLASS(lower,  PG_ISLOWER,  pg_u_islower(c),        pg_u_islower(c))
+PGT_CLASS(print,  PG_ISPRINT,  pg_u_isprint(c),        pg_u_isprint(c))
+PGT_CLASS(punct,  PG_ISPUNCT,  pg_u_ispunct(c, true),  pg_u_ispunct(c, true))
+PGT_CLASS(space,  PG_ISSPACE,  pg_u_isspace(c),        pg_u_isspace(c))
+PGT_CLASS(upper,  PG_ISUPPER,  pg_u_isupper(c),        pg_u_isupper(c))
+PGT_CLASS(xdigit, PG_ISXDIGIT, pg_u_isxdigit(c, true), pg_u_isxdigit(c, true))
+
+/*
+ * pg_wc_toupper() / pg_wc_tolower() (x = upper / lower).  The default
+ * collation forces ASCII case rules (Turkish I/i), as upper()/lower() do:
+ * on PG18 a libc default collation is_default; on PG17 it is the
+ * locale_t-less WIDE / 1BYTE strategy.
+ */
+#if PG_VERSION_NUM >= 180000
+#define PGT_FORCE_ASCII (pgt_locale->is_default && c <= (pg_wchar) 127)
+#define PGT_CASE_PG17(x)
+#else
+#define PGT_FORCE_ASCII false
+#define PGT_CASE_PG17(x) \
+        case PGT_STRATEGY_WIDE: \
+            if (c <= (pg_wchar) 127) \
+                return pg_ascii_to##x((unsigned char) c); \
+            if (sizeof(wchar_t) >= 4 || c <= (pg_wchar) 0xFFFF) \
+                return tow##x((wint_t) c); \
+            return c <= (pg_wchar) UCHAR_MAX ? to##x((unsigned char) c) : c; \
+        case PGT_STRATEGY_1BYTE: \
+            if (c <= (pg_wchar) 127) \
+                return pg_ascii_to##x((unsigned char) c); \
+            return c <= (pg_wchar) UCHAR_MAX ? to##x((unsigned char) c) : c;
+#endif
+
+#define PGT_CASEMAP(x, builtin_expr, icu_expr) \
+static wint_t \
+pgt_to##x(wint_t wc) \
+{ \
+    pg_wchar    c = (pg_wchar) wc; \
+\
+    switch (pgt_strategy) \
+    { \
+        case PGT_STRATEGY_C: \
+            if (c <= (pg_wchar) 127) \
+                return pg_ascii_to##x((unsigned char) c); \
+            return c; \
+        case PGT_STRATEGY_BUILTIN: \
+            return builtin_expr; \
+        PGT_CASE_PG17(x) \
+        case PGT_STRATEGY_LIBC_WIDE: \
+            if (PGT_FORCE_ASCII) \
+                return pg_ascii_to##x((unsigned char) c); \
+            if (sizeof(wchar_t) >= 4 || c <= (pg_wchar) 0xFFFF) \
+                return tow##x##_l((wint_t) c, pgt_locale->info.lt); \
+            return c <= (pg_wchar) UCHAR_MAX ? \
+                to##x##_l((unsigned char) c, pgt_locale->info.lt) : c; \
+        case PGT_STRATEGY_LIBC_1BYTE: \
+            if (PGT_FORCE_ASCII) \
+                return pg_ascii_to##x((unsigned char) c); \
+            return c <= (pg_wchar) UCHAR_MAX ? \
+                to##x##_l((unsigned char) c, pgt_locale->info.lt) : c; \
+        case PGT_STRATEGY_ICU: \
+            return icu_expr; \
+    } \
+    return 0; \
+}
+
+PGT_CASEMAP(upper, unicode_uppercase_simple(c), unicode_uppercase_simple(c))
+PGT_CASEMAP(lower, unicode_lowercase_simple(c), unicode_lowercase_simple(c))
+
+/*
+ * Install the classifiers, with the strategy of the database default
+ * collation.  Called once per backend, from tre_match.c, before the first
+ * compile.
  */
 void
 pg_tre_ctype_ops(pg_tre_ctype_ops_t *ops)
 {
-    pg_locale_t loc = pg_newlocale_from_collation(DEFAULT_COLLATION_OID);
-
-    if (loc->ctype_is_c)
-        pgt_ct = PGT_CT_C;
-    else if (loc->provider == COLLPROVIDER_BUILTIN ||
-             loc->provider == COLLPROVIDER_ICU)
-        pgt_ct = PGT_CT_UNICODE;
-    else if (GetDatabaseEncoding() == PG_UTF8)
-        pgt_ct = PGT_CT_LIBC_WIDE;
-    else
-        pgt_ct = PGT_CT_LIBC_1BYTE;
-    pgt_ct_locale = loc;
+    pgt_set_collation(DEFAULT_COLLATION_OID);
 
     ops->ct_isalnum = pgt_isalnum;
     ops->ct_isalpha = pgt_isalpha;
