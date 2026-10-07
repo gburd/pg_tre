@@ -60,6 +60,9 @@ if [ ! -x "$ASAN_PREFIX/bin/postgres" ]; then
 fi
 PGB=$ASAN_PREFIX/bin
 export PATH=$PGB:$PATH
+# A cached prefix may predate the ICU build (4.3's ICU tests need it).
+"$PGB/pg_config" --configure | grep -q -- '--without-icu' \
+    && die "$ASAN_PREFIX was built --without-icu; remove it or set ASAN_PREFIX to rebuild"
 
 # ---------------------------------------------------------------------------
 # 2. pg_tre, instrumented the same way.  libtre.a must stay on SHLIB_LINK.
