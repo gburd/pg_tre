@@ -11,10 +11,12 @@
 # crash recovery (field report 2026-10-06, pg.ddx.io).  The trigger is
 # any ERROR inside the scan's PG_TRY once the overlay is built; the field
 # trigger was statement_timeout on a %~~ ORDER BY ... LIMIT plain index
-# scan over a large unmerged pending list.  gcc builds keep the locals in
-# memory and never crashed, so this test is only a real gate when the
-# extension is built with clang -O2; it still checks the server stays up
-# and the cancelled scans release their state with any compiler.
+# scan over a large unmerged pending list.  Only the flake build (clang
+# -O2 -flto, `nix build .#pg18`) turned the bug into a crash; gcc and a
+# plain clang -O2 PGXS build keep the locals in memory.  CI job
+# `nix-clang-tap` runs this file against the flake build, where it fails on
+# 4.2.2 and passes with the fix; under other builds it still checks that
+# the server stays up and that cancelled scans give correct answers.
 
 use strict;
 use warnings FATAL => 'all';

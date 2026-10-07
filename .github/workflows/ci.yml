@@ -154,6 +154,43 @@ jobs:
           path: test/results/
           retention-days: 14
 
+  nix-clang-tap:
+    # The shipped artefact is the flake build (clang -O2 + LTO).  An ERROR
+    # raised inside a pending-list scan crashed only that build: 4.2.0-4.2.2
+    # read clobbered setjmp locals in PG_CATCH, and only clang turned that
+    # into "free(): invalid pointer" (gcc and the plain clang -O2 PGXS build
+    # keep the locals in memory, so build-and-test above never saw it).
+    # Run the gating TAP test against exactly what `nix build .#pg18` ships.
+    name: nix .#pg18 (clang LTO) / scan_cancel TAP
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Install TAP deps
+        run: sudo apt-get update && sudo apt-get install -y libipc-run-perl
+      - name: scan_cancel.pl against the flake build
+        run: |
+          set -euo pipefail
+          EXT=$(nix build --no-link --print-out-paths .#pg18)
+          PG=$(nix build --no-link --print-out-paths .#postgresql.out)
+          PGC=$(nix build --no-link --print-out-paths .#postgresql.pg_config)
+          PGDEV=$(nix build --no-link --print-out-paths .#postgresql.dev)
+          PGSRC=$(nix eval --raw .#postgresql.src)
+          nix build --no-link "$PGSRC"
+          T=$(mktemp -d); mkdir -p "$T/src/test"
+          cp -r "$PGSRC/src/test/perl" "$T/src/test/"
+          # Load the flake's extension into the flake's PostgreSQL without
+          # copying the store: PG18 searches these paths.
+          cat > "$T/tre.conf" <<EOF
+          shared_preload_libraries = '$EXT/lib/pg_tre'
+          dynamic_library_path = '$EXT/lib:\$libdir'
+          extension_control_path = '$EXT/share/postgresql:\$system'
+          EOF
+          TEMP_CONFIG="$T/tre.conf" PATH="$PG/bin:$PGC/bin:$PATH" \
+            PERL5LIB="$T/src/test/perl" \
+            PG_REGRESS="$PGDEV/lib/pgxs/src/test/regress/pg_regress" \
+            TMPDIR=/tmp prove -v tap/scan_cancel.pl
+
   lint-docs:
     name: lint & validate
     runs-on: ubuntu-24.04
