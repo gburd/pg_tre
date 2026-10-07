@@ -59,7 +59,8 @@
  * pin -- without this, a long re-entrant scan that compiles >= 32 other
  * patterns could evict and free the handle still in use (use-after-free).
  */
-extern void *tre_cache_lookup_pinned(const char *pattern, int pattern_len);
+extern void *tre_cache_lookup_pinned(const char *pattern, int pattern_len,
+                                     Oid collation);
 extern void tre_cache_release(void *compiled);
 
 
@@ -1289,6 +1290,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
     bool          opened_heap = false;
     AttrNumber    body_attno;
     void * volatile compiled = NULL;
+    Oid           collation = scan->indexRelation->rd_indcollation[0];
     int32         max_cost = 0;
     int32         cost_ins = 1, cost_del = 1, cost_subst = 1;
     struct TrePatternData *pat;
@@ -1340,7 +1342,12 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         pat_text = tre_pattern_get_text(pat, &pat_len);
         max_cost = tre_pattern_get_max_cost(pat);
         tre_pattern_get_costs(pat, &cost_ins, &cost_del, &cost_subst);
-        compiled = tre_cache_lookup_pinned(pat_text, pat_len);
+        /*
+         * Match under the index column's collation, which is what the
+         * planner matched against the operator's input collation, so the
+         * distances here and the executor's %~~ recheck agree.
+         */
+        compiled = tre_cache_lookup_pinned(pat_text, pat_len, collation);
     }
 
     body_attno = resolve_body_attno(scan->indexRelation);
@@ -1441,6 +1448,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     if (isnull)
                         continue;
                     body = (text *) PG_DETOAST_DATUM_PACKED(val);
+                    pg_tre_set_collation(collation);
                     r = tre_do_match(compiled,
                                      VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
                                      max_cost, cost_ins, cost_del, cost_subst,
@@ -1546,6 +1554,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                         continue;
                     }
                     body = (text *) PG_DETOAST_DATUM_PACKED(val);
+                    pg_tre_set_collation(collation);
                     r = tre_do_match(compiled,
                                      VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
                                      max_cost, cost_ins, cost_del, cost_subst,

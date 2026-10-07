@@ -509,9 +509,10 @@ SELECT tre_parse_debug('enviro.{~2}ment');
 Trigrams are built from characters of the database encoding (4.3.0+; UTF-8
 only before), and TRE matches -- including approximate matching, where
 an edit is one character -- in the same unit, in every server encoding.
-Regex classes and case folding follow the database default collation;
-nondeterministic collations are refused at index build. See
-`LIMITATIONS.md`.
+Regex classes and case folding follow the collation of the expression
+(the index column's for an index scan), as core's `~` does;
+nondeterministic collations are refused, at index build and by the match
+functions. See `LIMITATIONS.md`.
 
 ### Range Bloom and Positional Filters
 

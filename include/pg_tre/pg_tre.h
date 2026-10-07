@@ -155,6 +155,14 @@ extern void pg_tre_arm_compile_deadline(int timeout_ms);
 extern void pg_tre_disarm_compile_deadline(void);
 extern void pg_tre_check_compile_timeout(void);
 
+/*
+ * Make TRE's character classes and case mapping follow this collation, as
+ * pg_set_regex_collation does for core's regex engine (src/module.c).
+ * Errors for an invalid (indeterminate) or nondeterministic collation.
+ * Call before every TRE compile and match.
+ */
+extern void pg_tre_set_collation(Oid collation);
+
 /* Legacy UDF exports (for internal use). */
 extern Datum pg_tre_amatch(PG_FUNCTION_ARGS);
 extern Datum pg_tre_amatch_cost(PG_FUNCTION_ARGS);

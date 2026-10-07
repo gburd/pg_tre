@@ -283,20 +283,19 @@ overlay could abort with `free(): invalid pointer` in the clang-built
 (`nix build`) extension; `statement_timeout` and query cancel are common
 triggers. 4.2.3 fixes the crash, but the scan cost remains.
 
-### Character semantics follow the database, not the column collation
+### Character classes follow the collation, as for core `~`
 
 Since 4.3.0 pg_tre decodes text in the database encoding (any server
 encoding, not just UTF-8), and regex character classes (`[[:alpha:]]`,
-`\w`) and case folding (`(?i)`) follow the database's DEFAULT collation,
-exactly as PostgreSQL's own `~` does with that collation. Two consequences:
-
-- A per-column or per-index `COLLATE` does not change what `[[:alpha:]]`
-  or `(?i)` mean inside `tre_amatch` / `%~~`. (Core `~` does honour it.)
-  Character boundaries and edit counting are unaffected -- those depend
-  only on the encoding.
-- Under a `C`/`POSIX` default ctype, classes and case folding cover ASCII
-  only, again matching core. Use a database (or, for core operators, a
-  column collation) with a real locale or ICU for non-ASCII classes.
+`\w`) and case folding (`(?i)`) follow the collation of the call exactly
+as PostgreSQL's own `~` / `~*` do: the input collation of `tre_amatch*`,
+`tre_amatch_detail`, `tre_similarity`, `tre_distance`, `%~~` and `<@>`
+(the column's, or an explicit `COLLATE`), and for an index scan the index
+column's collation. `COLLATE "C"` classifies ASCII only; an ICU, builtin
+or libc collation classifies non-ASCII. Character boundaries and edit
+counting depend only on the encoding. As for `~`, an indeterminate
+collation (two differently collated arguments) and a nondeterministic one
+are errors.
 
 Nondeterministic collations are refused at `CREATE INDEX`, `REINDEX` and
 any `ALTER` that rebuilds the index: equal strings under them need not

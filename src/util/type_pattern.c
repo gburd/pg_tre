@@ -347,14 +347,17 @@ tre_match_scalar(PG_FUNCTION_ARGS)
 	 * pg_tre_amatch, which hardcodes unit costs) keeps the indexed %~~
 	 * recheck semantically identical to the seq-scan tre_amatch(...,
 	 * cost_ins, cost_del, cost_subst) UDF for non-uniform-cost patterns.
+	 * Pass the operator's input collation on: it decides what character
+	 * classes and (?i) mean, as for core's ~.
 	 */
-	result = DatumGetBool(DirectFunctionCall6(pg_tre_amatch_with_costs,
-											  PointerGetDatum(haystack_text),
-											  PointerGetDatum(pat_txt),
-											  Int32GetDatum(pat->max_cost),
-											  Int32GetDatum(pat->cost_ins),
-											  Int32GetDatum(pat->cost_del),
-											  Int32GetDatum(pat->cost_subst)));
+	result = DatumGetBool(DirectFunctionCall6Coll(pg_tre_amatch_with_costs,
+												  PG_GET_COLLATION(),
+												  PointerGetDatum(haystack_text),
+												  PointerGetDatum(pat_txt),
+												  Int32GetDatum(pat->max_cost),
+												  Int32GetDatum(pat->cost_ins),
+												  Int32GetDatum(pat->cost_del),
+												  Int32GetDatum(pat->cost_subst)));
 
 	PG_RETURN_BOOL(result);
 }

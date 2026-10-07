@@ -125,6 +125,8 @@ typedef struct {
       (*ct_isspace)(wint_t), (*ct_isupper)(wint_t), (*ct_isxdigit)(wint_t);
   wint_t (*ct_tolower)(wint_t), (*ct_toupper)(wint_t);
 } pg_tre_ctype_ops_t;
+/* Fills in the classifiers; what they follow is set per call by
+ * pg_tre_set_collation() (pg_tre.h). */
 void pg_tre_ctype_ops(pg_tre_ctype_ops_t *ops);
 
 #endif /* TRE_FUNCS_H */

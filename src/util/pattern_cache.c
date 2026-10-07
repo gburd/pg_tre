@@ -25,10 +25,17 @@
  */
 #define TRE_MAX_PATTERN_LEN (64 * 1024)
 
+/*
+ * A compiled pattern depends on the collation it was compiled under: TRE
+ * resolves (?i) case counterparts and, in single-byte encodings, character
+ * classes at compile time with the classifiers of that collation
+ * (pg_tre_set_collation).  So the collation is part of the key.
+ */
 typedef struct TreCacheSlot
 {
     char   *pattern;        /* palloc'd copy in TopMemoryContext */
     int     pattern_len;
+    Oid     collation;      /* the collation it was compiled under */
     void   *compiled;       /* opaque handle from tre_compile_pattern */
     uint64  last_used;
     int     pinned;         /* >0 => in use by a scan, must not evict/free */
@@ -64,6 +71,7 @@ evict_slot(TreCacheSlot *slot)
         slot->compiled = NULL;
     }
     slot->pattern_len = 0;
+    slot->collation = InvalidOid;
     slot->last_used = 0;
     slot->pinned = 0;
 }
@@ -81,7 +89,8 @@ evict_slot(TreCacheSlot *slot)
  * responsible for freeing such a handle via tre_cache_release().
  */
 static void *
-tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
+tre_cache_lookup_internal(const char *pattern, int pattern_len,
+                          Oid collation, bool pin)
 {
     int             i;
     TreCacheSlot   *target;
@@ -106,6 +115,7 @@ tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
         if (slot->compiled == NULL)
             continue;
         if (slot->pattern_len == pattern_len &&
+            slot->collation == collation &&
             memcmp(slot->pattern, pattern, pattern_len) == 0)
         {
             slot->last_used = ++cache_clock;
@@ -115,10 +125,14 @@ tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
         }
     }
 
-    /* Cache miss: compile pattern.  Arm a wall-clock compile deadline
+    /*
+     * Cache miss: compile under the call's collation (validated, and an
+     * error for an indeterminate or nondeterministic one, as core's
+     * regcomp does).  Arm a wall-clock compile deadline
      * (pg_tre.compile_timeout_ms) so a pathological bounded-repetition
      * pattern cannot spin the backend uninterruptibly inside TRE's AST
      * expansion. */
+    pg_tre_set_collation(collation);
     pg_tre_arm_compile_deadline(0);
     PG_TRY();
     {
@@ -223,6 +237,7 @@ tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
     MemoryContextSwitchTo(oldctx);
 
     target->pattern_len = pattern_len;
+    target->collation = collation;
     target->compiled = compiled;
     target->last_used = ++cache_clock;
     target->pinned = pin ? 1 : 0;
@@ -231,9 +246,9 @@ tre_cache_lookup_internal(const char *pattern, int pattern_len, bool pin)
 }
 
 void *
-tre_cache_lookup(const char *pattern, int pattern_len)
+tre_cache_lookup(const char *pattern, int pattern_len, Oid collation)
 {
-    return tre_cache_lookup_internal(pattern, pattern_len, false);
+    return tre_cache_lookup_internal(pattern, pattern_len, collation, false);
 }
 
 /*
@@ -243,9 +258,9 @@ tre_cache_lookup(const char *pattern, int pattern_len)
  * re-enter the cache (e.g. a scan loop that compiles other patterns).
  */
 void *
-tre_cache_lookup_pinned(const char *pattern, int pattern_len)
+tre_cache_lookup_pinned(const char *pattern, int pattern_len, Oid collation)
 {
-    return tre_cache_lookup_internal(pattern, pattern_len, true);
+    return tre_cache_lookup_internal(pattern, pattern_len, collation, true);
 }
 
 /*

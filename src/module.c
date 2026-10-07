@@ -418,7 +418,8 @@ pg_tre_check_match_timeout(const TreMatchResult *r)
  * boilerplate to a single call.
  */
 static TreMatchResult
-pg_tre_match_guarded(void *compiled, const char *str, int str_len,
+pg_tre_match_guarded(void *compiled, Oid collation,
+                     const char *str, int str_len,
                      int max_cost, int cost_ins, int cost_del,
                      int cost_subst, int max_ins, int max_del,
                      int max_subst, int max_err)
@@ -438,6 +439,7 @@ pg_tre_match_guarded(void *compiled, const char *str, int str_len,
      */
     CHECK_FOR_INTERRUPTS();
 
+    pg_tre_set_collation(collation);
     pg_tre_arm_match_deadline(0);
     PG_TRY();
     {
@@ -516,15 +518,30 @@ typedef enum
 
 static PgtStrategy pgt_strategy;
 static pg_locale_t pgt_locale;
+static Oid  pgt_collation = InvalidOid;    /* what the two above are for */
 
 /*
- * pg_set_regex_collation(), per major.  Raises the same errors.
+ * pg_set_regex_collation(), per major, raising the same errors.  Every
+ * TRE compile (pattern_cache.c) and match (pg_tre_match_guarded below,
+ * amscan.c) calls it first, so the classifiers follow the collation of
+ * the call -- the expression's input collation, or the index column's --
+ * as core's ~ does.  TRE's hooks are global, but TRE calls are synchronous
+ * and nothing runs between this and the TRE call it precedes.  The state
+ * is assigned only after the collation is accepted, so an error here
+ * leaves the previous, consistent state, and the next compile or match
+ * sets it again anyway: an ereport/longjmp cannot leave state that a
+ * later call uses.  The classifiers themselves never ereport (they run
+ * inside TRE).  pg_newlocale_from_collation() results live as long as the
+ * backend, so remembering the last one is safe.
  */
-static void
-pgt_set_collation(Oid collation)
+void
+pg_tre_set_collation(Oid collation)
 {
     PgtStrategy strategy;
     pg_locale_t locale = 0;
+
+    if (collation == pgt_collation && OidIsValid(collation))
+        return;
 
     if (!OidIsValid(collation))
         ereport(ERROR,
@@ -601,6 +618,7 @@ pgt_set_collation(Oid collation)
 
     pgt_strategy = strategy;
     pgt_locale = locale;
+    pgt_collation = collation;
 }
 
 /* regc_pg_locale.c pg_char_properties[] (the C strategy), as code. */
@@ -802,15 +820,13 @@ PGT_CASEMAP(upper, unicode_uppercase_simple(c), unicode_uppercase_simple(c))
 PGT_CASEMAP(lower, unicode_lowercase_simple(c), unicode_lowercase_simple(c))
 
 /*
- * Install the classifiers, with the strategy of the database default
- * collation.  Called once per backend, from tre_match.c, before the first
- * compile.
+ * Install the classifiers.  Called once per backend, from tre_match.c,
+ * before the first compile; the collation they follow is set per call by
+ * pg_tre_set_collation().
  */
 void
 pg_tre_ctype_ops(pg_tre_ctype_ops_t *ops)
 {
-    pgt_set_collation(DEFAULT_COLLATION_OID);
-
     ops->ct_isalnum = pgt_isalnum;
     ops->ct_isalpha = pgt_isalpha;
     ops->ct_isblank = pgt_isblank;
@@ -875,9 +891,10 @@ pg_tre_amatch(PG_FUNCTION_ARGS)
     TreMatchResult result;
 
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
-                                VARSIZE_ANY_EXHDR(pattern));
+                                VARSIZE_ANY_EXHDR(pattern),
+                                PG_GET_COLLATION());
 
-    result = pg_tre_match_guarded(compiled,
+    result = pg_tre_match_guarded(compiled, PG_GET_COLLATION(),
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -898,9 +915,10 @@ pg_tre_amatch_cost(PG_FUNCTION_ARGS)
     TreMatchResult result;
 
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
-                                VARSIZE_ANY_EXHDR(pattern));
+                                VARSIZE_ANY_EXHDR(pattern),
+                                PG_GET_COLLATION());
 
-    result = pg_tre_match_guarded(compiled,
+    result = pg_tre_match_guarded(compiled, PG_GET_COLLATION(),
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -927,9 +945,10 @@ pg_tre_amatch_with_costs(PG_FUNCTION_ARGS)
     TreMatchResult result;
 
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
-                                VARSIZE_ANY_EXHDR(pattern));
+                                VARSIZE_ANY_EXHDR(pattern),
+                                PG_GET_COLLATION());
 
-    result = pg_tre_match_guarded(compiled,
+    result = pg_tre_match_guarded(compiled, PG_GET_COLLATION(),
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, cost_ins, cost_del, cost_subst,
@@ -978,9 +997,10 @@ pg_tre_amatch_detail(PG_FUNCTION_ARGS)
     MemoryContextSwitchTo(oldcontext);
 
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
-                                VARSIZE_ANY_EXHDR(pattern));
+                                VARSIZE_ANY_EXHDR(pattern),
+                                PG_GET_COLLATION());
 
-    result = pg_tre_match_guarded(compiled,
+    result = pg_tre_match_guarded(compiled, PG_GET_COLLATION(),
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -1021,7 +1041,7 @@ pg_tre_amatch_detail(PG_FUNCTION_ARGS)
  * does not depend on input length.
  */
 static double
-tre_compute_similarity(const char *input, int input_len,
+tre_compute_similarity(Oid collation, const char *input, int input_len,
                        const char *pattern, int pattern_len,
                        int max_cost)
 {
@@ -1029,8 +1049,8 @@ tre_compute_similarity(const char *input, int input_len,
     TreMatchResult  result;
     int             max_len;
 
-    compiled = tre_cache_lookup(pattern, pattern_len);
-    result = pg_tre_match_guarded(compiled, input, input_len,
+    compiled = tre_cache_lookup(pattern, pattern_len, collation);
+    result = pg_tre_match_guarded(compiled, collation, input, input_len,
                           max_cost, 1, 1, 1,
                           INT_MAX, INT_MAX, INT_MAX, INT_MAX);
 
@@ -1054,7 +1074,8 @@ pg_tre_similarity(PG_FUNCTION_ARGS)
     int32   max_cost = PG_GETARG_INT32(2);
     double  sim;
 
-    sim = tre_compute_similarity(VARDATA_ANY(input),
+    sim = tre_compute_similarity(PG_GET_COLLATION(),
+                                  VARDATA_ANY(input),
                                   VARSIZE_ANY_EXHDR(input),
                                   VARDATA_ANY(pattern),
                                   VARSIZE_ANY_EXHDR(pattern),
@@ -1088,8 +1109,9 @@ pg_tre_distance(PG_FUNCTION_ARGS)
     TreMatchResult result;
 
     compiled = tre_cache_lookup(VARDATA_ANY(pattern),
-                                VARSIZE_ANY_EXHDR(pattern));
-    result = pg_tre_match_guarded(compiled,
+                                VARSIZE_ANY_EXHDR(pattern),
+                                PG_GET_COLLATION());
+    result = pg_tre_match_guarded(compiled, PG_GET_COLLATION(),
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
@@ -1125,7 +1147,8 @@ pg_tre_similarity_pattern(PG_FUNCTION_ARGS)
     pat_text = tre_pattern_get_text(pat, &pat_len);
     max_cost = tre_pattern_get_max_cost(pat);
 
-    sim = tre_compute_similarity(VARDATA_ANY(input),
+    sim = tre_compute_similarity(PG_GET_COLLATION(),
+                                  VARDATA_ANY(input),
                                   VARSIZE_ANY_EXHDR(input),
                                   pat_text, pat_len,
                                   max_cost);
@@ -1150,8 +1173,8 @@ pg_tre_distance_pattern(PG_FUNCTION_ARGS)
     pat_text = tre_pattern_get_text(pat, &pat_len);
     max_cost = tre_pattern_get_max_cost(pat);
 
-    compiled = tre_cache_lookup(pat_text, pat_len);
-    result = pg_tre_match_guarded(compiled,
+    compiled = tre_cache_lookup(pat_text, pat_len, PG_GET_COLLATION());
+    result = pg_tre_match_guarded(compiled, PG_GET_COLLATION(),
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,

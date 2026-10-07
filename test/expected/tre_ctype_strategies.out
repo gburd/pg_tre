@@ -3,18 +3,20 @@
 -- TRE's character classes ([[:alpha:]] ..., \w \s \d and their negations)
 -- and case folding ((?i)) must give the SAME answer as core's regex
 -- operators (~, ~*) in the same database, for every strategy pg_tre picks
--- from the database default collation (src/module.c, pg_tre_ctype_ops):
+-- from the collation (src/module.c, pg_tre_set_collation, mirroring
+-- pg_set_regex_collation):
 --
---   PGT_CT_C          ctype C/POSIX: ASCII only          (UTF8 and LATIN1, C)
---   PGT_CT_UNICODE    builtin or ICU provider            (ICU und, builtin C.UTF-8,
---                                                         builtin PG_UNICODE_FAST)
---   PGT_CT_LIBC_WIDE  libc, UTF-8                         (libc C.UTF-8)
---   PGT_CT_LIBC_1BYTE libc, any other encoding            (LATIN1 de_DE.iso88591,
---                                                         KOI8R ru_RU.koi8r,
---                                                         EUC_JP ja_JP.eucjp)
+--   C            ctype C/POSIX: ASCII only           (UTF8 and LATIN1, C)
+--   BUILTIN      builtin provider                     (C.UTF-8, PG_UNICODE_FAST)
+--   ICU          ICU provider                         (ICU und)
+--   LIBC_WIDE    libc, UTF-8                          (libc C.UTF-8)
+--   LIBC_1BYTE   libc, any other encoding             (LATIN1 de_DE.iso88591,
+--                                                      KOI8R ru_RU.koi8r,
+--                                                      EUC_JP ja_JP.eucjp)
 --
--- The strategy is chosen once per backend, so every strategy gets its own
--- database and a fresh connection.  Each class is checked twice per
+-- Here the collation is each database's default (every probe uses
+-- uncollated literals); tre_collation_classes covers explicit COLLATE in
+-- one database.  Each class is checked twice per
 -- character: through the exact matcher (k=0, tre_amatch) and through the
 -- approximate matcher (k=1: cost 0 iff the character is a member; a
 -- non-member costs 1 or, where TRE refuses to substitute into a class, has
