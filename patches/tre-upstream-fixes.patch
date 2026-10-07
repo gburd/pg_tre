@@ -1,0 +1,327 @@
+pg_tre: upstream TRE matcher fixes, applied after tre-progress-hook, tre-mbdecoder
+and tre-icase-class.  Library files only (pg_tre does not build TRE's tests).
+Source: gburd/tre PR #1 (fix/mb-backref) and PR #2 (fix/approx), written against
+laurikari/tre master 71bfcaf; regenerated here by cherry-picking onto vendor/tre
+f864ed0 plus the three pg_tre patches above (clean 3-way, no manual edits):
+  - b40f7dc backtrack: Save and restore pos_add_next
+  - 342026e backtrack: Read through a matched back reference
+  - 7d07dca backtrack: Compare multibyte back references at the right offset
+  - 9e9e96c approx: Treat a character class mismatch as a substitution
+  - 7bd9ce6 approx: Allow insertions before a failed assertion
+
+diff --git a/lib/tre-match-approx.c b/lib/tre-match-approx.c
+index 4edc043..b6f4768 100644
+--- a/lib/tre-match-approx.c
++++ b/lib/tre-match-approx.c
+@@ -261,6 +261,16 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 
+   int i, id;
+ 
++  /* The reach tables have two entries per state.  Entry `id' is state
++     `id' as usual.  Entry `id + num_states' holds state `id' after its
++     character has been read, when a transition leaving it was rejected
++     only by an assertion (^, $, \<, \>, \b, \B).  It is kept there so
++     that characters can be inserted between the character and the
++     assertion, and the assertion is tried again after each insertion.
++     Otherwise "caf$" could not match "cafe" with one insertion. */
++  int num_states = tnfa->num_states;
++  int num_slots = num_states * 2;
++
+   /*
+    * TRE internals tend to use int instead of size_t for positions or
+    * lengths and don't check for overflow.  This will take time to fix
+@@ -298,9 +308,9 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+     /* Space needed for one array of tags. */
+     int tag_bytes = sizeof(*tmp_tags) * num_tags;
+     /* Space needed for one reach table. */
+-    int reach_bytes = sizeof(*reach_next) * tnfa->num_states;
++    int reach_bytes = sizeof(*reach_next) * num_slots;
+     /* Total space needed. */
+-    int total_bytes = reach_bytes * 2 + (tnfa->num_states * 2 + 1 ) * tag_bytes;
++    int total_bytes = reach_bytes * 2 + (num_slots * 2 + 1 ) * tag_bytes;
+     /* Add some extra to make sure we can align the pointers.  The multiplier
+        used here must be equal to the number of ALIGN calls below. */
+     total_bytes += (sizeof(long) - 1) * 3;
+@@ -331,7 +341,7 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+     buf_cursor += ALIGN(buf_cursor, long);
+ 
+     /* Allocate tag arrays for `reach' and `reach_next' from `buf'. */
+-    for (i = 0; i < tnfa->num_states; i++)
++    for (i = 0; i < num_slots; i++)
+       {
+ 	reach[i].tags = (void *)buf_cursor;
+ 	buf_cursor += tag_bytes;
+@@ -345,7 +355,7 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+     match_costs[i] = INT_MAX;
+ 
+   /* Mark the reach arrays empty. */
+-  for (i = 0; i < tnfa->num_states; i++)
++  for (i = 0; i < num_slots; i++)
+     reach[i].pos = reach_next[i].pos = -2;
+ 
+   prev_pos = pos;
+@@ -429,7 +439,7 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 	 transition from each state in `reach' back to the same state.
+ 	 We don't need to worry about the final state here; this will never
+ 	 give a better match than what we already have. */
+-      for (id = 0; id < tnfa->num_states; id++)
++      for (id = 0; id < num_slots; id++)
+ 	{
+ 	  int depth;
+ 	  int cost, cost0;
+@@ -505,6 +515,75 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 	}
+ 
+ 
++      /* Try again the assertions that rejected a transition after its
++	 character was read (see `num_slots').  This reads no character
++	 and costs nothing. */
++      for (id = num_states; id < num_slots; id++)
++	{
++	  tre_tnfa_approx_reach_t *reach_p = &reach_next[id];
++	  tre_tnfa_transition_t *trans;
++	  int depth, cost0;
++
++	  if (reach_p->pos != pos)
++	    continue;
++	  depth = reach_p->depth;
++	  cost0 = reach_p->costs[0][TRE_M_COST];
++	  for (trans = reach_p->state; trans->state; trans++)
++	    {
++	      int dest_id = trans->state_id;
++
++	      if (!(trans->assertions & ~(ASSERT_CHAR_CLASS
++					  | ASSERT_CHAR_CLASS_NEG))
++		  || CHECK_ASSERTIONS(trans->assertions))
++		continue;
++
++	      for (i = 0; i < num_tags; i++)
++		tmp_tags[i] = reach_p->tags[i];
++	      if (trans->tags)
++		for (i = 0; trans->tags[i] >= 0; i++)
++		  if (trans->tags[i] < num_tags)
++		    tmp_tags[trans->tags[i]] = pos;
++
++	      if (reach_next[dest_id].pos == pos
++		  && (cost0 > reach_next[dest_id].costs[0][TRE_M_COST]
++		      || (cost0 == reach_next[dest_id].costs[0][TRE_M_COST]
++			  && !tre_tag_order(num_tags, tnfa->tag_directions,
++					    tmp_tags,
++					    reach_next[dest_id].tags))))
++		continue;
++	      DPRINT(("  assert: from %03d to %03d, cost %d\n",
++		      id - num_states, dest_id, cost0));
++
++	      reach_next[dest_id].state = trans->state;
++	      reach_next[dest_id].pos = pos;
++	      for (i = 0; i < num_tags; i++)
++		reach_next[dest_id].tags[i] = tmp_tags[i];
++	      reach_next[dest_id].depth = depth;
++	      reach_next[dest_id].params = reach_p->params;
++	      if (trans->params)
++		tre_set_params(&reach_next[dest_id], trans->params,
++			       default_params);
++	      memcpy(&reach_next[dest_id].costs, reach_p->costs,
++		     sizeof(reach_p->costs[0][0]) * TRE_M_LAST * (depth + 1));
++
++	      if (trans->state == tnfa->final
++		  && (match_eo < 0
++		      || cost0 < match_costs[TRE_M_COST]
++		      || (cost0 == match_costs[TRE_M_COST]
++			  && num_tags > 0 && tmp_tags[0] <= match_tags[0])))
++		{
++		  DPRINT(("    setting new match at %zd, cost %d\n",
++			  pos, cost0));
++		  match_eo = pos;
++		  for (i = 0; i < TRE_M_LAST; i++)
++		    match_costs[i] = reach_next[dest_id].costs[0][i];
++		  for (i = 0; i < num_tags; i++)
++		    match_tags[i] = tmp_tags[i];
++		}
++	    }
++	}
++
++
+       /* Handle deletes.  This is done by traversing through the whole TNFA
+ 	 pretending that all transitions are epsilon transitions, until
+ 	 no more states can be reached with better costs. */
+@@ -708,14 +787,6 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 	      int depth;
+ 	      int cost, cost0, err;
+ 
+-	      if (trans->assertions
+-		  && (CHECK_ASSERTIONS(trans->assertions)
+-		      || CHECK_CHAR_CLASSES(trans, tnfa, eflags)))
+-		{
+-		  DPRINT(("  exact,  from %d: assert failed\n", id));
+-		  continue;
+-		}
+-
+ 	      depth = reach[id].depth;
+ 	      dest_id = trans->state_id;
+ 
+@@ -724,11 +795,15 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 	      err = 0;
+ 
+ 	      if (trans->code_min > (tre_cint_t)prev_c
+-		  || trans->code_max < (tre_cint_t)prev_c)
++		  || trans->code_max < (tre_cint_t)prev_c
++		  || (trans->assertions
++		      && CHECK_CHAR_CLASSES(trans, tnfa, eflags)))
+ 		{
+ 		  /* Handle substitutes.  The required character was not in
+ 		     the string, so match it in place of whatever was supposed
+-		     to be there and increase costs accordingly. */
++		     to be there and increase costs accordingly.  A character
++		     outside a character class kept as an assertion (as in
++		     multibyte locales) is a mismatch like any other. */
+ 		  err = 1;
+ 
+ 		  /* Compute and check cost at current depth. */
+@@ -765,6 +840,36 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 		DPRINT(("  exact,  from %03d to %03d, cost %d: ",
+ 			id, dest_id, cost0));
+ 
++	      if (trans->assertions && CHECK_ASSERTIONS(trans->assertions))
++		{
++		  /* The character was read, but an assertion after it does
++		     not hold here.  Keep the state as it is after reading
++		     the character, so the assertion can be tried again
++		     after insertions (see `num_slots'). */
++		  tre_tnfa_approx_reach_t *r = &reach_next[id + num_states];
++		  DPRINT(("assert failed\n"));
++		  if (r->pos == pos && cost0 >= r->costs[0][TRE_M_COST])
++		    continue;
++		  r->state = reach[id].state;
++		  r->pos = pos;
++		  for (i = 0; i < num_tags; i++)
++		    r->tags[i] = reach[id].tags[i];
++		  r->params = reach[id].params;
++		  r->depth = depth;
++		  memcpy(r->costs, reach[id].costs,
++			 sizeof(r->costs[0][0]) * TRE_M_LAST * (depth + 1));
++		  r->costs[depth][TRE_M_COST] = cost;
++		  r->costs[depth][TRE_M_NUM_SUBST] += err;
++		  r->costs[depth][TRE_M_NUM_ERR] += err;
++		  if (depth > 0)
++		    {
++		      r->costs[0][TRE_M_COST] = cost0;
++		      r->costs[0][TRE_M_NUM_SUBST] += err;
++		      r->costs[0][TRE_M_NUM_ERR] += err;
++		    }
++		  continue;
++		}
++
+ 	      /* Compute tag values after this transition. */
+ 	      for (i = 0; i < num_tags; i++)
+ 		tmp_tags[i] = reach[id].tags[i];
+diff --git a/lib/tre-match-backtrack.c b/lib/tre-match-backtrack.c
+index b49ae30..f8b9736 100644
+--- a/lib/tre-match-backtrack.c
++++ b/lib/tre-match-backtrack.c
+@@ -78,6 +78,7 @@ extern int tre_progress_check(void);
+ 
+ typedef struct {
+   int pos;
++  unsigned int pos_add_next;
+   const char *str_byte;
+ #ifdef TRE_WCHAR
+   const wchar_t *str_wide;
+@@ -167,6 +168,7 @@ typedef struct tre_backtrack_struct {
+       else								      \
+ 	stack = stack->next;						      \
+       stack->item.pos = (_pos);						      \
++      stack->item.pos_add_next = pos_add_next;				      \
+       stack->item.str_byte = (_str_byte);				      \
+       BT_STACK_WIDE_IN(_str_wide);					      \
+       stack->item.state = (_state);					      \
+@@ -184,6 +186,7 @@ typedef struct tre_backtrack_struct {
+       int i;								      \
+       assert(stack->prev);						      \
+       pos = stack->item.pos;						      \
++      pos_add_next = stack->item.pos_add_next;				      \
+       if (type == STR_USER)                                                   \
+         str_source->rewind(pos + pos_add_next, str_source->context);          \
+       str_byte = stack->item.str_byte;					      \
+@@ -227,6 +230,7 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+   int next_c_start;
+   const char *str_byte_start;
+   int pos_start = -1;
++  unsigned int pos_add_next_start = 1;
+ #ifdef TRE_WCHAR
+   const wchar_t *str_wide_start;
+ #endif /* TRE_WCHAR */
+@@ -332,6 +336,7 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+     str_source->rewind(pos + pos_add_next, str_source->context);
+   GET_NEXT_WCHAR();
+   pos_start = pos;
++  pos_add_next_start = pos_add_next;
+   next_c_start = next_c;
+   str_byte_start = str_byte;
+ #ifdef TRE_WCHAR
+@@ -466,7 +471,8 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+ 	      {
+ 		DPRINT(("  substring (len %d) is [%d, %d[: '%.*s'\n",
+ 			bt_len, so, eo, bt_len, (char*)string + so));
+-		DPRINT(("  current string is '%.*s'\n", slen, str_byte - 1));
++		DPRINT(("  current string is '%.*s'\n", slen,
++			(char*)string + pos));
+ 	      }
+ #ifdef TRE_WCHAR
+ 	    else if (type == STR_WIDE)
+@@ -492,8 +498,8 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+ 				 (size_t)bt_len);
+ #endif /* TRE_WCHAR */
+ 	      else
+-		result = strncmp((const char*)string + so, str_byte - 1,
+-				 (size_t)bt_len);
++		result = strncmp((const char*)string + so,
++				 (const char*)string + pos, (size_t)bt_len);
+ 	    }
+ 	  else if (len - pos < bt_len)
+ 	    result = 1;
+@@ -503,8 +509,8 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+ 			     (size_t)bt_len);
+ #endif /* TRE_WCHAR */
+ 	  else
+-	    result = memcmp((const char*)string + so, str_byte - 1,
+-			    (size_t)bt_len);
++	    result = memcmp((const char*)string + so,
++			    (const char*)string + pos, (size_t)bt_len);
+ 
+ 	  if (result == 0)
+ 	    {
+@@ -519,15 +525,17 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+ 
+ 	      states_seen[trans_i->state_id] = empty_br_match;
+ 
+-	      /* Advance in input string and resync `prev_c', `next_c'
+-		 and pos. */
++	      /* Advance past the matched text.  Read it instead of skipping
++		 it, so that `prev_c' is its last character, `next_c' and
++		 `pos_add_next' describe the character after it, and a
++		 STR_USER source is advanced past it as well.  Stop if the
++		 input does not advance (end of string). */
+ 	      DPRINT(("	 back reference matched\n"));
+-	      str_byte += bt_len - 1;
+-#ifdef TRE_WCHAR
+-	      str_wide += bt_len - 1;
+-#endif /* TRE_WCHAR */
+-	      pos += bt_len - 1;
+-	      GET_NEXT_WCHAR();
++	      {
++		ssize_t end = pos + bt_len;
++		while (pos < end && pos_add_next > 0)
++		  GET_NEXT_WCHAR();
++	      }
+ 	      DPRINT(("	 pos now %zd\n", pos));
+ 	    }
+ 	  else
+@@ -655,6 +663,7 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+ 		}
+ 	      DPRINT(("restarting from next start position\n"));
+ 	      next_c = (tre_char_t) next_c_start;
++	      pos_add_next = pos_add_next_start;
+ #ifdef TRE_MBSTATE
+ 	      mbstate = mbstate_start;
+ #endif /* TRE_MBSTATE */

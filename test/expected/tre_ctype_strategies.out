@@ -419,7 +419,7 @@ pairs|core_equal|disagree
 :idxsetup
 :idxprobe;
 queries|nonempty|idx_ne_seq
-135|124|0
+135|125|0
 (1 row)
 -- (8)-(10) libc single-byte strategy with real non-ASCII classification.
 -- Silent unless TRE and core disagree (see header).

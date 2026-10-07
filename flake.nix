@@ -122,7 +122,7 @@
               # Apply the TRE patches, in order, if not already applied.
               # Keep this list in step with TRE_PATCH in the Makefile.
               for p in patches/tre-progress-hook.patch patches/tre-mbdecoder.patch \
-                       patches/tre-icase-class.patch; do
+                       patches/tre-icase-class.patch patches/tre-upstream-fixes.patch; do
                 if ! patch -p1 -d vendor/tre --dry-run --reverse \
                        < "$p" >/dev/null 2>&1; then
                   patch -p1 -d vendor/tre < "$p"

@@ -277,10 +277,9 @@ $extras$ AS extras
 -- matcher implements.  Index answers must equal the sequential scan; k=0
 -- TRE answers must equal core's ~ where both dialects mean the same thing
 -- (core= true).  Not compared: TRE has no \u, \m, \M, \y, \A, \Z and
--- reads \< \b as GNU word anchors (core: ARE); TRE rejects [[.x.]] and
--- [[=x=]]; and upstream TRE's backtracking matcher compares a
--- back-reference one byte short of a multibyte character, so (éa)\1
--- fails in multibyte databases -- a known TRE limitation, see LIMITATIONS.
+-- reads \< \b as GNU word anchors (core: ARE); and TRE rejects [[.x.]]
+-- and [[=x=]].  Multibyte back-references ((éa)\1, x(é)y\1z) are compared
+-- with core since patches/tre-upstream-fixes.patch fixed TRE's backtracker.
 SELECT $syn$
 CREATE TABLE sx (id serial, s text);
 INSERT INTO sx (s) VALUES
@@ -323,7 +322,7 @@ INSERT INTO sxp VALUES
   ('caf\xe9', 0, true), ('caf\u00e9', 0, false), ('\mcafé', 0, false), ('café\M', 0, false),
   ('\ycafé\y', 0, false), ('\Acafé', 0, false), ('café\Z', 0, false), ('\<café', 0, false),
   ('\bcafé', 0, false),
-  ('(ab)\1', 0, true), ('(éa)\1', 0, false), ('(aé)\1', 0, true), ('x(é)y\1z', 0, false),
+  ('(ab)\1', 0, true), ('(éa)\1', 0, true), ('(aé)\1', 0, true), ('x(é)y\1z', 0, true),
   ('(abc)\1$', 0, true), ('(a)\1\1', 0, true), ('(é)(a)\2\1', 0, true),
   ('café', 2, false), ('caXXé', 2, false), ('résumé', 2, false), ('(rés|xyz)umé', 1, false),
   ('naïve{~2}', 0, false), ('^über$', 1, false), ('hello{~1} world', 0, false);
