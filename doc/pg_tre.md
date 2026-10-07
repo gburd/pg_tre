@@ -282,9 +282,9 @@ WITH (
 );
 ```
 
-**fastupdate:** When true, INSERTs append to a pending list; VACUUM merges them into the main tree. Improves write throughput at the cost of slower scans until merge.
+**fastupdate:** Accepted but **not implemented**: every INSERT appends to the pending list whatever its value, and only VACUUM (or a REINDEX) merges the list into the main tree. Setting `fastupdate = false` changes nothing.
 
-**pending_list_limit:** Maximum pending list size in KiB before auto-merge. Larger = better write throughput, slower unmaintained scans.
+**pending_list_limit:** Accepted but **not implemented**: the pending list has no size cap and is never merged on insert. Keep it small by vacuuming: scans read the whole list, so an unvacuumed insert-heavy table gets steadily slower to search. For insert-only tables set a low `autovacuum_vacuum_insert_threshold` (or `autovacuum_vacuum_insert_scale_factor`) on the table, or schedule `VACUUM`.
 
 **bloom_tuple_bits:** Bits per per-tuple bloom filter. More bits = lower false-positive rate = fewer heap fetches. Range: 32-1024.
 

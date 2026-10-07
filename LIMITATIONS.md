@@ -265,6 +265,24 @@ stops wedging once 4.2.1 is loaded. **Dead TIDs already merged into an index
 by an earlier version stay there: REINDEX any `tre` index that has shown a
 read error or grew far larger than its heap.**
 
+### The pending list is only merged by VACUUM
+
+Every `INSERT` appends to the index's pending list, and only `VACUUM` (or a
+`REINDEX`) merges it into the main tree. The `fastupdate` and
+`pending_list_limit` reloptions and GUCs are accepted but not implemented:
+`fastupdate = false` does not bypass the list, and nothing caps its size.
+Every scan reads the whole list, so on an insert-heavy table that autovacuum
+rarely visits, searches get slower as the list grows. At 1.67 M rows the
+default `autovacuum_vacuum_insert_scale_factor` (0.2) waited for about
+334 k inserts. For such tables set a low per-table
+`autovacuum_vacuum_insert_threshold`, or schedule `VACUUM`.
+
+In 4.2.0–4.2.2 a long pending list also widened the window for a backend
+crash. Any `ERROR` raised during a scan that had built the pending-list
+overlay could abort with `free(): invalid pointer` in the clang-built
+(`nix build`) extension; `statement_timeout` and query cancel are common
+triggers. 4.2.3 fixes the crash, but the scan cost remains.
+
 ### Non-UTF-8 databases: ASCII only
 
 The trigram tokenizer decodes text as UTF-8 regardless of the database
