@@ -1,0 +1,430 @@
+-- test/sql/tre_ctype_strategies.sql
+--
+-- TRE's character classes ([[:alpha:]] ..., \w \s \d and their negations)
+-- and case folding ((?i)) must give the SAME answer as core's regex
+-- operators (~, ~*) in the same database, for every strategy pg_tre picks
+-- from the database default collation (src/module.c, pg_tre_ctype_ops):
+--
+--   PGT_CT_C          ctype C/POSIX: ASCII only          (UTF8 and LATIN1, C)
+--   PGT_CT_UNICODE    builtin or ICU provider            (ICU und, builtin C.UTF-8,
+--                                                         builtin PG_UNICODE_FAST)
+--   PGT_CT_LIBC_WIDE  libc, UTF-8                         (libc C.UTF-8)
+--   PGT_CT_LIBC_1BYTE libc, any other encoding            (LATIN1 de_DE.iso88591,
+--                                                         KOI8R ru_RU.koi8r,
+--                                                         EUC_JP ja_JP.eucjp)
+--
+-- The strategy is chosen once per backend, so every strategy gets its own
+-- database and a fresh connection.  Each class is checked twice per
+-- character: through the exact matcher (k=0, tre_amatch) and through the
+-- approximate matcher (k=1: cost 0 iff the character is a member; a
+-- non-member costs 1 or, where TRE refuses to substitute into a class, has
+-- no match at all -- either is 'not a member').
+--
+-- Output per database: how many (class, character) checks ran, how many
+-- classes had at least one member (so no check passes vacuously), and the
+-- characters on which TRE and core DISAGREE -- which must be 'none' -- and,
+-- separately, KNOWN differences (pg_tre 4.3, to be fixed in module.c; any
+-- change to them shows up as a diff):
+--   * blank and cntrl: core hard-wires them (blank = TAB SP, cntrl =
+--     0x00-0x1F 0x7F-0x9F, regc_locale.c) for every strategy; pg_tre asks
+--     the classifier, so NBSP / EMSP / IDSP / NEL / LSEP / KOI8-R 0x80 differ;
+--   * (?i) with [[:upper:]] / [[:lower:]]: core maps both to [[:alpha:]];
+--   * ICU and builtin PG_UNICODE_FAST: core uses ICU's u_is*() resp. the
+--     non-POSIX Unicode properties; pg_tre uses pg_u_is*(c, posix=true),
+--     so Arabic-Indic digits, letter-like numbers (U+216B) and symbols
+--     ($ + ~ © × € 😀 as punct) differ.
+-- Then,
+-- through a tre index, that every class / shorthand / (?i) query returns
+-- the same rows as a sequential scan.
+--
+-- The three libc single-byte sections need OS locales that CI may lack;
+-- they are guarded on pg_collation and print nothing unless they disagree,
+-- so the expected output is the same whether or not they ran.
+
+\set VERBOSITY terse
+\set QUIET on
+\pset format unaligned
+\set home :DBNAME
+SET client_min_messages = warning;
+SET client_encoding = 'UTF8';
+
+-- The probe, run in every database below.  Needs pg_tre and a table
+-- ch(ord, name, c, letter) of characters representable in that database;
+-- rx(cls, re) adds encoding-specific patterns (ranges) to the common list.
+SELECT $probe$
+WITH k AS (
+  SELECT * FROM (VALUES
+    ('alnum',  '^[[:alnum:]]$'),  ('alpha',  '^[[:alpha:]]$'),
+    ('blank',  '^[[:blank:]]$'),  ('cntrl',  '^[[:cntrl:]]$'),
+    ('digit',  '^[[:digit:]]$'),  ('graph',  '^[[:graph:]]$'),
+    ('lower',  '^[[:lower:]]$'),  ('print',  '^[[:print:]]$'),
+    ('punct',  '^[[:punct:]]$'),  ('space',  '^[[:space:]]$'),
+    ('upper',  '^[[:upper:]]$'),  ('xdigit', '^[[:xdigit:]]$'),
+    ('^alpha', '^[^[:alpha:]]$'), ('^space', '^[^[:space:]]$'),
+    ('a[[:digit:]]b', '^a[[:digit:]]b$'),
+    ('\w', '^\w$'), ('\W', '^\W$'), ('\s', '^\s$'), ('\S', '^\S$'),
+    ('\d', '^\d$'), ('\D', '^\D$'),
+    ('(?i)[[:upper:]]', '(?i)^[[:upper:]]$'),
+    ('(?i)[[:lower:]]', '(?i)^[[:lower:]]$'),
+    ('(?i)[^[:upper:]]', '(?i)^[^[:upper:]]$')) AS v(cls, re)
+  UNION ALL SELECT cls, re FROM rx),
+s AS (SELECT CASE WHEN k.re LIKE '%a[[:digit:]]b%' THEN 'a' || c || 'b' ELSE c END AS subj, *
+        FROM ch, k),
+r AS (SELECT cls, ord, name, subj ~ re AS core,
+             tre_amatch(subj, re, 0) AS k0,
+             coalesce(tre_amatch_cost(subj, re, 1), 1) = 0 AS k1
+        FROM s),
+c AS (SELECT cls, bool_or(core) AS any_member,
+             string_agg(name, ' ' ORDER BY ord)
+               FILTER (WHERE k0 IS DISTINCT FROM core
+                          OR k1 IS DISTINCT FROM core) AS bad
+        FROM r GROUP BY cls)
+SELECT (SELECT count(*) FROM r) AS checks,
+       count(*) FILTER (WHERE any_member) AS classes_with_members,
+       count(*) AS classes,
+       coalesce(string_agg(cls || ': ' || bad, '; ' ORDER BY cls)
+                  FILTER (WHERE bad IS NOT NULL AND NOT known), 'none') AS disagree,
+       coalesce(string_agg(cls || ': ' || bad, '; ' ORDER BY cls)
+                  FILTER (WHERE bad IS NOT NULL AND known), 'none') AS known_differences
+  FROM (SELECT *, cls IN ('blank', 'cntrl', '(?i)[[:upper:]]', '(?i)[[:lower:]]',
+                          '(?i)[^[:upper:]]')
+                  OR (current_setting('pgtre.ct_unicode_props', true) = 'on'
+                      AND cls IN ('alnum', 'alpha', 'upper', 'lower', 'digit', 'punct',
+                                  'graph', 'print', '^alpha', 'a[[:digit:]]b',
+                                  '\w', '\W', '\d', '\D')) AS known
+          FROM c) c
+$probe$ AS probe,
+-- Every ordered pair of letters, folded.  Titlecase digraphs (U+01C5) are
+-- left out: core's ~* never equates a titlecase letter with itself.
+$fold$
+SELECT count(*) AS pairs,
+       count(*) FILTER (WHERE a.c ~* ('^' || b.c || '$')) AS core_equal,
+       coalesce(string_agg(a.name || '/' || b.name, ' ' ORDER BY a.ord, b.ord)
+         FILTER (WHERE tre_amatch(a.c, '(?i)^' || b.c || '$', 0)
+                         IS DISTINCT FROM (a.c ~* ('^' || b.c || '$'))
+                    OR (coalesce(tre_amatch_cost(a.c, '(?i)^' || b.c || '$', 1), 1) = 0)
+                         IS DISTINCT FROM (a.c ~* ('^' || b.c || '$'))), 'none')
+         AS disagree
+  FROM ch a, ch b WHERE a.letter AND b.letter
+$fold$ AS fold,
+-- Through the index: every character inside a word, one row each, plus
+-- filler; each class pattern (in context, so trigrams can be extracted)
+-- via %~~, ~ and ~* must return the same rows with the index as without.
+$idx$
+CREATE TABLE ix (id serial, s text);
+INSERT INTO ix (s) SELECT 'xq' || c || 'zw' FROM ch ORDER BY ord;
+INSERT INTO ix (s) SELECT 'filler ' || g FROM generate_series(1, 300) g;
+CREATE INDEX ix_tre ON ix USING tre (s);
+INSERT INTO ix (s) SELECT 'pre xq' || c || 'zw post' FROM ch ORDER BY ord;
+CREATE FUNCTION ids(q text, ix bool) RETURNS int[] LANGUAGE plpgsql AS $f$
+DECLARE v int[];
+BEGIN
+  PERFORM set_config('enable_seqscan', CASE WHEN ix THEN 'off' ELSE 'on' END, true);
+  PERFORM set_config('enable_indexscan', CASE WHEN ix THEN 'on' ELSE 'off' END, true);
+  PERFORM set_config('enable_bitmapscan', CASE WHEN ix THEN 'on' ELSE 'off' END, true);
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM ix WHERE ' || q INTO v;
+  RETURN v;
+END $f$;
+$idx$ AS idxsetup,
+$idxq$
+WITH k AS (
+  SELECT 'xq' || p || 'zw' AS re FROM (VALUES
+    ('[[:alnum:]]'), ('[[:alpha:]]'), ('[[:blank:]]'), ('[[:cntrl:]]'),
+    ('[[:digit:]]'), ('[[:graph:]]'), ('[[:lower:]]'), ('[[:print:]]'),
+    ('[[:punct:]]'), ('[[:space:]]'), ('[[:upper:]]'), ('[[:xdigit:]]'),
+    ('[^[:alpha:]]'), ('[[:alpha:][:digit:]]'), ('[a[:upper:]]'),
+    ('\w'), ('\W'), ('\s'), ('\S'), ('\d'), ('\D'), ('[\w]'), ('[^\d]'),
+    ('.'), ('[[:alpha:]][[:alpha:]]?')) AS v(p)
+  UNION ALL SELECT 'xq' || ltrim(rtrim(re, '$'), '^') || 'zw' FROM rx
+   WHERE re NOT LIKE '(?i)%'),
+q AS (SELECT format('s %%~~ tre_pattern(%L, 0)', re) AS q FROM k
+      UNION ALL SELECT format('s ~ %L', re) FROM k
+      UNION ALL SELECT format('s ~* %L', re) FROM k
+      UNION ALL SELECT format('s %%~~ tre_pattern(%L, 0)', '(?i)' || re) FROM k
+      UNION ALL SELECT format('s %%~~ tre_pattern(%L, 1)', re) FROM k),
+r AS (SELECT q, ids(q, true) AS idx, ids(q, false) AS seq FROM q)
+SELECT count(*) AS queries, count(*) FILTER (WHERE seq IS NOT NULL) AS nonempty,
+       count(*) FILTER (WHERE idx IS DISTINCT FROM seq) AS idx_ne_seq
+  FROM r
+$idxq$ AS idxprobe,
+-- Characters every UTF-8 database probes: ASCII (letters, digits, '_',
+-- blanks, controls, punctuation and symbols core and Unicode classify
+-- differently), Latin-1, Greek, Cyrillic, CJK, Arabic-Indic digits,
+-- letter-like numbers and symbols, Unicode spaces, combining marks and
+-- 4-byte (supplementary plane) characters.
+$u8$
+CREATE TABLE ch (ord serial, name text, c text, letter bool DEFAULT false);
+CREATE TABLE rx (cls text, re text);
+INSERT INTO ch (name, c, letter) VALUES
+  ('a', 'a', true), ('Z', 'Z', true), ('5', '5', false), ('_', '_', false),
+  ('SP', ' ', false), ('TAB', E'\t', false), ('LF', E'\n', false),
+  ('DEL', chr(127), false), ('!', '!', false), ('$', '$', false),
+  ('+', '+', false), ('~', '~', false), ('f', 'f', true),
+  ('é', 'é', true), ('É', 'É', true), ('ß', 'ß', true), ('ÿ', 'ÿ', true),
+  ('µ', 'µ', true), ('ª', 'ª', true), ('²', '²', false), ('½', '½', false),
+  ('NBSP', chr(160), false), ('SHY', chr(173), false),
+  ('NEL', chr(133), false), ('¿', '¿', false), ('«', '«', false),
+  ('©', '©', false), ('×', '×', false),
+  ('Ω', 'Ω', true), ('ω', 'ω', true), ('ǅ', 'ǅ', false),
+  ('я', 'я', true), ('Я', 'Я', true), ('日', '日', true), ('ア', 'ア', true),
+  ('ー', 'ー', false), ('١', '١', false), ('٣', '٣', false),
+  ('Ⅻ', 'Ⅻ', false), ('ⅻ', 'ⅻ', false), ('Ⓐ', 'Ⓐ', false),
+  ('EMSP', chr(8195), false), ('IDSP', chr(12288), false),
+  ('LSEP', chr(8232), false), ('€', '€', false), ('—', '—', false),
+  ('U+0301', chr(769), false), ('Ａ', 'Ａ', true), ('ｆ', 'ｆ', true),
+  ('𝐀', '𝐀', false), ('😀', '😀', false), ('𐐀', '𐐀', true),
+  ('𐐨', '𐐨', true);
+INSERT INTO rx VALUES ('[α-ω]', '^[α-ω]$'), ('[^α-ω]', '^[^α-ω]$'),
+                      ('[À-ÿ]', '^[À-ÿ]$'), ('[𐐀-𐐧]', '^[𐐀-𐐧]$'),
+                      ('(?i)[α-ω]', '(?i)^[α-ω]$'),
+                      ('(?i)[a-z]', '(?i)^[a-z]$');
+$u8$ AS u8chars
+\gset
+
+SELECT EXISTS (SELECT FROM pg_collation WHERE collname = 'de_DE.iso88591') AS have_de,
+       EXISTS (SELECT FROM pg_collation WHERE collname = 'ru_RU.koi8r') AS have_ru,
+       EXISTS (SELECT FROM pg_collation WHERE collname = 'ja_JP.eucjp') AS have_ja
+\gset
+
+DROP DATABASE IF EXISTS pgtre_ct_c;
+DROP DATABASE IF EXISTS pgtre_ct_libcw;
+DROP DATABASE IF EXISTS pgtre_ct_icu;
+DROP DATABASE IF EXISTS pgtre_ct_builtin;
+DROP DATABASE IF EXISTS pgtre_ct_fast;
+DROP DATABASE IF EXISTS pgtre_ct_latin1;
+DROP DATABASE IF EXISTS pgtre_ct_eucjp;
+DROP DATABASE IF EXISTS pgtre_ct_de;
+DROP DATABASE IF EXISTS pgtre_ct_ru;
+DROP DATABASE IF EXISTS pgtre_ct_ja;
+CREATE DATABASE pgtre_ct_c       TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+CREATE DATABASE pgtre_ct_libcw   TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C.UTF-8';
+CREATE DATABASE pgtre_ct_icu     TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C'
+                                 LOCALE_PROVIDER icu ICU_LOCALE 'und';
+CREATE DATABASE pgtre_ct_builtin TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C'
+                                 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8';
+CREATE DATABASE pgtre_ct_fast    TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C'
+                                 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'PG_UNICODE_FAST';
+CREATE DATABASE pgtre_ct_latin1  TEMPLATE template0 ENCODING 'LATIN1' LOCALE 'C';
+CREATE DATABASE pgtre_ct_eucjp   TEMPLATE template0 ENCODING 'EUC_JP' LOCALE 'C';
+
+-- (1) UTF8, C ctype: ASCII only, in TRE as in core.
+\c pgtre_ct_c
+SET client_min_messages = warning;
+CREATE EXTENSION pg_tre;
+:u8chars
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+-- the 4.3 regression the hooks fix: these are false here, true below
+SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' AS core;
+
+-- (2) UTF8, libc C.UTF-8: towlower_l and friends.
+\c pgtre_ct_libcw
+SET client_min_messages = warning;
+CREATE EXTENSION pg_tre;
+:u8chars
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' AS core,
+       tre_amatch('É', '(?i)^é$', 0) AS fold_e, 'É' ~* '^é$' AS core_fold;
+
+-- (3) UTF8, ICU default collation: Unicode properties.
+\c pgtre_ct_icu
+SET client_min_messages = warning;
+SET pgtre.ct_unicode_props = on;
+CREATE EXTENSION pg_tre;
+:u8chars
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' AS core,
+       tre_amatch('É', '(?i)^é$', 0) AS fold_e, 'É' ~* '^é$' AS core_fold;
+
+-- (4) UTF8, builtin C.UTF-8.
+\c pgtre_ct_builtin
+SET client_min_messages = warning;
+CREATE EXTENSION pg_tre;
+:u8chars
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+
+-- (5) UTF8, builtin PG_UNICODE_FAST (full case mapping in core).
+\c pgtre_ct_fast
+SET client_min_messages = warning;
+SET pgtre.ct_unicode_props = on;
+CREATE EXTENSION pg_tre;
+:u8chars
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+
+-- (6) LATIN1, C: single-byte, TRE expands classes at compile time.
+\c pgtre_ct_latin1
+SET client_min_messages = warning;
+SET client_encoding = 'UTF8';
+CREATE EXTENSION pg_tre;
+CREATE TABLE ch (ord serial, name text, c text, letter bool DEFAULT false);
+CREATE TABLE rx (cls text, re text);
+INSERT INTO ch (name, c, letter) VALUES
+  ('a', 'a', true), ('Z', 'Z', true), ('5', '5', false), ('_', '_', false),
+  ('SP', ' ', false), ('TAB', E'\t', false), ('DEL', chr(127), false),
+  ('$', '$', false), ('é', 'é', true), ('É', 'É', true), ('ß', 'ß', true),
+  ('ÿ', 'ÿ', true), ('µ', 'µ', true), ('ª', 'ª', true), ('²', '²', false),
+  ('NBSP', chr(160), false), ('NEL', chr(133), false), ('×', '×', false);
+INSERT INTO rx VALUES ('[À-ÿ]', '^[À-ÿ]$'), ('(?i)[à-þ]', '(?i)^[à-þ]$');
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+
+-- (7) EUC_JP, C: multibyte, non-UTF8, ASCII-only classes at match time.
+\c pgtre_ct_eucjp
+SET client_min_messages = warning;
+SET client_encoding = 'UTF8';
+CREATE EXTENSION pg_tre;
+CREATE TABLE ch (ord serial, name text, c text, letter bool DEFAULT false);
+CREATE TABLE rx (cls text, re text);
+INSERT INTO ch (name, c, letter) VALUES
+  ('a', 'a', true), ('Z', 'Z', true), ('5', '5', false), ('_', '_', false),
+  ('SP', ' ', false), ('$', '$', false), ('日', '日', true), ('ア', 'ア', true),
+  ('ｱ', 'ｱ', false), ('Ａ', 'Ａ', true), ('ａ', 'ａ', true), ('α', 'α', true),
+  ('Ω', 'Ω', true), ('я', 'я', true), ('Я', 'Я', true), ('IDSP', '　', false),
+  ('丂', '丂', false);
+INSERT INTO rx VALUES ('[ぁ-ん]', '^[ぁ-ん]$'), ('[^ぁ-ん]', '^[^ぁ-ん]$'),
+                      ('(?i)[α-ω]', '(?i)^[α-ω]$');
+:probe;
+:fold;
+:idxsetup
+:idxprobe;
+
+-- (8)-(10) libc single-byte strategy with real non-ASCII classification.
+-- Silent unless TRE and core disagree (see header).
+\c :home
+SET client_min_messages = warning;
+\if :have_de
+CREATE DATABASE pgtre_ct_de TEMPLATE template0 ENCODING 'LATIN1' LOCALE 'de_DE.iso88591';
+\c pgtre_ct_de
+SET client_min_messages = warning;
+SET client_encoding = 'UTF8';
+CREATE EXTENSION pg_tre;
+CREATE TABLE ch (ord serial, name text, c text, letter bool DEFAULT false);
+CREATE TABLE rx (cls text, re text);
+INSERT INTO ch (name, c, letter) VALUES
+  ('a', 'a', true), ('Z', 'Z', true), ('5', '5', false), ('_', '_', false),
+  ('SP', ' ', false), ('TAB', E'\t', false), ('DEL', chr(127), false),
+  ('$', '$', false), ('é', 'é', true), ('É', 'É', true), ('ß', 'ß', true),
+  ('ÿ', 'ÿ', true), ('µ', 'µ', true), ('ª', 'ª', true), ('²', '²', false),
+  ('NBSP', chr(160), false), ('NEL', chr(133), false), ('×', '×', false),
+  ('÷', '÷', false), ('Þ', 'Þ', true), ('þ', 'þ', true);
+INSERT INTO rx VALUES ('[À-ÿ]', '^[À-ÿ]$'), ('(?i)[à-þ]', '(?i)^[à-þ]$');
+:probe \gset
+SELECT :'disagree' <> 'none' AS bad \gset
+\if :bad
+\echo de_DE.iso88591 classes disagree: :disagree
+\endif
+:fold \gset
+SELECT :'disagree' <> 'none' AS bad \gset
+\if :bad
+\echo de_DE.iso88591 fold disagrees: :disagree
+\endif
+:idxsetup
+:idxprobe \gset
+SELECT :idx_ne_seq <> 0 OR :nonempty = 0 AS bad \gset
+\if :bad
+\echo de_DE.iso88591 index disagrees with seq scan: :idx_ne_seq of :queries
+\endif
+SELECT NOT (tre_amatch('é', '^[[:alpha:]]$', 0) AND tre_amatch('É', '(?i)^é$', 0))
+       AS bad \gset
+\if :bad
+\echo de_DE.iso88591: é is not a letter to TRE
+\endif
+\c :home
+SET client_min_messages = warning;
+DROP DATABASE pgtre_ct_de;
+\endif
+
+\if :have_ru
+CREATE DATABASE pgtre_ct_ru TEMPLATE template0 ENCODING 'KOI8R' LOCALE 'ru_RU.koi8r';
+\c pgtre_ct_ru
+SET client_min_messages = warning;
+SET client_encoding = 'UTF8';
+CREATE EXTENSION pg_tre;
+CREATE TABLE ch (ord serial, name text, c text, letter bool DEFAULT false);
+CREATE TABLE rx (cls text, re text);
+INSERT INTO ch (name, c, letter) VALUES
+  ('a', 'a', true), ('Z', 'Z', true), ('5', '5', false), ('SP', ' ', false),
+  ('я', 'я', true), ('Я', 'Я', true), ('ё', 'ё', true), ('Ё', 'Ё', true),
+  ('ж', 'ж', true), ('Ж', 'Ж', true), ('─', '─', false), ('NBSP', chr(160), false);
+INSERT INTO rx VALUES ('[а-я]', '^[а-я]$'), ('(?i)[а-я]', '(?i)^[а-я]$');
+:probe \gset
+SELECT :'disagree' <> 'none' AS bad \gset
+\if :bad
+\echo ru_RU.koi8r classes disagree: :disagree
+\endif
+:fold \gset
+SELECT :'disagree' <> 'none' AS bad \gset
+\if :bad
+\echo ru_RU.koi8r fold disagrees: :disagree
+\endif
+:idxsetup
+:idxprobe \gset
+SELECT :idx_ne_seq <> 0 OR :nonempty = 0 AS bad \gset
+\if :bad
+\echo ru_RU.koi8r index disagrees with seq scan: :idx_ne_seq of :queries
+\endif
+\c :home
+SET client_min_messages = warning;
+DROP DATABASE pgtre_ct_ru;
+\endif
+
+\if :have_ja
+CREATE DATABASE pgtre_ct_ja TEMPLATE template0 ENCODING 'EUC_JP' LOCALE 'ja_JP.eucjp';
+\c pgtre_ct_ja
+SET client_min_messages = warning;
+SET client_encoding = 'UTF8';
+CREATE EXTENSION pg_tre;
+CREATE TABLE ch (ord serial, name text, c text, letter bool DEFAULT false);
+CREATE TABLE rx (cls text, re text);
+INSERT INTO ch (name, c, letter) VALUES
+  ('a', 'a', true), ('Z', 'Z', true), ('5', '5', false), ('_', '_', false),
+  ('SP', ' ', false), ('$', '$', false), ('日', '日', true), ('ア', 'ア', true),
+  ('ｱ', 'ｱ', false), ('Ａ', 'Ａ', true), ('ａ', 'ａ', true), ('α', 'α', true),
+  ('Ω', 'Ω', true), ('IDSP', '　', false), ('丂', '丂', false);
+INSERT INTO rx VALUES ('[ぁ-ん]', '^[ぁ-ん]$'), ('(?i)[α-ω]', '(?i)^[α-ω]$');
+:probe \gset
+SELECT :'disagree' <> 'none' AS bad \gset
+\if :bad
+\echo ja_JP.eucjp classes disagree: :disagree
+\endif
+:fold \gset
+SELECT :'disagree' <> 'none' AS bad \gset
+\if :bad
+\echo ja_JP.eucjp fold disagrees: :disagree
+\endif
+:idxsetup
+:idxprobe \gset
+SELECT :idx_ne_seq <> 0 OR :nonempty = 0 AS bad \gset
+\if :bad
+\echo ja_JP.eucjp index disagrees with seq scan: :idx_ne_seq of :queries
+\endif
+\c :home
+SET client_min_messages = warning;
+DROP DATABASE pgtre_ct_ja;
+\endif
+
+\c :home
+SET client_min_messages = warning;
+DROP DATABASE pgtre_ct_c;
+DROP DATABASE pgtre_ct_libcw;
+DROP DATABASE pgtre_ct_icu;
+DROP DATABASE pgtre_ct_builtin;
+DROP DATABASE pgtre_ct_fast;
+DROP DATABASE pgtre_ct_latin1;
+DROP DATABASE pgtre_ct_eucjp;
