@@ -52,8 +52,8 @@ atom(A)          ::= DOT.                                        { A = regex_ast
 atom(A)          ::= ANCHOR_START.                               { A = regex_ast_anchor(ctx, REGEX_ANCHOR_START); }
 atom(A)          ::= ANCHOR_END.                                 { A = regex_ast_anchor(ctx, REGEX_ANCHOR_END); }
 
-charclass(A)     ::= LBRACKET classbody(B) RBRACKET.             { A = regex_ast_class(ctx, B, false); }
-charclass(A)     ::= LBRACKET CARET classbody(B) RBRACKET.       { A = regex_ast_class(ctx, B, true); }
+charclass(A)     ::= LBRACKET classbody(B) RBRACKET(R).          { A = R.i ? regex_ast_any(ctx) : regex_ast_class(ctx, B, false); }
+charclass(A)     ::= LBRACKET CARET classbody(B) RBRACKET(R).    { A = R.i ? regex_ast_any(ctx) : regex_ast_class(ctx, B, true); }
 
 classbody(A)     ::= classitem(B).                               { A = B; }
 classbody(A)     ::= classbody(B) classitem(C).                  { A = regex_ast_class_union(ctx, B, C); }

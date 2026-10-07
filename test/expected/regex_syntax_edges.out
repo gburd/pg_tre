@@ -1,0 +1,222 @@
+-- test/sql/regex_syntax_edges.sql
+--
+-- Edge cases of pg_tre's own regex tokenizer (src/query/tokens.c), which
+-- extracts trigrams for the index and must agree with TRE (the recheck):
+-- every escape kind, braces ({m,n} and approximate {~k}), bracket corner
+-- cases, embedded options, multibyte characters after a backslash, and the
+-- syntax errors.  Errors are printed; every valid pattern is run through
+-- the index and through a sequential scan, which must agree.  Plus the
+-- TRE decoder corner cases reachable from SQL: an empty subject, and
+-- k=0 / k>=1 / back-reference matching over strings whose LAST character
+-- is multibyte (the decoder sees exactly the remaining bytes).  Known
+-- upstream-TRE limitations visible below: (é)\1 finds nothing in a
+-- multibyte database (the backtracker compares a back-reference one byte
+-- short), and TRE has no \0nnn / \U escapes or [[.x.]] elements.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/regex_syntax_edges.sql:16: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+\set VERBOSITY terse
+SET client_min_messages = warning;
+SET
+DROP TABLE IF EXISTS rse;
+DROP TABLE
+CREATE TABLE rse (id serial, s text);
+CREATE TABLE
+INSERT INTO rse (s) VALUES
+  ('abc\'), ('a{2'), ('aa'), ('ab]b'), ('a^b'), ('café'), ('caf\é'),
+  ('aaab'), ('cafA'), (E'x\ny'), ('[ab]'), ('-a'), ('a-'), ('a.b'),
+  ('xyzé'), ('ééé'), ('abcabcé'), ('(?i)abc'), ('ABC');
+INSERT 0 19
+INSERT INTO rse (s) SELECT 'filler ' || g FROM generate_series(1, 200) g;
+INSERT 0 200
+CREATE INDEX rse_tre ON rse USING tre (s);
+CREATE INDEX
+INSERT INTO rse (s) VALUES ('pre café post'), ('pre aaab'), ('pre ABC');
+INSERT 0 3
+-- Syntax errors (the tokenizer's, on the index path and in the debug
+-- functions alike).
+SELECT tre_parse_debug('abc\');
+psql:test/sql/regex_syntax_edges.sql:32: ERROR:  regex syntax error: unexpected end of pattern after backslash
+SELECT tre_parse_debug('[a\');
+psql:test/sql/regex_syntax_edges.sql:33: ERROR:  regex syntax error: unexpected end of pattern after backslash
+SELECT tre_parse_debug('a{x}');
+psql:test/sql/regex_syntax_edges.sql:34: ERROR:  regex syntax error: unexpected character 'x' inside {}
+SELECT tre_parse_debug('a{~x}');
+psql:test/sql/regex_syntax_edges.sql:35: ERROR:  regex syntax error: expected digit in repetition count
+SELECT tre_parse_debug('a{,2}');
+psql:test/sql/regex_syntax_edges.sql:36: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('x[[:alpha');
+psql:test/sql/regex_syntax_edges.sql:37: ERROR:  regex syntax error: unterminated [: in bracket expression
+SELECT tre_parse_debug('x[[=e');
+psql:test/sql/regex_syntax_edges.sql:38: ERROR:  regex syntax error: unterminated [= in bracket expression
+SELECT tre_parse_debug('x[[.e');
+psql:test/sql/regex_syntax_edges.sql:39: ERROR:  regex syntax error: unterminated [. in bracket expression
+SELECT tre_parse_debug('a{2');
+psql:test/sql/regex_syntax_edges.sql:40: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('a(');
+psql:test/sql/regex_syntax_edges.sql:41: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('[a-');
+psql:test/sql/regex_syntax_edges.sql:42: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('x[a[');
+psql:test/sql/regex_syntax_edges.sql:43: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('[a^b]');
+psql:test/sql/regex_syntax_edges.sql:44: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('[]^a]');
+psql:test/sql/regex_syntax_edges.sql:45: ERROR:  regex syntax error: 
+SELECT tre_parse_debug('a{~1~}');
+psql:test/sql/regex_syntax_edges.sql:46: ERROR:  regex syntax error: unexpected character '~' inside {}
+SELECT tre_amatch('cafa', 'caf[[.a.]]', 0);
+psql:test/sql/regex_syntax_edges.sql:47: ERROR:  invalid regular expression: Unknown collating element
+SELECT tre_amatch('xa', 'x[[:al:pha:]]', 0);
+psql:test/sql/regex_syntax_edges.sql:48: ERROR:  invalid regular expression: Unknown character class name
+SELECT tre_parse_debug('x[[:al:pha:]]') IS NOT NULL AS tokenizer_accepts;
+ tokenizer_accepts 
+-------------------
+ t
+(1 row)
+
+SET enable_seqscan = off;
+SET
+SELECT id FROM rse WHERE s %~~ tre_pattern('x[[:alpha', 0);
+psql:test/sql/regex_syntax_edges.sql:51: ERROR:  pg_tre: invalid regex pattern: unterminated [: in bracket expression
+SELECT id FROM rse WHERE s ~ 'abc\';
+psql:test/sql/regex_syntax_edges.sql:52: ERROR:  invalid regular expression: invalid escape \ sequence
+RESET enable_seqscan;
+RESET
+CREATE FUNCTION rse_ids(q text, ix bool) RETURNS int[] LANGUAGE plpgsql AS $f$
+DECLARE v int[];
+BEGIN
+  PERFORM set_config('enable_seqscan', CASE WHEN ix THEN 'off' ELSE 'on' END, true);
+  PERFORM set_config('enable_indexscan', CASE WHEN ix THEN 'on' ELSE 'off' END, true);
+  PERFORM set_config('enable_bitmapscan', CASE WHEN ix THEN 'on' ELSE 'off' END, true);
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM rse WHERE ' || q INTO v;
+  RETURN v;
+END $f$;
+CREATE FUNCTION
+-- Valid patterns: index == seq scan, and the rows found.
+SELECT p, k, rse_ids(format('s %%~~ tre_pattern(%L, %s)', p, k), false) AS seq,
+       rse_ids(format('s %%~~ tre_pattern(%L, %s)', p, k), true)
+         IS NOT DISTINCT FROM
+       rse_ids(format('s %%~~ tre_pattern(%L, %s)', p, k), false) AS idx_eq_seq
+  FROM (VALUES
+    ('abc\\', 0), ('a\{2', 0), ('a{2}', 0), ('a{1,2}b', 0), ('a{2,}b', 0),
+    ('(aa){~1}b', 0), ('caf{~1}', 0), ('ab\]b', 0), ('a\^b', 0), ('caf\é', 0),
+    ('caf\\\é', 0), ('[\é]', 0), ('caf[\é]', 0), ('caf\x{e9}', 0), ('caf\U000000e9', 0),
+    ('caf\0351', 0), ('caf[\x41]', 0), ('x[\n]y', 0), ('x\ny', 0), ('\[ab\]', 0),
+    ('[-a]a', 0), ('a[a-]', 0), ('[^-x]a', 0), ('[]a]b', 0), ('a[^]]b', 0),
+    ('[a[b]', 0), ('\(\?i\)abc', 0),
+    ('(?i)abc', 0), ('(?i)abc', 1), ('a\.b', 0), ('a.b', 1),
+    ('xyz.', 0), ('xyzé$', 1), ('éé', 0), ('^éé$', 1), ('(é)\1', 0),
+    ('abc(abc)?é', 0), ('é{3}', 0), ('é{~1}é', 0), ('[]-a]b', 0), ('a\#b', 0),
+    ('a\~b', 0), ('abcabc', 2)) AS v(p, k)
+ ORDER BY p, k;
+       p       | k |                      seq                      | idx_eq_seq 
+---------------+---+-----------------------------------------------+------------
+ (?i)abc       | 0 | {1,17,18,19,222}                              | t
+ (?i)abc       | 1 | {1,4,8,11,17,18,19,221,222}                   | t
+ (aa){~1}b     | 0 | {8,221}                                       | t
+ (é)\1         | 0 |                                               | t
+ [-a]a         | 0 | {3,8,12,221}                                  | t
+ [\é]          | 0 | {1,6,7,15,16,17,220}                          | t
+ []-a]b        | 0 | {1,4,5,8,11,17,18,221}                        | t
+ []a]b         | 0 | {1,4,8,11,17,18,221}                          | t
+ [^-x]a        | 0 | {3,6,7,8,9,11,17,18,220,221}                  | t
+ [a[b]         | 0 | {1,2,3,4,5,6,7,8,9,11,12,13,14,17,18,220,221} | t
+ \(\?i\)abc    | 0 | {18}                                          | t
+ \[ab\]        | 0 | {11}                                          | t
+ ^éé$          | 1 | {16}                                          | t
+ a.b           | 1 | {1,2,3,4,5,6,7,8,9,11,13,14,17,18,220,221}    | t
+ a[^]]b        | 0 | {5,8,14,221}                                  | t
+ a[a-]         | 0 | {3,8,13,221}                                  | t
+ a\#b          | 0 |                                               | t
+ a\.b          | 0 | {14}                                          | t
+ a\^b          | 0 | {5}                                           | t
+ a\{2          | 0 | {2}                                           | t
+ a\~b          | 0 |                                               | t
+ ab\]b         | 0 | {4}                                           | t
+ abc(abc)?é    | 0 | {17}                                          | t
+ abc\\         | 0 | {1}                                           | t
+ abcabc        | 2 | {17}                                          | t
+ a{1,2}b       | 0 | {1,4,8,11,17,18,221}                          | t
+ a{2,}b        | 0 | {8,221}                                       | t
+ a{2}          | 0 | {3,8,221}                                     | t
+ caf[\x41]     | 0 | {7}                                           | t
+ caf[\é]       | 0 | {6,7,220}                                     | t
+ caf\0351      | 0 |                                               | t
+ caf\U000000e9 | 0 |                                               | t
+ caf\\\é       | 0 | {7}                                           | t
+ caf\x{e9}     | 0 | {6,220}                                       | t
+ caf\é         | 0 | {6,220}                                       | t
+ caf{~1}       | 0 | {6,7,9,220}                                   | t
+ x[\n]y        | 0 |                                               | t
+ x\ny          | 0 | {10}                                          | t
+ xyz.          | 0 | {15}                                          | t
+ xyzé$         | 1 | {15}                                          | t
+ é{3}          | 0 | {16}                                          | t
+ é{~1}é        | 0 | {16}                                          | t
+ éé            | 0 | {16}                                          | t
+(43 rows)
+
+-- TRE over the end of the string: an empty subject, and a multibyte last
+-- character (decoded from exactly its own bytes) in every matcher.
+SELECT tre_amatch('', 'x', 0) AS empty_k0, tre_amatch('', 'x', 1) AS empty_k1,
+       tre_amatch('', '', 0) AS empty_empty, tre_amatch('', '(a)\1', 0) AS empty_backref,
+       tre_amatch('xé', 'xé$', 0) AS mb_last_k0,
+       tre_amatch_cost('xé', '^xe$', 1) AS mb_last_k1,
+       tre_amatch('ababé', '(ab)\1é$', 0) AS mb_last_backref,
+       tre_amatch('abab', '(ab)\1$', 0) AS backref_end,
+       tre_amatch('xyzé', '(xyz)é{~1}', 0) AS mb_last_approx_brace;
+ empty_k0 | empty_k1 | empty_empty | empty_backref | mb_last_k0 | mb_last_k1 | mb_last_backref | backref_end | mb_last_approx_brace 
+----------+----------+-------------+---------------+------------+------------+-----------------+-------------+----------------------
+ f        | t        | t           | f             | t          |          1 | t               | t           | t
+(1 row)
+
+-- (?i) on non-ASCII text depends on the database ctype (C: ASCII only);
+-- whatever it is, TRE and core's ~* agree, and the index agrees too.
+SELECT rse_ids($$s %~~ tre_pattern('(?i)CAFÉ', 0)$$, false)
+         IS NOT DISTINCT FROM rse_ids($$s ~* 'CAFÉ'$$, false) AS icase_tre_eq_core,
+       rse_ids($$s %~~ tre_pattern('(?i)CAFÉ', 0)$$, true)
+         IS NOT DISTINCT FROM rse_ids($$s %~~ tre_pattern('(?i)CAFÉ', 0)$$, false) AS icase_idx_eq_seq;
+ icase_tre_eq_core | icase_idx_eq_seq 
+-------------------+------------------
+ t                 | t
+(1 row)
+
+-- A literal run longer than the extractor's 1024-character buffer makes
+-- the k>=1 query unindexable (lossy) rather than failing.
+SELECT tre_extract_debug(repeat('ab', 600), 1) ~ 'always_true' AS long_run_lossy;
+ long_run_lossy 
+----------------
+ f
+(1 row)
+
+-- Corrupt (undecodable) bytes in the subject make every matcher -- here
+-- the back-reference one -- report no match.  The server validates text,
+-- so a binary-coercible cast (superuser, rolled back) fakes the damage.
+BEGIN;
+BEGIN
+CREATE CAST (bytea AS text) WITHOUT FUNCTION;
+CREATE CAST
+SELECT tre_amatch('\x61626162c328'::bytea::text, '(ab)\1', 0) AS br_invalid_tail,
+       tre_amatch('\xc32861626162'::bytea::text, '(ab)\1', 0) AS br_invalid_head,
+       tre_amatch('\x61626162c3'::bytea::text, '(ab)\1', 0) AS br_truncated_tail;
+ br_invalid_tail | br_invalid_head | br_truncated_tail 
+-----------------+-----------------+-------------------
+ f               | f               | f
+(1 row)
+
+ROLLBACK;
+ROLLBACK
+-- Edit budgets at the extremes: negative means "exact", INT_MAX is not
+-- clamped.
+SELECT tre_amatch('ab', 'ab', -1) AS negative_k,
+       tre_amatch_cost('ab', 'ax', 2147483647) AS int_max_k;
+ negative_k | int_max_k 
+------------+-----------
+ t          |         1
+(1 row)
+
+DROP FUNCTION rse_ids(text, bool);
+DROP FUNCTION
+DROP TABLE rse;
+DROP TABLE

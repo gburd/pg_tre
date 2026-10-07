@@ -72,6 +72,8 @@ typedef struct TreParseCtx
     char            errmsg[128];
     /* Tokenizer state - use void* to avoid header coupling */
     void           *tokenizer_state;
+    /* Pattern carries embedded options ("(?i)" ...): no trigram filter. */
+    bool            force_always_true;
 } TreParseCtx;
 
 typedef struct TreToken

@@ -13,6 +13,8 @@
 
 #include "postgres.h"
 
+#include "miscadmin.h"
+
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/utf8.h"
 
@@ -39,6 +41,12 @@
 #define TOK_RBRACKET      18
 #define TOK_CARET         19
 #define TOK_DASH          20
+
+/* parse_escape: the escape was a class shorthand (\d, \w, \s, ...). */
+#define PG_TRE_ESC_CLASS  (-2)
+/* parse_escape: an escape whose meaning the index cannot rely on (\x41,
+ * \m, \1, ...).  Zero or one character: not even a wildcard is safe. */
+#define PG_TRE_ESC_OPAQUE (-3)
 
 typedef enum TokenizerMode
 {
@@ -67,6 +75,9 @@ typedef struct TokenizerState
 	 * pattern `(^|[-_.])git([-_.0-9]|$)` entirely.
 	 */
 	int         bracket_first;
+	/* The current bracket held a [:class:], [=e=], [.c.] or \w-style
+	 * member, so its membership is collation-dependent: treat as '.'. */
+	bool        bracket_opaque;
 } TokenizerState;
 
 /*
@@ -148,14 +159,19 @@ parse_escape(TokenizerState *ts, TreParseCtx *ctx)
 		case '$': return '$';
 		case '-': return '-';
 
-		/* ASCII character classes (Phase 3: simple version) */
-		case 'd': /* \d => [0-9] but for Phase 3 we return a special literal */
-		case 'w': /* \w => [a-zA-Z0-9_] */
-		case 's': /* \s => [ \t\n\r] */
-			ctx->syntax_error = true;
-			snprintf(ctx->errmsg, sizeof(ctx->errmsg),
-					 "\\%c escapes not yet implemented in Phase 3", (char) c);
-			return -1;
+		/*
+		 * Class shorthands: \d \w \s and their negations.  Their meaning
+		 * depends on the collation (which letters are "word" characters),
+		 * and the index only needs to know that ONE character sits here,
+		 * so report a wildcard; the executor's recheck applies the real
+		 * class.  Previously these raised "not yet implemented" -- only
+		 * on the index path, so the same query errored or succeeded
+		 * depending on the plan.
+		 */
+		case 'd': case 'D':
+		case 'w': case 'W':
+		case 's': case 'S':
+			return PG_TRE_ESC_CLASS;
 
 		case -1:
 			ctx->syntax_error = true;
@@ -163,8 +179,40 @@ parse_escape(TokenizerState *ts, TreParseCtx *ctx)
 					 "unexpected end of pattern after backslash");
 			return -1;
 
+		/* Escapes for a literal punctuation/space character.  ('<' and '>'
+		 * are NOT here: in TRE \< and \> are word anchors.) */
+		case ' ': case '#': case '&': case '\'': case '"': case ',':
+		case ':': case ';': case '=': case '@':
+		case '_': case '`': case '~': case '!': case '%': case '/':
+			return c;
+
+		case '<': case '>':
+			return PG_TRE_ESC_OPAQUE;
+
 		default:
-			/* Unknown escape; treat as literal */
+			/*
+			 * Everything else is CONSERVATIVE.  The pattern is rechecked by
+			 * TRE (%~~) or by core's regex engine (~, ~*), whose escape
+			 * syntax differ, and a wrong guess here makes the index demand
+			 * a trigram the row lacks -- silently dropping rows.  Letter and
+			 * digit escapes mean something in at least one of them:
+			 * character codes (\x41, \u00e9, \0101, \e, \f, \v, \a),
+			 * class shorthands, word/string anchors (\m \M \y \Y \A \Z
+			 * \b \B \< \>) and back-references (\1 ..).  Inside a bracket
+			 * that makes the bracket one opaque character; elsewhere the
+			 * whole pattern goes unindexed (lossy scan + recheck).
+			 */
+			if (c >= 0 && c < 128 && isalnum(c))
+			{
+				/* \xHH / \uHHHH / \x{...} / \0nn: skip the digits too. */
+				while (ts->pos < ts->len &&
+				       (isxdigit((unsigned char) ts->input[ts->pos]) ||
+				        ts->input[ts->pos] == '{' || ts->input[ts->pos] == '}') &&
+				       (c == 'x' || c == 'u' || c == 'U' || c == '0'))
+					ts->pos++;
+				return PG_TRE_ESC_OPAQUE;
+			}
+			/* Any other (non-ASCII) escaped character is itself. */
 			return c;
 	}
 }
@@ -224,17 +272,49 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 	if (ts->pos >= ts->len)
 		return 0;
 
-	c = next_char(ts);
+	/*
+	 * Guard: every token must consume input.  next_char() reports a
+	 * negative value without advancing on undecodable input; looping on it
+	 * produced tokens forever (unbounded memory, no interrupt check) for
+	 * EUC_TW 4-byte characters before utf8.c folded them into range.
+	 */
+	CHECK_FOR_INTERRUPTS();
+	{
+		int		before = ts->pos;
+
+		c = next_char(ts);
+		if (c < 0 || ts->pos == before)
+		{
+			ctx->syntax_error = true;
+			snprintf(ctx->errmsg, sizeof(ctx->errmsg),
+					 "undecodable character at byte offset %d", before);
+			return -1;
+		}
+	}
 
 	/* Handle mode-specific tokens */
 	if (ts->mode == MODE_BRACKET)
 	{
 		/* Inside [...] */
+		/*
+		 * POSIX: a ']' that is the FIRST member (after '[' or '[^') is a
+		 * literal, so `[]a]` and `[^]]` are valid.  Before this they ended
+		 * the bracket immediately and the pattern failed to parse.
+		 */
+		if (c == ']' && ts->bracket_first >= 0 &&
+		    ts->pos - 1 == ts->bracket_first)
+		{
+			ts->bracket_first = -1;
+			out->cp = ']';
+			return TOK_LITERAL;
+		}
 		if (c == ']')
 		{
 			ts->bracket_depth--;
 			if (ts->bracket_depth == 0)
 				ts->mode = MODE_NORMAL;
+			out->i = ts->bracket_opaque ? 1 : 0;
+			ts->bracket_opaque = false;
 			return TOK_RBRACKET;
 		}
 		else if (c == '-')
@@ -267,9 +347,47 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 				ts->bracket_first = ts->pos;
 			return TOK_CARET;
 		}
+		else if (c == '[' && ts->pos < ts->len &&
+		         (ts->input[ts->pos] == ':' || ts->input[ts->pos] == '=' ||
+		          ts->input[ts->pos] == '.'))
+		{
+			/*
+			 * POSIX [:class:], [=equiv=] or [.coll.] inside a bracket
+			 * expression.  Their members depend on the collation, so
+			 * the index cannot enumerate them; skip to the closing
+			 * ":]" / "=]" / ".]" and mark the whole bracket opaque.
+			 * Before this the tokenizer read `[[:alpha:]]` as the set
+			 * {[, :, a, l, p, h} followed by a LITERAL ']', and the
+			 * index then demanded a trigram the row did not contain:
+			 * matching rows were silently dropped.
+			 */
+			char	delim = ts->input[ts->pos];
+			int		end = ts->pos + 1;
+
+			while (end + 1 < ts->len &&
+			       !(ts->input[end] == delim && ts->input[end + 1] == ']'))
+				end++;
+			if (end + 1 >= ts->len)
+			{
+				ctx->syntax_error = true;
+				snprintf(ctx->errmsg, sizeof(ctx->errmsg),
+						 "unterminated [%c in bracket expression", delim);
+				return -1;
+			}
+			ts->pos = end + 2;
+			ts->bracket_opaque = true;
+			out->cp = 0;
+			return TOK_LITERAL;
+		}
 		else if (c == '\\')
 		{
 			int esc = parse_escape(ts, ctx);
+			if (esc == PG_TRE_ESC_CLASS || esc == PG_TRE_ESC_OPAQUE)
+			{
+				ts->bracket_opaque = true;
+				out->cp = 0;
+				return TOK_LITERAL;
+			}
 			if (esc < 0)
 				return -1;
 			out->cp = esc;
@@ -340,6 +458,22 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 			return TOK_QUESTION;
 
 		case '(':
+			/*
+			 * Leading embedded options -- "(?i)", "(?n)", "(?-i)" and
+			 * friends, which both TRE and core regex accept -- change how
+			 * the rest of the pattern matches (case-insensitively, say), so
+			 * the literal trigrams after them are no longer reliable.
+			 * Treat the whole pattern as unindexable: the scan emits a
+			 * fully lossy bitmap and the recheck decides, exactly as for
+			 * ILIKE / ~*.  The grammar had no rule for "(?" and failed with
+			 * an empty error message, on the index path only.
+			 */
+			if (ts->pos < ts->len && ts->input[ts->pos] == '?')
+			{
+				ctx->force_always_true = true;
+				ts->pos = ts->len;      /* stop tokenizing */
+				return TOK_DOT;
+			}
 			return TOK_LPAREN;
 
 		case ')':
@@ -368,6 +502,21 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 		case '\\':
 			{
 				int esc = parse_escape(ts, ctx);
+				if (esc == PG_TRE_ESC_CLASS)
+					return TOK_DOT;     /* one character, class unknown */
+				if (esc == PG_TRE_ESC_OPAQUE)
+				{
+					/*
+					 * An escape the index cannot interpret (character codes,
+					 * anchors, back-references): give up on trigram
+					 * filtering for this pattern -- lossy bitmap, recheck
+					 * decides -- rather than guess.  Same mechanism as
+					 * "(?i)".  Rare in practice; never wrong.
+					 */
+					ctx->force_always_true = true;
+					ts->pos = ts->len;
+					return TOK_DOT;
+				}
 				if (esc < 0)
 					return -1;
 				out->cp = esc;

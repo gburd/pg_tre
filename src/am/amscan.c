@@ -297,7 +297,8 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
      * A case-folded index is future work (would let these accelerate).
      */
     if (sk->sk_strategy == PG_TRE_STRATEGY_ILIKE ||
-        sk->sk_strategy == PG_TRE_STRATEGY_IREGEX)
+        sk->sk_strategy == PG_TRE_STRATEGY_IREGEX ||
+        st->parse_ctx.force_always_true)
         st->q.always_true = true;
 
     st->query_valid = true;
