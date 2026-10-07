@@ -14,6 +14,8 @@
 
 #include "postgres.h"
 
+#include "mb/pg_wchar.h"
+
 /*
  * Streaming UTF-8 decoder for trigram extraction.
  * Reads codepoints sequentially from a UTF-8 byte string.
@@ -38,6 +40,9 @@ extern void pg_tre_cpstream_init(PgTreCpStream *s, const char *text, int len);
  *   -2: invalid UTF-8 sequence (ereport ERROR with context)
  */
 extern int32 pg_tre_cpstream_next(PgTreCpStream *s);
+
+/* One character of the database encoding; see utf8.c.  Never ereports. */
+extern int pg_tre_decode_char(const char *s, int n, pg_wchar *out);
 
 /*
  * Return the current byte offset in the source string.

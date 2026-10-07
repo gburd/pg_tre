@@ -101,10 +101,30 @@ const char *tre_errmsg(int errcode);
 const char *pg_tre_tre_version(void);
 
 /*
- * True when the current database's encoding is UTF-8.  Defined in
- * module.c (which has postgres.h); tre_match.c uses it to make TRE count
- * characters rather than bytes regardless of LC_CTYPE.
+ * Database-encoding character decoder handed to TRE (see
+ * patches/tre-mbdecoder.patch).  Defined in module.c, which has
+ * postgres.h; tre_match.c must not.  pg_tre_mbdecode follows TRE's
+ * tre_mbdecode_fn contract: bytes consumed, or (size_t)-1 / (size_t)-2.
  */
-int pg_tre_db_is_utf8(void);
+#include <stddef.h>
+#include <wchar.h>
+size_t pg_tre_mbdecode(wchar_t *pwc, const char *s, size_t n);
+int pg_tre_db_max_char_len(void);
+
+/*
+ * Character classification / case mapping for TRE (tre_set_ctype_ops).
+ * MUST stay layout-identical to tre_ctype_ops_t in the patched
+ * vendor/tre/lib/tre-internal.h; tre_match.c static-asserts the size.
+ * TRE's tre_cint_t is wint_t.
+ */
+#include <wctype.h>
+typedef struct {
+  int (*ct_isalnum)(wint_t), (*ct_isalpha)(wint_t), (*ct_isblank)(wint_t),
+      (*ct_iscntrl)(wint_t), (*ct_isdigit)(wint_t), (*ct_isgraph)(wint_t),
+      (*ct_islower)(wint_t), (*ct_isprint)(wint_t), (*ct_ispunct)(wint_t),
+      (*ct_isspace)(wint_t), (*ct_isupper)(wint_t), (*ct_isxdigit)(wint_t);
+  wint_t (*ct_tolower)(wint_t), (*ct_toupper)(wint_t);
+} pg_tre_ctype_ops_t;
+void pg_tre_ctype_ops(pg_tre_ctype_ops_t *ops);
 
 #endif /* TRE_FUNCS_H */

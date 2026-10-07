@@ -12,10 +12,17 @@
 
 #include "fmgr.h"
 #include "funcapi.h"
+#include <ctype.h>
+#include <wctype.h>
+
+#include "catalog/pg_collation.h"
+#include "common/unicode_case.h"
+#include "common/unicode_category.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/pg_locale.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 
@@ -23,6 +30,7 @@
 #include "pg_tre/amapi.h"
 #include "pg_tre/tre_match.h"
 #include "pg_tre/pattern_cache.h"
+#include "pg_tre/utf8.h"
 
 PG_MODULE_MAGIC;
 
@@ -447,10 +455,169 @@ pg_tre_match_guarded(void *compiled, const char *str, int str_len,
     return result;
 }
 
-int
-pg_tre_db_is_utf8(void)
+/*
+ * TRE's character decoder (patches/tre-mbdecoder.patch): one character of
+ * the database encoding, via the same pg_tre_decode_char the trigram
+ * tokenizer uses, so TRE and the index agree on what a character is.
+ * Never ereports -- it runs inside TRE, which must unwind normally; an
+ * invalid or truncated sequence is reported as mbrtowc would.
+ */
+size_t
+pg_tre_mbdecode(wchar_t *pwc, const char *s, size_t n)
 {
-    return GetDatabaseEncoding() == PG_UTF8;
+    pg_wchar    wc;
+    int         len = pg_tre_decode_char(s, (int) Min(n, (size_t) INT_MAX), &wc);
+
+    if (len == -2)
+        return (size_t) -2;
+    if (len < 0)
+        return (size_t) -1;
+    *pwc = (wchar_t) wc;
+    return (size_t) len;
+}
+
+int
+pg_tre_db_max_char_len(void)
+{
+    return pg_database_encoding_max_length();
+}
+
+/*
+ * TRE's character classification and case mapping
+ * (patches/tre-mbdecoder.patch, tre_set_ctype_ops).  TRE's own versions
+ * call iswalpha()/towlower(), which follow the backend's LC_CTYPE, not the
+ * text: under a C ctype [[:alpha:]], \w and (?i) ignored every non-ASCII
+ * letter.  These follow PostgreSQL's regex engine for the DATABASE default
+ * collation (regc_pg_locale.c): a C/POSIX ctype classifies ASCII only, as
+ * core's ~ does there; the builtin and ICU providers use Unicode
+ * properties (and are UTF-8 only); libc uses the collation's locale_t,
+ * wide functions for UTF-8 and the single-byte ones otherwise.  The
+ * characters handed in are pg_wchar values from pg_tre_mbdecode, so for
+ * non-UTF-8 encodings only the libc single-byte path can classify
+ * non-ASCII, exactly as in core.
+ */
+typedef enum
+{
+    PGT_CT_C,                   /* ASCII only */
+    PGT_CT_UNICODE,             /* builtin / ICU: Unicode properties */
+    PGT_CT_LIBC_WIDE,           /* libc, UTF-8: towlower_l & co */
+    PGT_CT_LIBC_1BYTE           /* libc, other encodings: tolower_l & co */
+} PgTreCtStrategy;
+
+static PgTreCtStrategy pgt_ct;
+static pg_locale_t     pgt_ct_locale;
+
+#define PGT_ASCII_CLASS(c, fn) ((c) <= 127 && fn((unsigned char) (c)))
+
+#define PGT_CLASS(name, cfn, ufn, wfn, bfn) \
+static int \
+pgt_##name(wint_t c) \
+{ \
+    pg_wchar wc = (pg_wchar) c; \
+    switch (pgt_ct) \
+    { \
+        case PGT_CT_UNICODE: \
+            return ufn; \
+        case PGT_CT_LIBC_WIDE: \
+            return wfn((wint_t) wc, pgt_ct_locale->info.lt) != 0; \
+        case PGT_CT_LIBC_1BYTE: \
+            return wc <= UCHAR_MAX && \
+                bfn((unsigned char) wc, pgt_ct_locale->info.lt) != 0; \
+        default: \
+            return PGT_ASCII_CLASS(wc, cfn) != 0; \
+    } \
+}
+
+PGT_CLASS(isalnum,  isalnum,  pg_u_isalnum(wc, true),  iswalnum_l,  isalnum_l)
+PGT_CLASS(isalpha,  isalpha,  pg_u_isalpha(wc),        iswalpha_l,  isalpha_l)
+PGT_CLASS(isblank,  isblank,  pg_u_isblank(wc),        iswblank_l,  isblank_l)
+PGT_CLASS(iscntrl,  iscntrl,  pg_u_iscntrl(wc),        iswcntrl_l,  iscntrl_l)
+PGT_CLASS(isdigit,  isdigit,  pg_u_isdigit(wc, true),  iswdigit_l,  isdigit_l)
+PGT_CLASS(isgraph,  isgraph,  pg_u_isgraph(wc),        iswgraph_l,  isgraph_l)
+PGT_CLASS(islower,  islower,  pg_u_islower(wc),        iswlower_l,  islower_l)
+PGT_CLASS(isprint,  isprint,  pg_u_isprint(wc),        iswprint_l,  isprint_l)
+PGT_CLASS(ispunct,  ispunct,  pg_u_ispunct(wc, true),  iswpunct_l,  ispunct_l)
+PGT_CLASS(isspace,  isspace,  pg_u_isspace(wc),        iswspace_l,  isspace_l)
+PGT_CLASS(isupper,  isupper,  pg_u_isupper(wc),        iswupper_l,  isupper_l)
+PGT_CLASS(isxdigit, isxdigit, pg_u_isxdigit(wc, true), iswxdigit_l, isxdigit_l)
+
+static wint_t
+pgt_tolower(wint_t c)
+{
+    pg_wchar wc = (pg_wchar) c;
+
+    switch (pgt_ct)
+    {
+        case PGT_CT_UNICODE:
+            return (wint_t) unicode_lowercase_simple(wc);
+        case PGT_CT_LIBC_WIDE:
+            return (wint_t) towlower_l((wint_t) wc, pgt_ct_locale->info.lt);
+        case PGT_CT_LIBC_1BYTE:
+            if (wc <= UCHAR_MAX)
+                return (wint_t) tolower_l((unsigned char) wc,
+                                              pgt_ct_locale->info.lt);
+            return c;
+        default:
+            return wc <= 127 ? (wint_t) pg_ascii_tolower((unsigned char) wc) : c;
+    }
+}
+
+static wint_t
+pgt_toupper(wint_t c)
+{
+    pg_wchar wc = (pg_wchar) c;
+
+    switch (pgt_ct)
+    {
+        case PGT_CT_UNICODE:
+            return (wint_t) unicode_uppercase_simple(wc);
+        case PGT_CT_LIBC_WIDE:
+            return (wint_t) towupper_l((wint_t) wc, pgt_ct_locale->info.lt);
+        case PGT_CT_LIBC_1BYTE:
+            if (wc <= UCHAR_MAX)
+                return (wint_t) toupper_l((unsigned char) wc,
+                                              pgt_ct_locale->info.lt);
+            return c;
+        default:
+            return wc <= 127 ? (wint_t) pg_ascii_toupper((unsigned char) wc) : c;
+    }
+}
+
+/*
+ * Choose the strategy from the database default collation, as
+ * pg_set_regex_collation does for DEFAULT_COLLATION_OID.  Called once per
+ * backend, from tre_match.c, before the first compile.
+ */
+void
+pg_tre_ctype_ops(pg_tre_ctype_ops_t *ops)
+{
+    pg_locale_t loc = pg_newlocale_from_collation(DEFAULT_COLLATION_OID);
+
+    if (loc->ctype_is_c)
+        pgt_ct = PGT_CT_C;
+    else if (loc->provider == COLLPROVIDER_BUILTIN ||
+             loc->provider == COLLPROVIDER_ICU)
+        pgt_ct = PGT_CT_UNICODE;
+    else if (GetDatabaseEncoding() == PG_UTF8)
+        pgt_ct = PGT_CT_LIBC_WIDE;
+    else
+        pgt_ct = PGT_CT_LIBC_1BYTE;
+    pgt_ct_locale = loc;
+
+    ops->ct_isalnum = pgt_isalnum;
+    ops->ct_isalpha = pgt_isalpha;
+    ops->ct_isblank = pgt_isblank;
+    ops->ct_iscntrl = pgt_iscntrl;
+    ops->ct_isdigit = pgt_isdigit;
+    ops->ct_isgraph = pgt_isgraph;
+    ops->ct_islower = pgt_islower;
+    ops->ct_isprint = pgt_isprint;
+    ops->ct_ispunct = pgt_ispunct;
+    ops->ct_isspace = pgt_isspace;
+    ops->ct_isupper = pgt_isupper;
+    ops->ct_isxdigit = pgt_isxdigit;
+    ops->ct_tolower = pgt_tolower;
+    ops->ct_toupper = pgt_toupper;
 }
 
 /* ---- _PG_init ---- */

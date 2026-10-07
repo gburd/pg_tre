@@ -504,13 +504,14 @@ SELECT tre_parse_debug('enviro.{~2}ment');
 
 **Status:** Deferred to Phase 8 (multi-level posting trees).
 
-### UTF-8 Support
+### Character encoding and collations
 
-**Current:** Trigrams are extracted as byte-sequences. ASCII works perfectly. Multi-byte UTF-8 characters (e.g., "résumé") work but aren't optimal:
-- Byte-trigrams cross character boundaries
-- Selectivity estimates degrade for non-ASCII text
-
-**Planned:** Phase 8 will add `tri_encoding = codepoint_hash` reloption for proper Unicode normalization.
+Trigrams are built from characters of the database encoding (4.3.0+; UTF-8
+only before), and TRE matches -- including approximate matching, where
+an edit is one character -- in the same unit, in every server encoding.
+Regex classes and case folding follow the database default collation;
+nondeterministic collations are refused at index build. See
+`LIMITATIONS.md`.
 
 ### Range Bloom and Positional Filters
 

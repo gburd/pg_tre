@@ -1,0 +1,205 @@
+From 3ff68d62b2f06a6f76b9c2ba146bc70fb9070a6c Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Mon, 5 Oct 2026 20:19:50 -0400
+Subject: [PATCH] Add pluggable character decoding and classification hooks
+
+TRE decodes multibyte text with the C library's mbrtowc() and
+classifies characters with iswalpha()/towlower() and friends, so
+both what counts as one character and what [[:alpha:]], \w and
+REG_ICASE mean follow the process LC_CTYPE.  An embedder whose text
+is in a different encoding than its ctype -- PostgreSQL, where each
+database has its own encoding and the backend's ctype is set
+separately -- gets byte-wise matching (a C ctype) or decoding errors
+(a ctype for another encoding); approximate matching then counts
+edits in bytes, and character classes and case folding ignore
+non-ASCII letters.
+
+tre_set_mbdecoder(fn, max_bytes) installs a decoder used instead of
+mbrtowc() for both the pattern (tre_regncomp) and the subject (the
+GET_NEXT_WCHAR macro every matcher uses).  It takes at most n bytes
+and returns the byte length of one character, or (size_t)-1 / -2 for
+an invalid or truncated sequence, as mbrtowc does.  max_bytes stands
+in for MB_CUR_MAX; 1 keeps TRE's single-byte fast paths.
+
+tre_set_ctype_ops(ops) installs replacements for the classification
+and case-mapping functions; NULL members keep the C library's.  TRE's
+own class table (instead of wctype()/iswctype()) is used so that
+named classes reach the replacements too.
+
+With neither installed (the default) behaviour is unchanged, except
+that named classes go through TRE's table, which calls the same
+isw*() functions iswctype() would.  Match offsets stay byte offsets:
+the multibyte matchers already advance pos by the decoded length.
+---
+ lib/regcomp.c         | 27 +++++++++++++-
+ lib/tre-internal.h    | 82 +++++++++++++++++++++++++++++++++----------
+ lib/tre-match-utils.h |  2 +-
+ 3 files changed, 90 insertions(+), 21 deletions(-)
+
+diff --git a/lib/regcomp.c b/lib/regcomp.c
+index 8f9b145..586eb5c 100644
+--- a/lib/regcomp.c
++++ b/lib/regcomp.c
+@@ -17,6 +17,31 @@
+ #include "tre-internal.h"
+ #include "xmalloc.h"
+ 
++#if TRE_MULTIBYTE
++tre_mbdecode_fn tre_mbdecoder = NULL;
++int tre_mbdecoder_max = 1;
++
++void
++tre_set_mbdecoder(tre_mbdecode_fn fn, int max_bytes)
++{
++  tre_mbdecoder = fn;
++  tre_mbdecoder_max = (fn != NULL && max_bytes > 0) ? max_bytes : 1;
++}
++#endif /* TRE_MULTIBYTE */
++
++#ifdef TRE_WCHAR
++tre_ctype_ops_t tre_ctype_ops;   /* all NULL: use the C library */
++
++void
++tre_set_ctype_ops(const tre_ctype_ops_t *ops)
++{
++  if (ops != NULL)
++    tre_ctype_ops = *ops;
++  else
++    memset(&tre_ctype_ops, 0, sizeof(tre_ctype_ops));
++}
++#endif /* TRE_WCHAR */
++
+ int
+ tre_regncomp(regex_t *preg, const char *regex, size_t n, int cflags)
+ {
+@@ -59,7 +84,7 @@ tre_regncomp(regex_t *preg, const char *regex, size_t n, int cflags)
+ #endif /* HAVE_MBSTATE_T */
+       while (n > 0)
+ 	{
+-	  consumed = tre_mbrtowc(wcptr, regex, n, &state);
++	  consumed = tre_mbdecode(wcptr, regex, n, &state);
+ 
+ 	  switch (consumed)
+ 	    {
+diff --git a/lib/tre-internal.h b/lib/tre-internal.h
+index c055220..01d4e6a 100644
+--- a/lib/tre-internal.h
++++ b/lib/tre-internal.h
+@@ -64,28 +64,72 @@ typedef wint_t tre_cint_t;
+ #endif
+ 
+ #ifdef TRE_MULTIBYTE
+-#define TRE_MB_CUR_MAX MB_CUR_MAX
++/*
++ * pg_tre: pluggable multibyte decoder.
++ *
++ * Upstream TRE decodes characters with the C library's mbrtowc(), so what
++ * counts as one character follows the process LC_CTYPE.  An embedder whose
++ * text is in some other encoding (PostgreSQL: the database encoding, which
++ * is independent of the ctype) installs a decoder with
++ * tre_set_mbdecoder().  The decoder reads one character from at most n
++ * bytes of s, stores it in *pwc and returns the number of bytes consumed
++ * (>= 1), or (size_t)-1 for an invalid sequence and (size_t)-2 for a
++ * truncated one -- the mbrtowc contract minus the shift state.
++ * max_bytes is the longest character the encoding has; 1 makes TRE use its
++ * byte fast paths.  With no decoder installed, behaviour is unchanged.
++ */
++typedef size_t (*tre_mbdecode_fn)(tre_char_t *pwc, const char *s, size_t n);
++extern tre_mbdecode_fn tre_mbdecoder;
++extern int tre_mbdecoder_max;
++void tre_set_mbdecoder(tre_mbdecode_fn fn, int max_bytes);
++#define TRE_MB_CUR_MAX \
++  (tre_mbdecoder != NULL ? tre_mbdecoder_max : (int) MB_CUR_MAX)
++#define tre_mbdecode(pwc, s, n, ps) \
++  (tre_mbdecoder != NULL ? tre_mbdecoder((pwc), (s), (n)) \
++                         : tre_mbrtowc((pwc), (s), (n), (ps)))
+ #else /* !TRE_MULTIBYTE */
+ #define TRE_MB_CUR_MAX 1
+ #endif /* !TRE_MULTIBYTE */
+ 
+-#define tre_isalnum iswalnum
+-#define tre_isalpha iswalpha
++/*
++ * pg_tre: pluggable character classification and case mapping.
++ *
++ * Upstream TRE classifies wide characters with iswalpha()/towlower() and
++ * friends, which follow the process LC_CTYPE.  An embedder whose text is
++ * decoded by tre_set_mbdecoder() (i.e. not by the C library) needs the
++ * matching classification, or [[:alpha:]], \w and REG_ICASE silently stop
++ * working on non-ASCII text.  tre_set_ctype_ops() installs replacements;
++ * any NULL member keeps the C library function.
++ */
++typedef struct {
++  int (*ct_isalnum)(tre_cint_t), (*ct_isalpha)(tre_cint_t), (*ct_isblank)(tre_cint_t),
++      (*ct_iscntrl)(tre_cint_t), (*ct_isdigit)(tre_cint_t), (*ct_isgraph)(tre_cint_t),
++      (*ct_islower)(tre_cint_t), (*ct_isprint)(tre_cint_t), (*ct_ispunct)(tre_cint_t),
++      (*ct_isspace)(tre_cint_t), (*ct_isupper)(tre_cint_t), (*ct_isxdigit)(tre_cint_t);
++  tre_cint_t (*ct_tolower)(tre_cint_t), (*ct_toupper)(tre_cint_t);
++} tre_ctype_ops_t;
++extern tre_ctype_ops_t tre_ctype_ops;
++void tre_set_ctype_ops(const tre_ctype_ops_t *ops);
++#define TRE_CTYPE_(f, sysf, c) \
++  (tre_ctype_ops.f != NULL ? tre_ctype_ops.f((tre_cint_t)(c)) : sysf(c))
++
++#define tre_isalnum(c)  TRE_CTYPE_(ct_isalnum, iswalnum, c)
++#define tre_isalpha(c)  TRE_CTYPE_(ct_isalpha, iswalpha, c)
+ #ifdef HAVE_ISWBLANK
+-#define tre_isblank iswblank
++#define tre_isblank(c)  TRE_CTYPE_(ct_isblank, iswblank, c)
+ #endif /* HAVE_ISWBLANK */
+-#define tre_iscntrl iswcntrl
+-#define tre_isdigit iswdigit
+-#define tre_isgraph iswgraph
+-#define tre_islower iswlower
+-#define tre_isprint iswprint
+-#define tre_ispunct iswpunct
+-#define tre_isspace iswspace
+-#define tre_isupper iswupper
+-#define tre_isxdigit iswxdigit
+-
+-#define tre_tolower towlower
+-#define tre_toupper towupper
++#define tre_iscntrl(c)  TRE_CTYPE_(ct_iscntrl, iswcntrl, c)
++#define tre_isdigit(c)  TRE_CTYPE_(ct_isdigit, iswdigit, c)
++#define tre_isgraph(c)  TRE_CTYPE_(ct_isgraph, iswgraph, c)
++#define tre_islower(c)  TRE_CTYPE_(ct_islower, iswlower, c)
++#define tre_isprint(c)  TRE_CTYPE_(ct_isprint, iswprint, c)
++#define tre_ispunct(c)  TRE_CTYPE_(ct_ispunct, iswpunct, c)
++#define tre_isspace(c)  TRE_CTYPE_(ct_isspace, iswspace, c)
++#define tre_isupper(c)  TRE_CTYPE_(ct_isupper, iswupper, c)
++#define tre_isxdigit(c) TRE_CTYPE_(ct_isxdigit, iswxdigit, c)
++
++#define tre_tolower(c)  TRE_CTYPE_(ct_tolower, towlower, c)
++#define tre_toupper(c)  TRE_CTYPE_(ct_toupper, towupper, c)
+ #define tre_strlen  wcslen
+ 
+ #else /* !TRE_WCHAR */
+@@ -119,9 +163,9 @@ typedef short tre_cint_t;
+ 
+ #endif /* !TRE_WCHAR */
+ 
+-#if defined(TRE_WCHAR) && defined(HAVE_ISWCTYPE) && defined(HAVE_WCTYPE)
+-#define TRE_USE_SYSTEM_WCTYPE 1
+-#endif
++/* pg_tre: never use the system iswctype()/wctype(): TRE's own class
++ * table calls the tre_is* macros above, so the ctype hooks reach
++ * [[:class:]] and \w too. */
+ 
+ #ifdef TRE_USE_SYSTEM_WCTYPE
+ /* Use system provided iswctype() and wctype(). */
+diff --git a/lib/tre-match-utils.h b/lib/tre-match-utils.h
+index 76e8b19..f23cdd3 100644
+--- a/lib/tre-match-utils.h
++++ b/lib/tre-match-utils.h
+@@ -53,7 +53,7 @@
+ 	      }								      \
+ 	    else							      \
+ 	      {								      \
+-		w = tre_mbrtowc(&next_c, str_byte, (size_t)max, &mbstate);    \
++		w = tre_mbdecode(&next_c, str_byte, (size_t)max, &mbstate);  \
+ 		if (w == (size_t)-1 || w == (size_t)-2)			      \
+ 		  return REG_NOMATCH;					      \
+ 		if (w == 0 && len >= 0)					      \
+-- 
+2.54.0
+

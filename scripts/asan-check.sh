@@ -50,7 +50,7 @@ if [ ! -x "$ASAN_PREFIX/bin/postgres" ]; then
         | tar xj -C "$b" --strip-components=1 || die "PostgreSQL download failed"
     ( cd "$b" &&
       ./configure --prefix="$ASAN_PREFIX" --enable-debug --enable-cassert \
-          --without-icu --without-readline --without-zlib \
+          --without-readline --without-zlib \
           CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" >"$b/configure.log" 2>&1 &&
       make -j"$JOBS" >"$b/make.log" 2>&1 &&
       make install >/dev/null 2>&1 &&
@@ -91,6 +91,8 @@ make -s PG_CONFIG=$PGB/pg_config -j"$JOBS" \
      || { tail -30 "$ASAN_WORK.build.log"; die "pg_tre ASan build failed"; }
 grep -q tre_compile_progress_check vendor/tre/lib/tre-compile.c \
     || die "TRE progress-hook patch not applied (patches/tre-progress-hook.patch)"
+grep -q tre_set_mbdecoder vendor/tre/lib/regcomp.c \
+    || die "TRE mbdecoder patch not applied (patches/tre-mbdecoder.patch)"
 make -s PG_CONFIG=$PGB/pg_config install >/dev/null 2>&1 || die "pg_tre install failed"
 # Capture first: under pipefail, `nm | grep -q` fails with SIGPIPE on a match.
 syms=$(nm -D "$($PGB/pg_config --pkglibdir)/pg_tre.so")

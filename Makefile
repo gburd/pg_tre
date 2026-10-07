@@ -70,7 +70,7 @@ DATA         = sql/pg_tre--4.3.0-dev.sql sql/pg_tre--3.2.0.sql sql/pg_tre--3.1.0
        sql/pg_tre--1.2.2--1.2.3.sql \
        sql/pg_tre--1.2.1--1.2.2.sql
 DATA_built   =
-REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density density_scaling vacuum_repack reloptions testregex custom_costs utf8_fuzzy amvalidate parallel_build upgrade_online surf_prefix pending_reclaim merge_page_reclaim churned_heap_scan sparsemap_corrupt_guard sparsemap_smallset similarity_multibyte vacuum_pending_dead pending_distinct
+REGRESS      = pg_tre parser scan_exact incremental p5_read planner utf8 similarity trgm_similarity like_accel word_similarity selectivity order_by concurrently cardinality vacuum_inline posting_recycle multi_level_merge run_catalog build_estimate build_dedup flush_to_run crack_on_read coalesce coalesce_vacuum coalesce_density density_scaling vacuum_repack reloptions testregex custom_costs utf8_fuzzy amvalidate parallel_build upgrade_online surf_prefix pending_reclaim merge_page_reclaim churned_heap_scan sparsemap_corrupt_guard sparsemap_smallset similarity_multibyte vacuum_pending_dead pending_distinct encoding_nonutf8
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # ------------------------------------------------------------------
@@ -82,7 +82,9 @@ LIME_DIR  = vendor/lime
 TRE_LIB        = $(TRE_DIR)/lib/.libs/libtre.a
 TRE_CONFIGURE  = $(TRE_DIR)/configure
 TRE_CONFIG_H   = $(TRE_DIR)/config.h
-TRE_PATCH      = patches/tre-progress-hook.patch
+# Applied in order on top of vendor/tre.  The mbdecoder patch is a
+# git format-patch against upstream + the progress hook.
+TRE_PATCH      = patches/tre-progress-hook.patch patches/tre-mbdecoder.patch
 TRE_PATCH_STAMP = $(TRE_DIR)/.pg_tre-patched
 LIME_BIN       = $(LIME_DIR)/lime
 
@@ -222,12 +224,14 @@ endif
 # (re)applied after any `git submodule update`.  Guarded by a stamp and
 # an idempotent reverse-check so re-running make never double-applies.
 $(TRE_PATCH_STAMP): $(TRE_PATCH)
-	@echo "==> patch TRE (progress hook)"
-	@if git -C $(TRE_DIR) apply --reverse --check -p1 $(abspath $(TRE_PATCH)) >/dev/null 2>&1; then \
-	    echo "    already applied"; \
-	else \
-	    git -C $(TRE_DIR) apply -p1 $(abspath $(TRE_PATCH)); \
-	fi
+	@for p in $(abspath $(TRE_PATCH)); do \
+	    echo "==> patch TRE ($$(basename $$p))"; \
+	    if git -C $(TRE_DIR) apply --reverse --check -p1 $$p >/dev/null 2>&1; then \
+	        echo "    already applied"; \
+	    else \
+	        git -C $(TRE_DIR) apply -p1 $$p || exit 1; \
+	    fi; \
+	done
 	@touch $@
 
 $(TRE_CONFIGURE): $(TRE_DIR)/configure.ac $(TRE_PATCH_STAMP)

@@ -1,28 +1,32 @@
 /*
- * src/util/utf8.c - UTF-8 codepoint streaming for trigram extraction.
+ * src/util/utf8.c - character streaming for trigram extraction.
  *
- * Phase 3.5: migrate from byte-based trigrams to codepoint-based trigrams.
+ * Characters are decoded in the DATABASE ENCODING with PostgreSQL's own
+ * per-encoding tables (pg_encoding_mblen_or_incomplete,
+ * pg_encoding_verifymbchar, pg_encoding_mb2wchar_with_len) -- the same
+ * functions core and pg_trgm use.  For UTF-8 the result is the Unicode
+ * code point, exactly what this file decoded by hand before 4.3.0, so
+ * every trigram hash in an existing UTF-8 index is unchanged.  For other
+ * encodings it is PostgreSQL's pg_wchar for that encoding (LATIN1: the
+ * byte value; EUC_*: the packed multibyte value), which is what the
+ * patched TRE also sees, so index and matcher agree.
  *
- * This decoder is strict: invalid UTF-8 triggers ereport(ERROR). This is
- * appropriate for indexed values (we don't want garbage in the index) and
- * query patterns (the user must fix the query). If we encounter invalid
- * UTF-8 in production, it indicates either:
- *   1. The text column contains non-UTF-8 data (fix: validate at insert time)
- *   2. The database encoding is not UTF-8 (pg_tre requires UTF-8)
+ * (The file keeps its historical name; it is no longer UTF-8 only.)
  *
- * We use PostgreSQL's built-in UTF-8 validation to ensure correctness.
+ * This decoder is strict: an invalid sequence ereports.  The server has
+ * already verified the text on input, so in practice this only fires on
+ * corrupt data.
  */
 
 #include "postgres.h"
+
+#include <limits.h>
 
 #include "mb/pg_wchar.h"
 #include "utils/elog.h"
 
 #include "pg_tre/utf8.h"
 
-/*
- * Initialize a codepoint stream over UTF-8 text.
- */
 void
 pg_tre_cpstream_init(PgTreCpStream *s, const char *text, int len)
 {
@@ -32,109 +36,73 @@ pg_tre_cpstream_init(PgTreCpStream *s, const char *text, int len)
 }
 
 /*
- * Read the next codepoint from the stream.
- * Returns:
- *   0x0000..0x10FFFF: valid Unicode codepoint
- *   -1: end of stream
- *   -2: invalid UTF-8 (after ereport ERROR, so this never actually returns)
- *
- * Strategy: use PostgreSQL's pg_utf_mblen to get the byte length of the
- * UTF-8 sequence, then decode manually. We validate the sequence before
- * decoding to ensure we never see partial or invalid sequences.
+ * Decode one character of the database encoding from at most n bytes.
+ * Returns its byte length and stores the character in *out; -1 for an
+ * invalid sequence, -2 for one truncated by n.  Never ereports, so TRE can
+ * call it too (see pg_tre_mbdecode in module.c).
+ */
+int
+pg_tre_decode_char(const char *s, int n, pg_wchar *out)
+{
+    int         enc = GetDatabaseEncoding();
+    int         len;
+    pg_wchar    wbuf[MAX_MULTIBYTE_CHAR_LEN + 1];
+
+    if (n <= 0)
+        return -2;
+    if (!IS_HIGHBIT_SET(*s))
+    {
+        /* ASCII is ASCII in every server encoding (all are ASCII supersets). */
+        *out = (pg_wchar) (unsigned char) *s;
+        return 1;
+    }
+
+    len = pg_encoding_mblen_or_incomplete(enc, s, (size_t) n);
+    if (len == INT_MAX || len > n)
+        return -2;
+    if (pg_encoding_verifymbchar(enc, s, len) != len)
+        return -1;
+    /* The converter also writes a terminator: room for it (cf. 4.2.0). */
+    (void) pg_encoding_mb2wchar_with_len(enc, s, wbuf, len);
+
+    /*
+     * Keep every character inside int32's non-negative range: callers carry
+     * characters as int32 (the trigram tokenizer, the AST, TRE's wchar_t)
+     * and reserve negatives for end-of-stream / error.  Every server
+     * encoding's pg_wchar fits in 31 bits except EUC_TW's 4-byte CNS planes,
+     * which pg_euctw2wchar packs as (0x8E << 24) | ...  -- above INT32_MAX.
+     * Their low 24 bits are unique among EUC_TW characters (the plane byte
+     * is 0xA1..0xB0 and no 1-3 byte EUC_TW character uses bits 24-30), so
+     * fold the SS2 marker down to bit 30.  Without this such a character
+     * read as -1 and ended the tokenizer early (index false negatives), or
+     * stalled it in an endless loop (unbounded memory).
+     */
+    if (wbuf[0] > (pg_wchar) INT32_MAX)
+        wbuf[0] = (wbuf[0] & 0x00FFFFFF) | 0x40000000;
+    *out = wbuf[0];
+    return len;
+}
+
+/*
+ * Next character from the stream: >= 0 a character, -1 end of stream.
+ * An invalid sequence ereports.
  */
 int32
 pg_tre_cpstream_next(PgTreCpStream *s)
 {
-    int mblen;
-    int32 codepoint;
-    unsigned char c0, c1, c2, c3;
+    pg_wchar    wc;
+    int         len;
 
     if (s->src_pos >= s->src_len)
-        return -1;  /* end of stream */
+        return -1;
 
-    c0 = s->src[s->src_pos];
-
-    /*
-     * Fast path for ASCII (most common case).
-     */
-    if (c0 < 0x80)
-    {
-        s->src_pos++;
-        return (int32) c0;
-    }
-
-    /*
-     * Multi-byte UTF-8 sequence. Use pg_utf_mblen to determine the length.
-     */
-    mblen = pg_utf_mblen((const unsigned char *) &s->src[s->src_pos]);
-
-    /*
-     * Validate that we have enough bytes and the sequence is legal.
-     */
-    if (s->src_pos + mblen > s->src_len)
-    {
+    len = pg_tre_decode_char((const char *) s->src + s->src_pos,
+                             s->src_len - s->src_pos, &wc);
+    if (len < 0)
         ereport(ERROR,
                 (errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
-                 errmsg("invalid UTF-8 sequence at byte offset %d: incomplete sequence at end of string",
-                        s->src_pos)));
-        return -2;  /* unreachable */
-    }
-
-    /*
-     * Decode the UTF-8 sequence manually. We validate as we go.
-     */
-    switch (mblen)
-    {
-        case 2:
-            /* 110xxxxx 10xxxxxx */
-            c1 = s->src[s->src_pos + 1];
-            if ((c0 & 0xE0) != 0xC0 || (c1 & 0xC0) != 0x80)
-                goto invalid_sequence;
-            codepoint = ((c0 & 0x1F) << 6) | (c1 & 0x3F);
-            /* Reject overlong encodings (must be >= 0x80) */
-            if (codepoint < 0x80)
-                goto invalid_sequence;
-            break;
-
-        case 3:
-            /* 1110xxxx 10xxxxxx 10xxxxxx */
-            c1 = s->src[s->src_pos + 1];
-            c2 = s->src[s->src_pos + 2];
-            if ((c0 & 0xF0) != 0xE0 || (c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80)
-                goto invalid_sequence;
-            codepoint = ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
-            /* Reject overlong encodings (must be >= 0x800) and surrogates (0xD800..0xDFFF) */
-            if (codepoint < 0x800 || (codepoint >= 0xD800 && codepoint <= 0xDFFF))
-                goto invalid_sequence;
-            break;
-
-        case 4:
-            /* 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
-            c1 = s->src[s->src_pos + 1];
-            c2 = s->src[s->src_pos + 2];
-            c3 = s->src[s->src_pos + 3];
-            if ((c0 & 0xF8) != 0xF0 || (c1 & 0xC0) != 0x80 ||
-                (c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80)
-                goto invalid_sequence;
-            codepoint = ((c0 & 0x07) << 18) | ((c1 & 0x3F) << 12) |
-                        ((c2 & 0x3F) << 6) | (c3 & 0x3F);
-            /* Reject overlong encodings (must be >= 0x10000) and out-of-range (> 0x10FFFF) */
-            if (codepoint < 0x10000 || codepoint > 0x10FFFF)
-                goto invalid_sequence;
-            break;
-
-        default:
-            /* Invalid UTF-8 lead byte (5- or 6-byte sequences are not valid UTF-8) */
-            goto invalid_sequence;
-    }
-
-    s->src_pos += mblen;
-    return codepoint;
-
-invalid_sequence:
-    ereport(ERROR,
-            (errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
-             errmsg("invalid UTF-8 sequence at byte offset %d: lead byte 0x%02X",
-                    s->src_pos, c0)));
-    return -2;  /* unreachable */
+                 errmsg("invalid byte sequence for encoding \"%s\" at byte offset %d",
+                        GetDatabaseEncodingName(), s->src_pos)));
+    s->src_pos += len;
+    return (int32) wc;
 }

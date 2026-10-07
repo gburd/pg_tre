@@ -283,11 +283,21 @@ overlay could abort with `free(): invalid pointer` in the clang-built
 (`nix build`) extension; `statement_timeout` and query cancel are common
 triggers. 4.2.3 fixes the crash, but the scan cost remains.
 
-### Non-UTF-8 databases: ASCII only
+### Character semantics follow the database, not the column collation
 
-The trigram tokenizer decodes text as UTF-8 regardless of the database
-encoding. In a `LATIN1` (or other single-byte) database, building an index
-over, or querying with, any non-ASCII character fails with
-`invalid UTF-8 sequence at byte offset N`. This is not a data-loss risk; the
-statement errors out. Pure-ASCII text works. Use a UTF-8 database for
-non-ASCII text. (Found while qualifying 4.2.2; present in every release.)
+Since 4.3.0 pg_tre decodes text in the database encoding (any server
+encoding, not just UTF-8), and regex character classes (`[[:alpha:]]`,
+`\w`) and case folding (`(?i)`) follow the database's DEFAULT collation,
+exactly as PostgreSQL's own `~` does with that collation. Two consequences:
+
+- A per-column or per-index `COLLATE` does not change what `[[:alpha:]]`
+  or `(?i)` mean inside `tre_amatch` / `%~~`. (Core `~` does honour it.)
+  Character boundaries and edit counting are unaffected -- those depend
+  only on the encoding.
+- Under a `C`/`POSIX` default ctype, classes and case folding cover ASCII
+  only, again matching core. Use a database (or, for core operators, a
+  column collation) with a real locale or ICU for non-ASCII classes.
+
+Nondeterministic collations are refused at `CREATE INDEX`, `REINDEX` and
+any `ALTER` that rebuilds the index: equal strings under them need not
+share trigrams.

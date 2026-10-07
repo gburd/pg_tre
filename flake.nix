@@ -119,12 +119,14 @@
               cp -r --no-preserve=ownership ${lime-src} vendor/lime
               chmod -R u+w vendor/tre vendor/lime
 
-              # Apply the TRE progress-hook patch (standard unified diff) if it
-              # has not already been applied to this checkout.
-              if ! patch -p1 -d vendor/tre --dry-run --reverse \
-                     < patches/tre-progress-hook.patch >/dev/null 2>&1; then
-                patch -p1 -d vendor/tre < patches/tre-progress-hook.patch
-              fi
+              # Apply the TRE patches, in order, if not already applied.
+              # Keep this list in step with TRE_PATCH in the Makefile.
+              for p in patches/tre-progress-hook.patch patches/tre-mbdecoder.patch; do
+                if ! patch -p1 -d vendor/tre --dry-run --reverse \
+                       < "$p" >/dev/null 2>&1; then
+                  patch -p1 -d vendor/tre < "$p"
+                fi
+              done
               # Pre-satisfy the Makefile's patch stamp
               # ($(TRE_DIR)/.pg_tre-patched) so its `git apply` guard (which
               # needs a .git dir the Nix source lacks) is skipped.  Touch it

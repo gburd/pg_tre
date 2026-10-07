@@ -5,7 +5,6 @@
  * management uses standard malloc/free; callers palloc-wrap results.
  */
 
-#include <locale.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -75,61 +74,36 @@ tre_progress_check(void)
 }
 
 /*
- * TRE picks bytes or characters as its unit at run time, from MB_CUR_MAX
- * -- i.e. from the backend's LC_CTYPE.  A UTF-8 database with a C/POSIX
- * ctype therefore matched in bytes: 'cafe' was 2 edits from 'caf\xc3\xa9',
- * so fuzzy results depended on the locale, not on the data, and disagreed
- * with the index, whose trigrams are built from characters.
- *
- * When the database is UTF-8 and the ctype is single-byte, run TRE under
- * a thread-local C.UTF-8 ctype (uselocale), and restore it afterwards.
- * Other encodings, and UTF-8 locales that already count characters, are
- * untouched.  If C.UTF-8 is not installed, nothing changes.
+ * Character decoding follows the DATABASE ENCODING, never the process
+ * LC_CTYPE.  Upstream TRE decodes with mbrtowc(), so under a C ctype a
+ * UTF-8 database matched in bytes ('cafe' was 2 edits from 'café') and a
+ * LATIN1 database could not decode at all.  patches/tre-mbdecoder.patch
+ * lets us hand TRE a decoder; module.c supplies one built on
+ * pg_encoding_mblen / pg_encoding_mb2wchar_with_len for the current
+ * database, and installs it once at first use.
  */
-static locale_t
-tre_utf8_ctype(void)
-{
-    static locale_t loc = (locale_t) 0;
-    static int      tried = 0;
+static int mbdecoder_installed = 0;
 
-    if (!tried)
-    {
-        tried = 1;
-        if (pg_tre_db_is_utf8())
-        {
-            loc = newlocale(LC_CTYPE_MASK, "C.UTF-8", (locale_t) 0);
-            if (loc == (locale_t) 0)
-                loc = newlocale(LC_CTYPE_MASK, "C.utf8", (locale_t) 0);
-        }
-    }
-    return loc;
-}
-
-/* Returns the locale to restore, or 0 if nothing was switched. */
-static locale_t
-tre_enter_ctype(void)
-{
-    locale_t loc;
-
-    if (MB_CUR_MAX > 1)
-        return (locale_t) 0;
-    loc = tre_utf8_ctype();
-    if (loc == (locale_t) 0)
-        return (locale_t) 0;
-    return uselocale(loc);
-}
+_Static_assert(sizeof(pg_tre_ctype_ops_t) == sizeof(tre_ctype_ops_t),
+               "pg_tre_ctype_ops_t out of step with tre_ctype_ops_t");
 
 static void
-tre_leave_ctype(locale_t prev)
+tre_ensure_mbdecoder(void)
 {
-    if (prev != (locale_t) 0)
-        uselocale(prev);
+    if (!mbdecoder_installed)
+    {
+        pg_tre_ctype_ops_t ops;
+
+        pg_tre_ctype_ops(&ops);
+        tre_set_ctype_ops((const tre_ctype_ops_t *) &ops);
+        tre_set_mbdecoder(pg_tre_mbdecode, pg_tre_db_max_char_len());
+        mbdecoder_installed = 1;
+    }
 }
 
 void *
 tre_compile_pattern(const char *pattern, int pattern_len, int *errcode_out)
 {
-    locale_t prev;
     regex_t *preg;
 
     preg = malloc(sizeof(regex_t));
@@ -140,10 +114,9 @@ tre_compile_pattern(const char *pattern, int pattern_len, int *errcode_out)
     }
     memset(preg, 0, sizeof(regex_t));
 
-    prev = tre_enter_ctype();
+    tre_ensure_mbdecoder();
     *errcode_out = tre_regncomp(preg, pattern, (size_t) pattern_len,
                                 REG_EXTENDED);
-    tre_leave_ctype(prev);
     if (*errcode_out != REG_OK)
     {
         free(preg);
@@ -193,7 +166,6 @@ tre_do_match(void *compiled, const char *str, int str_len,
     regamatch_t     amatch;
     TreMatchResult  result;
     int             ret;
-    locale_t        prev;
 
     memset(&result, 0, sizeof(result));
 
@@ -239,10 +211,9 @@ tre_do_match(void *compiled, const char *str, int str_len,
      */
     progress_aborted = 0;
 
-    prev = tre_enter_ctype();
+    tre_ensure_mbdecoder();
     ret = tre_reganexec(preg, str, (size_t) str_len,
                         &amatch, params, 0);
-    tre_leave_ctype(prev);
 
     if (progress_aborted)
     {
