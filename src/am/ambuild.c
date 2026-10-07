@@ -947,6 +947,24 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     /* Step 2: set up the disk-spillable sort and bloom tracking. */
     bstate.heap = heap;
+    /*
+     * A nondeterministic collation (e.g. ICU with strength=level1, where
+     * 'a' = 'A' or 'é' = 'e') makes = and LIKE match strings that share no
+     * trigrams, so no trigram index can find every match.  Refuse rather
+     * than silently under-return, as core refuses ILIKE on such
+     * collations.  rd_indcollation already reflects a column COLLATE, a
+     * CREATE INDEX ... COLLATE override, or the database default.
+     */
+    if (OidIsValid(index->rd_indcollation[0]) &&
+        !get_collation_isdeterministic(index->rd_indcollation[0]))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("pg_tre does not support nondeterministic collations"),
+                 errdetail("Index \"%s\" would use collation \"%s\", under which equal strings need not share trigrams.",
+                           RelationGetRelationName(index),
+                           get_collation_name(index->rd_indcollation[0])),
+                 errhint("Use a deterministic collation for the indexed column, or index it with COLLATE \"C\".")));
+
     bstate.index = index;
     bstate.indexInfo = indexInfo;
     bstate.n_emitted = 0;

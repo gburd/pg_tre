@@ -1,0 +1,305 @@
+-- test/sql/collation_matrix.sql
+--
+-- pg_tre refuses to build an index under a nondeterministic collation
+-- (src/am/ambuild.c): such a collation makes = / LIKE / ~ match strings
+-- that share no trigrams.  This covers every way the index collation can
+-- be chosen, and every command that (re)builds an index -- and checks that
+-- deterministic collations (C, POSIX, ICU, builtin, libc) are accepted and
+-- the index then answers exactly like a sequential scan.
+--
+-- Needs ICU (the ICU collations are created here).
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/collation_matrix.sql:12: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+\set VERBOSITY terse
+SET client_min_messages = warning;
+SET
+DROP TABLE IF EXISTS cm, cm2, cm_dom, cm_expr CASCADE;
+DROP TABLE
+DROP DOMAIN IF EXISTS cm_ci_text;
+DROP DOMAIN
+DROP COLLATION IF EXISTS cm_ci;
+DROP COLLATION
+DROP COLLATION IF EXISTS cm_ai;
+DROP COLLATION
+DROP COLLATION IF EXISTS cm_icu_det;
+DROP COLLATION
+CREATE COLLATION cm_ci (provider = icu, locale = 'und-u-ks-level2',
+                        deterministic = false);   -- case-insensitive
+CREATE COLLATION
+CREATE COLLATION cm_ai (provider = icu, locale = 'und-u-ks-level1-kc-true',
+                        deterministic = false);   -- accent-insensitive
+CREATE COLLATION
+CREATE COLLATION cm_icu_det (provider = icu, locale = 'und');
+CREATE COLLATION
+-- Index vs sequential scan, for a set of queries over table cm(s).
+CREATE FUNCTION cm_ids(tab regclass, q text, ix bool) RETURNS int[]
+LANGUAGE plpgsql AS $f$
+DECLARE v int[];
+BEGIN
+  PERFORM set_config('enable_seqscan', CASE WHEN ix THEN 'off' ELSE 'on' END, true);
+  PERFORM set_config('enable_indexscan', CASE WHEN ix THEN 'on' ELSE 'off' END, true);
+  PERFORM set_config('enable_bitmapscan', CASE WHEN ix THEN 'on' ELSE 'off' END, true);
+  EXECUTE format('SELECT array_agg(id ORDER BY id) FROM %s WHERE %s', tab, q) INTO v;
+  RETURN v;
+END $f$;
+CREATE FUNCTION
+CREATE FUNCTION cm_check(tab regclass, OUT queries int, OUT idx_ne_seq int,
+                         OUT nonempty int)
+LANGUAGE sql AS $f$
+  SELECT count(*)::int,
+         count(*) FILTER (WHERE cm_ids(tab, q, true) IS DISTINCT FROM cm_ids(tab, q, false))::int,
+         count(*) FILTER (WHERE cm_ids(tab, q, false) IS NOT NULL)::int
+    FROM unnest(ARRAY[
+      $$s %~~ tre_pattern('café', 0)$$, $$s %~~ tre_pattern('cafe', 1)$$,
+      $$s LIKE '%afé%'$$, $$s ILIKE '%CAFÉ%'$$, $$s ~ 'caf[eé]'$$,
+      $$s ~* 'CAF'$$, $$s = 'Café crème'$$, $$s %~~ tre_pattern('crème', 0)$$]) q
+$f$;
+CREATE FUNCTION
+CREATE TABLE cm (id serial, s text);
+CREATE TABLE
+INSERT INTO cm (s) VALUES ('Café crème'), ('cafe creme'), ('CAFÉ'), ('unrelated');
+INSERT 0 4
+INSERT INTO cm (s) SELECT 'filler ' || g FROM generate_series(1, 300) g;
+INSERT 0 300
+-- (1) Column collation, both nondeterministic kinds: refused.
+CREATE TABLE cm2 (id serial, s text COLLATE cm_ci);
+CREATE TABLE
+INSERT INTO cm2 (s) VALUES ('Café');
+INSERT 0 1
+CREATE INDEX cm2_bad ON cm2 USING tre (s);
+psql:test/sql/collation_matrix.sql:57: ERROR:  pg_tre does not support nondeterministic collations
+ALTER TABLE cm2 ALTER COLUMN s TYPE text COLLATE cm_ai;
+ALTER TABLE
+CREATE INDEX cm2_bad ON cm2 USING tre (s);
+psql:test/sql/collation_matrix.sql:59: ERROR:  pg_tre does not support nondeterministic collations
+-- ... but an explicit deterministic index collation overrides it.
+CREATE INDEX cm2_c ON cm2 USING tre (s COLLATE "C");
+CREATE INDEX
+DROP INDEX cm2_c;
+DROP INDEX
+CREATE INDEX cm2_posix ON cm2 USING tre (s COLLATE "POSIX");
+CREATE INDEX
+DROP TABLE cm2;
+DROP TABLE
+-- (2) CREATE INDEX ... COLLATE nondeterministic on a deterministic column.
+CREATE INDEX cm_bad ON cm USING tre (s COLLATE cm_ci);
+psql:test/sql/collation_matrix.sql:67: ERROR:  pg_tre does not support nondeterministic collations
+CREATE INDEX CONCURRENTLY cm_bad ON cm USING tre (s COLLATE cm_ci);
+psql:test/sql/collation_matrix.sql:68: ERROR:  pg_tre does not support nondeterministic collations
+-- A failed CONCURRENTLY build leaves an invalid index behind (as for any
+-- AM); it still carries the collation, so drop it before going on.
+SELECT indexrelid::regclass AS idx, indisvalid
+  FROM pg_index WHERE indrelid = 'cm'::regclass;
+  idx   | indisvalid 
+--------+------------
+ cm_bad | f
+(1 row)
+
+DROP INDEX cm_bad;
+DROP INDEX
+-- (3) A domain over text with a nondeterministic collation.
+CREATE DOMAIN cm_ci_text AS text COLLATE cm_ci;
+CREATE DOMAIN
+CREATE TABLE cm_dom (id serial, s cm_ci_text);
+CREATE TABLE
+INSERT INTO cm_dom (s) VALUES ('Café');
+INSERT 0 1
+CREATE INDEX cm_dom_bad ON cm_dom USING tre (s);
+psql:test/sql/collation_matrix.sql:79: ERROR:  pg_tre does not support nondeterministic collations
+CREATE INDEX cm_dom_c ON cm_dom USING tre ((s::text) COLLATE "C");
+CREATE INDEX
+DROP TABLE cm_dom;
+DROP TABLE
+-- (4) Expression indexes: the expression's collation decides.
+CREATE TABLE cm_expr (id serial, s text COLLATE cm_ci);
+CREATE TABLE
+INSERT INTO cm_expr (s) VALUES ('Café'), ('x');
+INSERT 0 2
+CREATE INDEX cm_expr_bad ON cm_expr USING tre (lower(s));
+psql:test/sql/collation_matrix.sql:86: ERROR:  pg_tre does not support nondeterministic collations
+CREATE INDEX cm_expr_bad ON cm_expr USING tre ((s || ''));
+psql:test/sql/collation_matrix.sql:87: ERROR:  pg_tre does not support nondeterministic collations
+CREATE INDEX cm_expr_ok ON cm_expr USING tre ((lower(s) COLLATE "C"));
+CREATE INDEX
+SELECT count(*) AS expr_indexes FROM pg_index WHERE indrelid = 'cm_expr'::regclass;
+ expr_indexes 
+--------------
+            1
+(1 row)
+
+DROP TABLE cm_expr;
+DROP TABLE
+-- (5) Deterministic collations are accepted, and the index answers like a
+--     seq scan -- with rows from the build and from aminsert.
+CREATE INDEX cm_default ON cm USING tre (s);
+CREATE INDEX
+INSERT INTO cm (s) VALUES ('le café crème'), ('CAFE');
+INSERT 0 2
+SELECT 'default' AS collation, * FROM cm_check('cm');
+ collation | queries | idx_ne_seq | nonempty 
+-----------+---------+------------+----------
+ default   |       8 |          0 |        8
+(1 row)
+
+DROP INDEX cm_default;
+DROP INDEX
+CREATE INDEX cm_icu ON cm USING tre (s COLLATE cm_icu_det);
+CREATE INDEX
+SELECT 'icu und (index)' AS collation, * FROM cm_check('cm');
+    collation    | queries | idx_ne_seq | nonempty 
+-----------------+---------+------------+----------
+ icu und (index) |       8 |          0 |        8
+(1 row)
+
+DROP INDEX cm_icu;
+DROP INDEX
+ALTER TABLE cm ALTER COLUMN s TYPE text COLLATE "und-x-icu";
+ALTER TABLE
+CREATE INDEX cm_icu2 ON cm USING tre (s);
+CREATE INDEX
+SELECT 'und-x-icu (column)' AS collation, * FROM cm_check('cm');
+     collation      | queries | idx_ne_seq | nonempty 
+--------------------+---------+------------+----------
+ und-x-icu (column) |       8 |          0 |        8
+(1 row)
+
+-- (6) ALTER COLUMN to a nondeterministic collation rebuilds the index:
+--     refused, and nothing changes.
+ALTER TABLE cm ALTER COLUMN s TYPE text COLLATE cm_ci;
+psql:test/sql/collation_matrix.sql:106: ERROR:  pg_tre does not support nondeterministic collations
+SELECT collation_name FROM information_schema.columns
+ WHERE table_name = 'cm' AND column_name = 's';
+ collation_name 
+----------------
+ und-x-icu
+(1 row)
+
+DROP INDEX cm_icu2;
+DROP INDEX
+ALTER TABLE cm ALTER COLUMN s TYPE text COLLATE "C";
+ALTER TABLE
+CREATE INDEX cm_c ON cm USING tre (s);
+CREATE INDEX
+SELECT 'C (column)' AS collation, * FROM cm_check('cm');
+ collation  | queries | idx_ne_seq | nonempty 
+------------+---------+------------+----------
+ C (column) |       8 |          0 |        8
+(1 row)
+
+DROP INDEX cm_c;
+DROP INDEX
+ALTER TABLE cm ALTER COLUMN s TYPE text COLLATE "POSIX";
+ALTER TABLE
+CREATE INDEX cm_posix ON cm USING tre (s);
+CREATE INDEX
+SELECT 'POSIX (column)' AS collation, * FROM cm_check('cm');
+   collation    | queries | idx_ne_seq | nonempty 
+----------------+---------+------------+----------
+ POSIX (column) |       8 |          0 |        8
+(1 row)
+
+DROP INDEX cm_posix;
+DROP INDEX
+ALTER TABLE cm ALTER COLUMN s TYPE text COLLATE "ucs_basic";
+ALTER TABLE
+CREATE INDEX cm_ucs ON cm USING tre (s);
+CREATE INDEX
+SELECT 'ucs_basic (column)' AS collation, * FROM cm_check('cm');
+     collation      | queries | idx_ne_seq | nonempty 
+--------------------+---------+------------+----------
+ ucs_basic (column) |       8 |          0 |        8
+(1 row)
+
+DROP INDEX cm_ucs;
+DROP INDEX
+ALTER TABLE cm ALTER COLUMN s TYPE text COLLATE "default";
+ALTER TABLE
+-- (7) REINDEX and CREATE INDEX CONCURRENTLY run the same check.  An index
+--     cannot be created under a nondeterministic collation, so simulate a
+--     catalog that says otherwise by redefining the collation the index
+--     uses: drop and recreate cm_flip with a different determinism.
+DROP COLLATION IF EXISTS cm_flip;
+DROP COLLATION
+CREATE COLLATION cm_flip (provider = icu, locale = 'und');
+CREATE COLLATION
+CREATE INDEX cm_flip_idx ON cm USING tre (s COLLATE cm_flip);
+CREATE INDEX
+SELECT 'cm_flip (index)' AS collation, * FROM cm_check('cm');
+    collation    | queries | idx_ne_seq | nonempty 
+-----------------+---------+------------+----------
+ cm_flip (index) |       8 |          0 |        8
+(1 row)
+
+-- PostgreSQL never changes a collation's determinism in place, but an
+-- upgrade from a pg_tre without the guard can carry such an index; mimic
+-- it (superuser only, catalog edit, rolled back).
+BEGIN;
+BEGIN
+UPDATE pg_collation SET collisdeterministic = false WHERE collname = 'cm_flip';
+UPDATE 1
+REINDEX INDEX cm_flip_idx;
+psql:test/sql/collation_matrix.sql:137: ERROR:  pg_tre does not support nondeterministic collations
+ROLLBACK;
+ROLLBACK
+BEGIN;
+BEGIN
+UPDATE pg_collation SET collisdeterministic = false WHERE collname = 'cm_flip';
+UPDATE 1
+REINDEX TABLE cm;
+psql:test/sql/collation_matrix.sql:141: ERROR:  pg_tre does not support nondeterministic collations
+ROLLBACK;
+ROLLBACK
+BEGIN;
+BEGIN
+UPDATE pg_collation SET collisdeterministic = false WHERE collname = 'cm_flip';
+UPDATE 1
+CREATE INDEX cm_flip_idx2 ON cm USING tre (s COLLATE cm_flip);
+psql:test/sql/collation_matrix.sql:145: ERROR:  pg_tre does not support nondeterministic collations
+ROLLBACK;
+ROLLBACK
+UPDATE pg_collation SET collisdeterministic = false WHERE collname = 'cm_flip';
+UPDATE 1
+REINDEX INDEX CONCURRENTLY cm_flip_idx;
+psql:test/sql/collation_matrix.sql:148: ERROR:  pg_tre does not support nondeterministic collations
+CREATE INDEX CONCURRENTLY cm_flip_cic ON cm USING tre (s COLLATE cm_flip);
+psql:test/sql/collation_matrix.sql:149: ERROR:  pg_tre does not support nondeterministic collations
+UPDATE pg_collation SET collisdeterministic = true WHERE collname = 'cm_flip';
+UPDATE 1
+SELECT indexrelid::regclass AS idx, indisvalid
+  FROM pg_index WHERE indrelid = 'cm'::regclass ORDER BY 1::text;
+        idx        | indisvalid 
+-------------------+------------
+ cm_flip_idx       | t
+ cm_flip_idx_ccnew | f
+ cm_flip_cic       | f
+(3 rows)
+
+DROP INDEX cm_flip_cic;
+DROP INDEX
+DROP INDEX cm_flip_idx_ccnew;
+DROP INDEX
+SELECT 'cm_flip after' AS collation, * FROM cm_check('cm');
+   collation   | queries | idx_ne_seq | nonempty 
+---------------+---------+------------+----------
+ cm_flip after |       8 |          0 |        8
+(1 row)
+
+DROP INDEX cm_flip_idx;
+DROP INDEX
+DROP COLLATION cm_flip;
+DROP COLLATION
+DROP TABLE cm;
+DROP TABLE
+DROP FUNCTION cm_check(regclass);
+DROP FUNCTION
+DROP FUNCTION cm_ids(regclass, text, bool);
+DROP FUNCTION
+DROP DOMAIN cm_ci_text;
+DROP DOMAIN
+DROP COLLATION cm_ci;
+DROP COLLATION
+DROP COLLATION cm_ai;
+DROP COLLATION
+DROP COLLATION cm_icu_det;
+DROP COLLATION

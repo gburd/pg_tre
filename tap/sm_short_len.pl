@@ -19,9 +19,7 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 my $node = PostgreSQL::Test::Cluster->new('pg_tre_sm_short');
-# Checksums off: PG18 initdb enables them by default, PG17 has no
-# --no-data-checksums flag (and checksums are already off there).
-$node->init(extra => $node->pg_version >= 18 ? ['--no-data-checksums'] : []);
+$node->init(extra => ['--no-data-checksums']);
 $node->append_conf('postgresql.conf', "autovacuum = off\n");
 $node->start;
 $node->safe_psql('postgres', q{
