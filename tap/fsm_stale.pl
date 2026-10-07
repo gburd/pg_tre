@@ -22,7 +22,9 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 my $node = PostgreSQL::Test::Cluster->new('pg_tre_fsm_stale');
-$node->init(extra => ['--no-data-checksums']);
+# Checksums off: PG18 initdb enables them by default, PG17 has no
+# --no-data-checksums flag (and checksums are already off there).
+$node->init(extra => $node->pg_version >= 18 ? ['--no-data-checksums'] : []);
 $node->append_conf('postgresql.conf', q{
 autovacuum = off
 checkpoint_timeout = '1h'
