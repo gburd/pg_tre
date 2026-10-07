@@ -27,6 +27,7 @@
 #include "pg_tre/regex_ast.h"
 #include "pg_tre/tiling.h"
 #include "pg_tre/uleven.h"
+#include "pg_tre/tre_match.h"
 
 /*
  * A spine entry: one trigram at a specific pattern offset.
@@ -84,8 +85,23 @@ linearize_literals(const RegexAst *ast, int32 *buf, int buf_cap, int *pos)
             break;
         }
 
+        case REGEX_AST_ANCHOR:
+            /* Zero-width: does not separate characters. */
+            break;
+
         default:
-            /* Non-literal node: break the run */
+            /*
+             * Any other node (ANY, CLASS, REP, ALT, APPROX) stands for
+             * text the spine cannot see, so it must END the literal run.
+             * Before 4.3.0 this case simply contributed nothing and the
+             * literals on both sides were glued together: 'xq.zw' gave the
+             * spine "xqzw" (trigrams xqz, qzw) that no matching row
+             * contains.  At k>=1 the byte-space neighbourhood happened to
+             * paper over it for ASCII, so only non-ASCII rows were lost.
+             */
+            if (n >= buf_cap)
+                return -1;
+            buf[n++] = -1;          /* run separator */
             break;
     }
 
@@ -108,9 +124,11 @@ extract_spine_from_ast(const RegexAst *ast, SpineEntry *out, int max_out,
     if (buf_len < 0)
         return -1;
 
-    /* Extract all codepoint trigrams from the linearized buffer */
+    /* Extract codepoint trigrams from within each literal run. */
     for (i = 0; i + 3 <= buf_len; i++)
     {
+        if (buf[i] < 0 || buf[i + 1] < 0 || buf[i + 2] < 0)
+            continue;               /* would straddle a run break */
         if (n >= max_out)
             return -1;
         out[n].trigram[0] = buf[i];
@@ -146,6 +164,45 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
         out->mode = TRIGRAM_QUERY_CNF;
         MemoryContextSwitchTo(old);
         return false;
+    }
+
+    /*
+     * Soundness.  amscan evaluates a tiled (DNF) query as the UNION of every
+     * alternative of every tile, so the filter is sound iff every text
+     * within k edits of the pattern contains at least one alternative.  An
+     * all-ASCII trigram is expanded to its full edit-neighbourhood (radius
+     * tile_k) by uleven, which is what made short ASCII patterns work; a
+     * trigram with any non-ASCII character is emitted EXACT only.  One edit
+     * destroys at most the 3 trigrams that overlap its position (runs are
+     * separated, so it cannot reach two runs), hence k edits leave at least
+     * one spine trigram intact -- present exactly -- iff spine_n > 3k.
+     * Without that, 'xqΩzw' at k=1 (3 trigrams, all containing Ω) lost every
+     * row in which Ω was edited.  When the exact-only argument is needed and
+     * does not hold, give up on filtering: lossy bitmap, recheck decides.
+     */
+    /*
+     * The ASCII neighbourhood is complete only over characters <= 0xFF
+     * (uleven substitutes and inserts BYTES).  Whenever the text can hold a
+     * character above that -- any multibyte database encoding, UTF-8
+     * included (Ω is U+03A9) -- an edit that replaces or inserts one is
+     * outside the neighbourhood too, and the same "one exact trigram must
+     * survive" argument is what keeps the filter sound.  Single-byte
+     * encodings (LATIN1, KOI8R, ...) keep the full neighbourhood.
+     */
+    {
+        bool    any_exact_only = (pg_tre_db_max_char_len() > 1);
+
+        for (i = 0; i < spine_n && !any_exact_only; i++)
+            any_exact_only = (spine[i].trigram[0] > 0x7F ||
+                              spine[i].trigram[1] > 0x7F ||
+                              spine[i].trigram[2] > 0x7F);
+        if (any_exact_only && spine_n <= 3 * k)
+        {
+            out->always_true = true;
+            out->mode = TRIGRAM_QUERY_CNF;
+            MemoryContextSwitchTo(old);
+            return false;
+        }
     }
 
     n_tiles = k + 1;
