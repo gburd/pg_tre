@@ -1,8 +1,17 @@
 # pg_tre status
 
-Released: **4.2.2** (2026-09).  See `CHANGELOG.md` for full
+Released: **4.2.3** (2026-10).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.2.3 fixes a backend crash: any ERROR (`statement_timeout`, a
+cancel) raised while an index scan had built the pending-list
+overlay could abort the backend with `free(): invalid pointer` in
+clang-built extensions, the flake build included, and take the
+cluster through crash recovery.  It also documents that the
+`fastupdate` / `pending_list_limit` options are not implemented:
+only VACUUM merges the pending list.  No on-disk change, no REINDEX
+either way.
 
 4.2.2 makes fuzzy matching count edits in characters on every
 UTF-8 database.  Under a C/POSIX `LC_CTYPE`, TRE counted bytes,

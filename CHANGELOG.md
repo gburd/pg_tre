@@ -6,6 +6,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.3] - 2026-10-07 - backend crash on an ERROR during a pending-list scan
+
+**No on-disk format change; no REINDEX to upgrade or to downgrade to 4.2.2.**
+Recommended for every installation that builds pg_tre with clang, which
+includes the flake (`nix build .#pg18`).
+
+### Fixed
+
+- **Backend crash (`free(): invalid pointer` / `munmap_chunk(): invalid
+  pointer`, sometimes a later SIGSEGV) when an ERROR was raised during an
+  index scan of a `tre` index with a non-empty pending list.**  Every
+  connection was dropped and the cluster went through crash recovery.
+  Common triggers are `statement_timeout`, a query cancel, or a
+  corrupt-page error, on a `%~~ ... ORDER BY ... LIMIT` plain index scan
+  of an insert-heavy table that VACUUM rarely visits.  The scan kept its
+  pending-list overlay in a non-volatile stack struct and read it in
+  `PG_CATCH` after `siglongjmp`.  C leaves such an object indeterminate,
+  and the clang `-O2 -flto` build (the flake's) called `overlay_free()`
+  with stale argument registers, freeing a saved register out of the jump
+  buffer.  gcc builds and plain clang PGXS builds keep the struct in
+  memory and did not crash.  Present since 1.5.2, which added the
+  `PG_CATCH`; observed in production on 4.2.0-4.2.2 (field report
+  2026-10-06, reproduced with the released v4.2.2 flake build).  The overlay and the
+  crack cache now live in palloc'd memory.  The candidate maps are
+  volatile objects (`sm_t *volatile`, not `volatile sm_t *`, which had
+  also let clang drop their cleanup `free()` and leak them on every
+  error).  `overlay_free()` is idempotent.  The parser's Lime handle had
+  the same declaration and is fixed too.
+- **Docs: `fastupdate` and `pending_list_limit` are accepted but not
+  implemented.**  Every INSERT goes to the pending list and only VACUUM
+  merges it; `fastupdate = false` does not bypass it, and nothing caps its
+  size.  `doc/pg_tre.md` described an insert-time auto-merge that does not
+  exist.  `LIMITATIONS.md` now explains the scan cost of a long list and
+  the `autovacuum_vacuum_insert_threshold` workaround.
+
+### Added
+
+- `tap/scan_cancel.pl`: 120 `statement_timeout`s landing inside the
+  overlay scan.  It asserts no backend crash, no glibc heap report, and
+  index == seq scan afterwards.
+- CI job `nix-clang-tap`: runs that test against exactly what
+  `nix build .#pg18` ships, the only build in which the bug reproduced.
+  Dry-run of the job's steps: v4.2.2 fails (crash on the first query),
+  4.2.3 passes.
+
 ## [4.2.2] - 2026-09-30 - fuzzy matching counts characters under any locale; vendored sparsemap v5.8.0
 
 **No on-disk format change; no REINDEX to upgrade or to downgrade to 4.2.1.**
