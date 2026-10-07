@@ -613,33 +613,47 @@ pgt_set_collation(Oid collation)
 #define PG_ISPRINT  0x20
 #define PG_ISPUNCT  0x40
 #define PG_ISSPACE  0x80
-#define PG_ISBLANK  0x100           /* only until blank is hard-wired */
-#define PG_ISCNTRL  0x200           /* only until cntrl is hard-wired */
-#define PG_ISXDIGIT 0x400           /* only until xdigit is hard-wired */
 
 static int
 pgt_c_props(pg_wchar c)
 {
-    int         p = 0;
-
     if (c >= '0' && c <= '9')
-        p = PG_ISDIGIT | PG_ISGRAPH | PG_ISPRINT;
-    else if (c >= 'A' && c <= 'Z')
-        p = PG_ISALPHA | PG_ISUPPER | PG_ISGRAPH | PG_ISPRINT;
-    else if (c >= 'a' && c <= 'z')
-        p = PG_ISALPHA | PG_ISLOWER | PG_ISGRAPH | PG_ISPRINT;
-    else if (c >= '!' && c <= '~')
-        p = PG_ISGRAPH | PG_ISPRINT | PG_ISPUNCT;
-    else if (c == ' ')
-        p = PG_ISPRINT | PG_ISSPACE | PG_ISBLANK;
-    else if (c >= '\t' && c <= '\r')
-        p = PG_ISSPACE | (c == '\t' ? PG_ISBLANK : 0) | PG_ISCNTRL;
-    else if (c < ' ' || c == 0x7F)
-        p = PG_ISCNTRL;
-    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
-        p |= PG_ISXDIGIT;
-    return p;
+        return PG_ISDIGIT | PG_ISGRAPH | PG_ISPRINT;
+    if (c >= 'A' && c <= 'Z')
+        return PG_ISALPHA | PG_ISUPPER | PG_ISGRAPH | PG_ISPRINT;
+    if (c >= 'a' && c <= 'z')
+        return PG_ISALPHA | PG_ISLOWER | PG_ISGRAPH | PG_ISPRINT;
+    if (c >= '!' && c <= '~')
+        return PG_ISGRAPH | PG_ISPRINT | PG_ISPUNCT;
+    if (c == ' ')
+        return PG_ISPRINT | PG_ISSPACE;
+    if (c >= '\t' && c <= '\r')
+        return PG_ISSPACE;
+    return 0;
 }
+
+/*
+ * The builtin provider's "posix" flag: PG18 passes !casemap_full
+ * (PG_UNICODE_FAST uses the Unicode definitions of digit / alnum / punct,
+ * C.UTF-8 the POSIX-compatible ones); PG17 has only C.UTF-8.
+ */
+#if PG_VERSION_NUM >= 180000
+#define PGT_POSIX (!pgt_locale->info.builtin.casemap_full)
+#else
+#define PGT_POSIX true
+#endif
+
+/*
+ * The ICU strategy.  Core calls ICU's u_is*() / u_to*() here; pg_tre.so
+ * does not link ICU (it stays loadable into any build of the same major,
+ * the binary-overlay deployment the flake documents), and PostgreSQL
+ * exposes no ctype method table to call through (PG18's pg_locale_t has
+ * collate methods only).  So it uses PostgreSQL's own Unicode tables, the
+ * POSIX-compatible definitions builtin C.UTF-8 uses -- the same character
+ * data ICU's u_is*() is built from, differing only where ICU's notion of
+ * the class differs (LIMITATIONS.md, test/sql/tre_ctype_strategies.sql).
+ */
+#define PGT_ICU_POSIX true
 
 /*
  * The <wctype.h> / <ctype.h> cases of pg_wc_is<name>(), per major.  Core
@@ -693,18 +707,39 @@ pgt_is##name(wint_t wc) \
     return 0; \
 }
 
-PGT_CLASS(alnum,  PG_ISALNUM,  pg_u_isalnum(c, true),  pg_u_isalnum(c, true))
-PGT_CLASS(alpha,  PG_ISALPHA,  pg_u_isalpha(c),        pg_u_isalpha(c))
-PGT_CLASS(blank,  PG_ISBLANK,  pg_u_isblank(c),        pg_u_isblank(c))
-PGT_CLASS(cntrl,  PG_ISCNTRL,  pg_u_iscntrl(c),        pg_u_iscntrl(c))
-PGT_CLASS(digit,  PG_ISDIGIT,  pg_u_isdigit(c, true),  pg_u_isdigit(c, true))
-PGT_CLASS(graph,  PG_ISGRAPH,  pg_u_isgraph(c),        pg_u_isgraph(c))
-PGT_CLASS(lower,  PG_ISLOWER,  pg_u_islower(c),        pg_u_islower(c))
-PGT_CLASS(print,  PG_ISPRINT,  pg_u_isprint(c),        pg_u_isprint(c))
-PGT_CLASS(punct,  PG_ISPUNCT,  pg_u_ispunct(c, true),  pg_u_ispunct(c, true))
-PGT_CLASS(space,  PG_ISSPACE,  pg_u_isspace(c),        pg_u_isspace(c))
-PGT_CLASS(upper,  PG_ISUPPER,  pg_u_isupper(c),        pg_u_isupper(c))
-PGT_CLASS(xdigit, PG_ISXDIGIT, pg_u_isxdigit(c, true), pg_u_isxdigit(c, true))
+PGT_CLASS(digit, PG_ISDIGIT, pg_u_isdigit(c, PGT_POSIX), pg_u_isdigit(c, PGT_ICU_POSIX))
+PGT_CLASS(alpha, PG_ISALPHA, pg_u_isalpha(c),            pg_u_isalpha(c))
+PGT_CLASS(alnum, PG_ISALNUM, pg_u_isalnum(c, PGT_POSIX), pg_u_isalnum(c, PGT_ICU_POSIX))
+PGT_CLASS(upper, PG_ISUPPER, pg_u_isupper(c),            pg_u_isupper(c))
+PGT_CLASS(lower, PG_ISLOWER, pg_u_islower(c),            pg_u_islower(c))
+PGT_CLASS(graph, PG_ISGRAPH, pg_u_isgraph(c),            pg_u_isgraph(c))
+PGT_CLASS(print, PG_ISPRINT, pg_u_isprint(c),            pg_u_isprint(c))
+PGT_CLASS(punct, PG_ISPUNCT, pg_u_ispunct(c, PGT_POSIX), pg_u_ispunct(c, PGT_ICU_POSIX))
+PGT_CLASS(space, PG_ISSPACE, pg_u_isspace(c),            pg_u_isspace(c))
+
+/*
+ * Classes core hard-wires for every strategy (regc_locale.c, cclasscvec):
+ * blank = TAB and SPACE, cntrl = 0x00-0x1F and 0x7F-0x9F, xdigit = ASCII
+ * hex digits.  (\w is TRE's [[:alnum:]_], core's pg_wc_isword.)
+ */
+static int
+pgt_isblank(wint_t c)
+{
+    return c == '\t' || c == ' ';
+}
+
+static int
+pgt_iscntrl(wint_t c)
+{
+    return c <= 0x1F || (c >= 0x7F && c <= 0x9F);
+}
+
+static int
+pgt_isxdigit(wint_t c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+        (c >= 'A' && c <= 'F');
+}
 
 /*
  * pg_wc_toupper() / pg_wc_tolower() (x = upper / lower).  The default

@@ -93,6 +93,8 @@ grep -q tre_compile_progress_check vendor/tre/lib/tre-compile.c \
     || die "TRE progress-hook patch not applied (patches/tre-progress-hook.patch)"
 grep -q tre_set_mbdecoder vendor/tre/lib/regcomp.c \
     || die "TRE mbdecoder patch not applied (patches/tre-mbdecoder.patch)"
+grep -q 'tre_ctype("alpha")' vendor/tre/lib/tre-parse.c \
+    || die "TRE icase-class patch not applied (patches/tre-icase-class.patch)"
 make -s PG_CONFIG=$PGB/pg_config install >/dev/null 2>&1 || die "pg_tre install failed"
 # Capture first: under pipefail, `nm | grep -q` fails with SIGPIPE on a match.
 syms=$(nm -D "$($PGB/pg_config --pkglibdir)/pg_tre.so")

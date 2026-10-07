@@ -1,0 +1,47 @@
+From 3b5d2542eee1b935a55d630717179b93d2a0d7fe Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Tue, 6 Oct 2026 19:42:19 -0400
+Subject: [PATCH] Treat [:upper:] and [:lower:] as [:alpha:] under REG_ICASE
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Case-insensitively, TRE matched [[:upper:]] by testing whether the
+character's lower- or upper-case form is upper case.  The
+Spencer-derived engines (Tcl, PostgreSQL) instead remap both classes to
+[:alpha:] under REG_ICASE, so (?i)[[:upper:]] matches every letter,
+including those without a case pair (ß, ª, CJK).  TRE's version also
+only took effect on the 8-bit expansion path: the multibyte matchers
+test tnfa->cflags, which an inline (?i) does not set, so there
+(?i)[[:upper:]] meant plain [[:upper:]].
+
+Resolve it once, in the bracket parser, where the current (?i) state is
+known: under REG_ICASE the class handle for "upper" or "lower" becomes
+the one for "alpha".  Positive classes, negated classes and the 8-bit
+expansion all see the remapped class.
+---
+ lib/tre-parse.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/lib/tre-parse.c b/lib/tre-parse.c
+index 1079a5e..cb2b464 100644
+--- a/lib/tre-parse.c
++++ b/lib/tre-parse.c
+@@ -337,6 +337,14 @@ tre_parse_bracket_items(tre_parse_ctx_t *ctx, int negate,
+ 	      class = tre_ctype(tmp_str);
+ 	      if (!class)
+ 		return REG_ECTYPE;
++	      /* Case-insensitive: [:upper:] and [:lower:] mean [:alpha:],
++		 as in Henry Spencer's regex engine (Tcl, PostgreSQL).
++		 Resolved here, where the (?i) state is known, so the
++		 matchers (which test tnfa->cflags) and the 8-bit
++		 expansion below need no case logic for these two. */
++	      if ((ctx->cflags & REG_ICASE)
++		  && (class == tre_ctype("upper") || class == tre_ctype("lower")))
++		class = tre_ctype("alpha");
+ 	      /* Optimize character classes for 8 bit character sets. */
+ 	      if (ctx->mb_cur_max == 1)
+ 		{
+-- 
+2.54.0
+

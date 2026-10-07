@@ -50,7 +50,7 @@ build_stack() {
             cp /usr/share/automake*/install-sh utils/ 2>/dev/null || true
             autoreconf -fi --warnings=none >/tmp/ar.log 2>&1 || true
             automake --add-missing --copy >/dev/null 2>&1 || true )
-          for p in tre-progress-hook.patch tre-mbdecoder.patch; do
+          for p in tre-progress-hook.patch tre-mbdecoder.patch tre-icase-class.patch; do
             git -C vendor/tre apply "$src/patches/$p" 2>/dev/null \
               || patch -d vendor/tre -p1 < "patches/$p" 2>/dev/null || true
           done

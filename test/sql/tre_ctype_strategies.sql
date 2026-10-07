@@ -22,17 +22,24 @@
 --
 -- Output per database: how many (class, character) checks ran, how many
 -- classes had at least one member (so no check passes vacuously), and the
--- characters on which TRE and core DISAGREE -- which must be 'none' -- and,
--- separately, KNOWN differences (pg_tre 4.3, to be fixed in module.c; any
--- change to them shows up as a diff):
---   * blank and cntrl: core hard-wires them (blank = TAB SP, cntrl =
---     0x00-0x1F 0x7F-0x9F, regc_locale.c) for every strategy; pg_tre asks
---     the classifier, so NBSP / EMSP / IDSP / NEL / LSEP / KOI8-R 0x80 differ;
---   * (?i) with [[:upper:]] / [[:lower:]]: core maps both to [[:alpha:]];
---   * ICU and builtin PG_UNICODE_FAST: core uses ICU's u_is*() resp. the
---     non-POSIX Unicode properties; pg_tre uses pg_u_is*(c, posix=true),
---     so Arabic-Indic digits, letter-like numbers (U+216B) and symbols
---     ($ + ~ © × € 😀 as punct) differ.
+-- characters on which TRE and core DISAGREE, which must be 'none'.  In
+-- particular (each was a difference before 4.3.0 shipped):
+--   * blank and cntrl are hard-wired in core (blank = TAB SP, cntrl =
+--     0x00-0x1F 0x7F-0x9F, regc_locale.c) for every strategy, xdigit too;
+--   * (?i) with [[:upper:]] / [[:lower:]] means [[:alpha:]] (core remaps
+--     the class under REG_ICASE; patches/tre-icase-class.patch);
+--   * builtin PG_UNICODE_FAST uses the non-POSIX Unicode properties
+--     (posix = !casemap_full), exactly as regc_pg_locale.c does.
+-- The one KNOWN difference is the ICU strategy (database (3) only, where
+-- every difference is listed under known_differences, so any change shows
+-- up as a diff): core classifies with libicu's u_is*(), pg_tre with
+-- PostgreSQL's own Unicode tables (pg_u_is*(), the definitions builtin
+-- C.UTF-8 uses), because pg_tre.so does not link ICU and PostgreSQL offers
+-- no ctype entry point to call.  ICU class membership therefore follows
+-- PostgreSQL's Unicode tables, not libicu: Arabic-Indic digits, letter-like
+-- numbers and symbols (U+216B, U+24B6), soft hyphen and symbols as punct
+-- differ.  Case folding is the same (Unicode simple case mappings), except
+-- for titlecase letters (see :fold).
 -- Then,
 -- through a tre index, that every class / shorthand / (?i) query returns
 -- the same rows as a sequential scan.
@@ -87,16 +94,20 @@ SELECT (SELECT count(*) FROM r) AS checks,
                   FILTER (WHERE bad IS NOT NULL AND NOT known), 'none') AS disagree,
        coalesce(string_agg(cls || ': ' || bad, '; ' ORDER BY cls)
                   FILTER (WHERE bad IS NOT NULL AND known), 'none') AS known_differences
-  FROM (SELECT *, cls IN ('blank', 'cntrl', '(?i)[[:upper:]]', '(?i)[[:lower:]]',
-                          '(?i)[^[:upper:]]')
-                  OR (current_setting('pgtre.ct_unicode_props', true) = 'on'
-                      AND cls IN ('alnum', 'alpha', 'upper', 'lower', 'digit', 'punct',
-                                  'graph', 'print', '^alpha', 'a[[:digit:]]b',
-                                  '\w', '\W', '\d', '\D')) AS known
-          FROM c) c
+  FROM (SELECT *, coalesce(current_setting('pgtre.icu_known', true), '') = 'on'
+                  AS known FROM c) c
 $probe$ AS probe,
--- Every ordered pair of letters, folded.  Titlecase digraphs (U+01C5) are
--- left out: core's ~* never equates a titlecase letter with itself.
+-- Every ordered pair of characters (b: not a regex metacharacter), folded,
+-- as a literal ('(?i)^b$') and as a bracket ('(?i)^[b]$'); core_equal
+-- counts the pairs core folds together, so a change in core's folding
+-- shows up too.  Not only letters: Ⅻ and Ⓐ fold although they are not
+-- letters.  Patterns b that core's ~* does not match
+-- against b itself are left out.  Those are the titlecase letters (U+01C5
+-- ǅ) under a Unicode or libc ctype, the one known folding difference,
+-- shown by :title below: core folds ǅ to its upper and lower forms only,
+-- [Ǆǆ], so neither (?i)ǅ nor (?i)[ǅ] matches ǅ itself; TRE picks the
+-- other case by isupper()/islower(), so under the Unicode strategies (ǅ
+-- is neither) it matches only ǅ, and under libc (?i)[ǅ] is [ǅǄ].
 $fold$
 SELECT count(*) AS pairs,
        count(*) FILTER (WHERE a.c ~* ('^' || b.c || '$')) AS core_equal,
@@ -104,10 +115,20 @@ SELECT count(*) AS pairs,
          FILTER (WHERE tre_amatch(a.c, '(?i)^' || b.c || '$', 0)
                          IS DISTINCT FROM (a.c ~* ('^' || b.c || '$'))
                     OR (coalesce(tre_amatch_cost(a.c, '(?i)^' || b.c || '$', 1), 1) = 0)
-                         IS DISTINCT FROM (a.c ~* ('^' || b.c || '$'))), 'none')
+                         IS DISTINCT FROM (a.c ~* ('^' || b.c || '$'))
+                    OR tre_amatch(a.c, '(?i)^[' || b.c || ']$', 0)
+                         IS DISTINCT FROM (a.c ~* ('^[' || b.c || ']$'))), 'none')
          AS disagree
-  FROM ch a, ch b WHERE a.letter AND b.letter
+  FROM ch a, ch b
+ WHERE CASE WHEN b.c ~ '[][\\^$.|?*+(){}-]' THEN false
+            ELSE b.c ~* ('^' || b.c || '$') END
 $fold$ AS fold,
+-- The titlecase difference, spelled out (UTF-8 databases; LIMITATIONS.md).
+$title$
+SELECT c, c ~* '^ǅ$' AS core_lit, tre_amatch(c, '(?i)^ǅ$', 0) AS tre_lit,
+       c ~* '^[ǅ]$' AS core_brk, tre_amatch(c, '(?i)^[ǅ]$', 0) AS tre_brk
+  FROM (VALUES ('Ǆ'), ('ǅ'), ('ǆ')) v(c)
+$title$ AS title,
 -- Through the index: every character inside a word, one row each, plus
 -- filler; each class pattern (in context, so trigrams can be extracted)
 -- via %~~, ~ and ~* must return the same rows with the index as without.
@@ -214,6 +235,7 @@ CREATE EXTENSION pg_tre;
 :u8chars
 :probe;
 :fold;
+:title;
 :idxsetup
 :idxprobe;
 -- the 4.3 regression the hooks fix: these are false here, true below
@@ -226,6 +248,7 @@ CREATE EXTENSION pg_tre;
 :u8chars
 :probe;
 :fold;
+:title;
 :idxsetup
 :idxprobe;
 SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' AS core,
@@ -234,11 +257,12 @@ SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' A
 -- (3) UTF8, ICU default collation: Unicode properties.
 \c pgtre_ct_icu
 SET client_min_messages = warning;
-SET pgtre.ct_unicode_props = on;
+SET pgtre.icu_known = on;
 CREATE EXTENSION pg_tre;
 :u8chars
 :probe;
 :fold;
+:title;
 :idxsetup
 :idxprobe;
 SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' AS core,
@@ -251,29 +275,26 @@ CREATE EXTENSION pg_tre;
 :u8chars
 :probe;
 :fold;
+:title;
 :idxsetup
 :idxprobe;
 
 -- (5) UTF8, builtin PG_UNICODE_FAST (full case mapping in core), PG18+.
--- Silent unless TRE and core disagree (see header); fast_known is what the
--- probe's known_differences must read.
-\set fast_known '(?i)[[:lower:]]: Z É Ω ǅ Я 日 ア ー Ⅻ Ⓐ Ａ 𝐀 𐐀; (?i)[[:upper:]]: a f é ß ÿ µ ª ω ǅ я 日 ア ー ⅻ ｆ 𐐨; (?i)[^[:upper:]]: a f é ß ÿ µ ª ω ǅ я 日 ア ー ⅻ ｆ 𐐨; \\D: ١ ٣; \\W: ١ ٣; \\d: ١ ٣; \\w: ١ ٣; a[[:digit:]]b: ١ ٣; alnum: ١ ٣; blank: NBSP EMSP IDSP; digit: ١ ٣; punct: $ + ~ © × € 😀'
+-- Silent unless TRE and core disagree (see header).
 \if :have_fast
 CREATE DATABASE pgtre_ct_fast    TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C'
                                  LOCALE_PROVIDER builtin BUILTIN_LOCALE 'PG_UNICODE_FAST';
 \c pgtre_ct_fast
 SET client_min_messages = warning;
-SET pgtre.ct_unicode_props = on;
 CREATE EXTENSION pg_tre;
 :u8chars
 :probe \gset
-SELECT :'disagree' <> 'none' OR :'known_differences' <> :'fast_known'
-       OR :checks <> 1590 OR :classes_with_members <> 30 AS bad \gset
+SELECT :'disagree' <> 'none' OR :checks <> 1590 OR :classes_with_members <> 30 AS bad \gset
 \if :bad
-\echo PG_UNICODE_FAST classes: :checks :classes_with_members disagree: :disagree known: :known_differences
+\echo PG_UNICODE_FAST classes: :checks :classes_with_members disagree: :disagree
 \endif
 :fold \gset
-SELECT :'disagree' <> 'none' OR :pairs <> 361 OR :core_equal <> 27 AS bad \gset
+SELECT :'disagree' <> 'none' OR :pairs <> 2650 OR :core_equal <> 60 AS bad \gset
 \if :bad
 \echo PG_UNICODE_FAST fold: :pairs :core_equal disagree: :disagree
 \endif

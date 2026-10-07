@@ -82,9 +82,12 @@ LIME_DIR  = vendor/lime
 TRE_LIB        = $(TRE_DIR)/lib/.libs/libtre.a
 TRE_CONFIGURE  = $(TRE_DIR)/configure
 TRE_CONFIG_H   = $(TRE_DIR)/config.h
-# Applied in order on top of vendor/tre.  The mbdecoder patch is a
-# git format-patch against upstream + the progress hook.
-TRE_PATCH      = patches/tre-progress-hook.patch patches/tre-mbdecoder.patch
+# Applied in order on top of vendor/tre.  The mbdecoder and icase-class
+# patches are git format-patches against upstream + the patches before
+# them.  Keep this list in step with flake.nix (postPatch),
+# bench/stress/stress-suite.sh and scripts/asan-check.sh.
+TRE_PATCH      = patches/tre-progress-hook.patch patches/tre-mbdecoder.patch \
+                 patches/tre-icase-class.patch
 TRE_PATCH_STAMP = $(TRE_DIR)/.pg_tre-patched
 LIME_BIN       = $(LIME_DIR)/lime
 
