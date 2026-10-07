@@ -491,8 +491,10 @@ overlay_free(PendingOverlay *ov)
     {
         if (ov->entries[i].tids)
             free(ov->entries[i].tids);
+        ov->entries[i].tids = NULL;
         /* tids_arr is palloc'd in ov->mcxt and freed when context resets. */
     }
+    ov->n = 0;      /* idempotent: a second call frees nothing */
 }
 
 /*
@@ -809,18 +811,33 @@ static sm_t *
 tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                          bool *out_always_true)
 {
-    volatile sm_t *result = NULL;
     /*
-     * Maps owned transiently during the build.  Tracked in volatile
-     * locals so the PG_CATCH below can free them if any ereport-capable
-     * call (pg_tre_posting_materialize, sm_intersection/sm_union/sm_copy,
+     * Everything the PG_CATCH below reads must be a volatile OBJECT (C11
+     * 7.13.2.1: a non-volatile automatic modified between setjmp and
+     * longjmp is indeterminate after the jump).  Note the placement:
+     * `sm_t *volatile p` is a volatile pointer; `volatile sm_t *p` is a
+     * pointer to volatile data and does NOT protect p itself.
+     *
+     * The overlay and crack cache are structs that are filled in after
+     * sigsetjmp, so they live in palloc'd storage and only the (constant)
+     * pointers to them are locals.  4.2.x kept `PendingOverlay ov` on the
+     * stack; clang -O2 then called overlay_free() from the catch block with
+     * stale argument registers (the sigjmp_buf address), and free()d a
+     * saved register: "free(): invalid pointer" on any ERROR raised during
+     * a pending-list scan, e.g. statement_timeout or a query cancel.
+     */
+    sm_t *volatile result = NULL;
+    /*
+     * Maps owned transiently during the build.  Tracked so the PG_CATCH
+     * below can free them if any ereport-capable call
+     * (pg_tre_posting_materialize, sm_intersection/sm_union/sm_copy,
      * sm_add) longjmps out mid-build -- otherwise these malloc-backed
      * maps leak (H3).
      */
-    volatile sm_t *inflight = NULL;   /* transient sm being merged */
-    PendingOverlay ov;
+    sm_t *volatile inflight = NULL;   /* transient sm being merged */
+    PendingOverlay *ov;               /* set once, before PG_TRY */
+    CrackCache    *crack;             /* set once, before PG_TRY */
     volatile bool  overlay_built = false;
-    CrackCache     crack = {0};
     volatile bool  crack_built = false;
     volatile bool  short_circuit = false;   /* CNF proved empty: result == NULL */
     int           i;
@@ -833,6 +850,10 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
         return NULL;
     }
 
+    /* In the caller's scan context; reset with it on error. */
+    ov = palloc0(sizeof(PendingOverlay));
+    crack = palloc0(sizeof(CrackCache));
+
     PG_TRY();
     {
     /*
@@ -841,7 +862,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
      * immediately.
      */
     {
-        overlay_build(&ov, scan->indexRelation, &st->q, st->scan_cxt);
+        overlay_build(ov, scan->indexRelation, &st->q, st->scan_cxt);
         overlay_built = true;
 
         /*
@@ -850,7 +871,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
          * union-across-runs so a trigram touched K times in this scan
          * iterates the runs once, not K times.
          */
-        crack_cache_init(&crack, &st->q, st->scan_cxt);
+        crack_cache_init(crack, &st->q, st->scan_cxt);
         crack_built = true;
 
         if (st->q.mode == TRIGRAM_QUERY_CNF)
@@ -863,11 +884,11 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 sm = resolve_conjunct_with_overlay(
                                       scan->indexRelation,
                                       &st->q.conjuncts[i],
-                                      st->scan_cxt, &ov, &crack);
+                                      st->scan_cxt, ov, crack);
                 if (sm == NULL)
                 {
-                    if (result != NULL) { free((sm_t *) result); result = NULL; }
-                    overlay_free(&ov);
+                    if (result != NULL) { free(result); result = NULL; }
+                    overlay_free(ov);
                     overlay_built = false;
                     short_circuit = true;
                     break;
@@ -881,17 +902,18 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 {
                     sm_t *merged;
                     inflight = sm;
-                    merged = sm_intersection((sm_t *) result, sm);
-                    free((sm_t *) result);
+                    merged = sm_intersection(result, sm);
+                    free(result);
+                    result = NULL;
                     free(sm);
                     inflight = NULL;
                     result = merged;
                     if (result == NULL ||
-                        (sm_get_size((sm_t *) result) != 0 &&
-                         sm_cardinality((sm_t *) result) == 0))
+                        (sm_get_size(result) != 0 &&
+                         sm_cardinality(result) == 0))
                     {
-                        if (result) { free((sm_t *) result); result = NULL; }
-                        overlay_free(&ov);
+                        if (result) { free(result); result = NULL; }
+                        overlay_free(ov);
                         overlay_built = false;
                         short_circuit = true;
                         break;
@@ -924,7 +946,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                     }
                     inflight = sm;
 
-                    pend = overlay_lookup(&ov, tile->alts[j].trigram_hash);
+                    pend = overlay_lookup(ov, tile->alts[j].trigram_hash);
                     if (pend != NULL)
                     {
                         if (sm == NULL)
@@ -951,8 +973,9 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                     }
                     else
                     {
-                        sm_t *merged = sm_union((sm_t *) result, sm);
-                        free((sm_t *) result);
+                        sm_t *merged = sm_union(result, sm);
+                        free(result);
+                        result = NULL;
                         free(sm);
                         inflight = NULL;
                         result = merged;
@@ -963,13 +986,13 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
 
         if (!short_circuit)
         {
-            overlay_free(&ov);
+            overlay_free(ov);
             overlay_built = false;
         }
     }
 
 
-    crack_cache_destroy(&crack);
+    crack_cache_destroy(crack);
     crack_built = false;
     }
     PG_CATCH();
@@ -980,18 +1003,20 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
          * plus the overlay, then re-throw.
          */
         if (inflight != NULL)
-            free((sm_t *) inflight);
+            free(inflight);
         if (result != NULL)
-            free((sm_t *) result);
+            free(result);
         if (overlay_built)
-            overlay_free(&ov);
+            overlay_free(ov);
         if (crack_built)
-            crack_cache_destroy(&crack);
+            crack_cache_destroy(crack);
         PG_RE_THROW();
     }
     PG_END_TRY();
 
-    return (sm_t *) result;
+    pfree(ov);
+    pfree(crack);
+    return result;
 }
 
 /*
@@ -1255,7 +1280,9 @@ static void
 knn_build(IndexScanDesc scan, TreScanState *st)
 {
     MemoryContext old;
-    volatile sm_t *result = NULL;
+    /* Read in PG_FINALLY: must be a volatile pointer (sm_t *volatile), not
+     * a pointer to volatile -- see tre_compute_candidate_sm. */
+    sm_t *volatile result = NULL;
     bool          always_true = false;
     Relation      heap = scan->heapRelation;
     bool          opened_heap = false;
@@ -1477,12 +1504,12 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     (errmsg("pg_tre: amgettuple always_true path streamed %d "
                             "heap TIDs (recheck will filter)", n_entries)));
         }
-        else if (result != NULL && sm_cardinality((sm_t *) result) > 0)
+        else if (result != NULL && sm_cardinality(result) > 0)
         {
             uint64 idx = SM_IDX_MAX;
             sm_cursor_t scur = SM_CURSOR_INIT;
 
-            while ((idx = sm_next_member((sm_t *) result, idx, &scur)) != SM_IDX_MAX)
+            while ((idx = sm_next_member(result, idx, &scur)) != SM_IDX_MAX)
             {
                 ItemPointerData tid;
                 int32           dist = 0;
@@ -1547,7 +1574,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
          */
         if (result != NULL)
         {
-            free((sm_t *) result);
+            free(result);
             result = NULL;
         }
     }
@@ -1556,7 +1583,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
         if (deadline_armed)
             pg_tre_disarm_match_deadline();
         if (result != NULL)
-            free((sm_t *) result);
+            free(result);
         if (compiled != NULL)
             tre_cache_release(compiled);
     }
@@ -1587,7 +1614,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     "(always_true=%d, candidates=%llu, orderby=%d)",
                     n_entries, always_true ? 1 : 0,
                     result != NULL
-                        ? (unsigned long long) sm_cardinality((sm_t *) result)
+                        ? (unsigned long long) sm_cardinality(result)
                         : 0ULL,
                     have_orderby ? 1 : 0)));
 

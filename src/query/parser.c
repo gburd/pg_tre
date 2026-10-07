@@ -29,7 +29,7 @@ extern void pg_tre_rx_parse(void *parser, int token_kind, TreToken token_value,
 bool
 tre_parse_regex(TreParseCtx *ctx, const char *pattern, int len)
 {
-	volatile void *parser_v = NULL;
+	void *volatile parser_v = NULL;	/* volatile pointer: read in PG_FINALLY */
 	TreToken tok;
 	int tok_kind;
 
