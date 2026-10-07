@@ -6,6 +6,102 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.0] - 2026-10-07 - every server encoding; character classes and case folding follow core regex; PostgreSQL 17; index false negatives fixed
+
+**No on-disk format change.  UTF-8 databases: no REINDEX** (trigram hashes
+are unchanged).  **Non-UTF-8 databases (`SQL_ASCII`, `LATIN1`, `WIN1252`,
+`EUC_*`, ...): REINDEX every `tre` index that holds non-ASCII text.**
+Before 4.3.0 the tokenizer decoded every database as UTF-8.  Text that
+was not valid UTF-8 raised `invalid UTF-8 sequence`, but bytes that
+happened to form valid UTF-8 (e.g. `Ã©` in `LATIN1`, or raw UTF-8 in
+`SQL_ASCII`) were indexed as Unicode code points.  4.3.0 reads them as
+characters of the database encoding, so their trigrams differ, and exact
+searches through such an index miss those rows until it is rebuilt.  A
+pure-ASCII index needs nothing.  Behaviour changes are listed below; all
+of them are corrections.
+
+### Added
+
+- **Every server encoding.**  Text is decoded in the database encoding,
+  in the trigram tokenizer and inside TRE (`patches/tre-mbdecoder.patch`),
+  with PostgreSQL's own per-encoding tables.  Before, the tokenizer
+  hard-coded UTF-8: non-ASCII text in a `LATIN1`, `WIN1252`, `KOI8R`,
+  `EUC_*` or other database failed with `invalid UTF-8 sequence`.  TRE
+  decoded with `mbrtowc()` under the backend's `LC_CTYPE`.  The 4.2.2
+  `uselocale()` workaround is gone.  Fuzzy edits count characters in every
+  encoding.
+- **PostgreSQL 17 support** (CI already built it; it now compiles, runs
+  and passes the full suite on 17.x as on 18.x).
+- Tests: `encoding_nonutf8`, `encoding_matrix` (one generic check per
+  server encoding), `regex_class_index`, `regex_syntax_edges`,
+  `collation_guard`, `collation_matrix`, `tre_ctype_strategies`,
+  `tre_collation_classes`, `tre_upstream_fixes`, and
+  `tap/sm_short_len.pl`.
+
+### Changed
+
+- **Regex character classes (`[[:alpha:]]`, `\w`, `\s`, `\d` and their
+  negations) and case folding (`(?i)`) now follow PostgreSQL's regex
+  engine** (`regc_pg_locale.c`) for the call's collation, through TRE
+  ctype hooks.  Before, TRE asked `iswalpha()`/`towlower()` under the
+  backend's `LC_CTYPE`.  Under a C ctype, `[[:alpha:]]` and `(?i)` ignored
+  every non-ASCII letter; under a real locale they followed that locale
+  regardless of the column's collation.  Now:
+  - the answer equals core `~` / `~*` with the same collation, including
+    core's fixed `blank` / `cntrl` / `xdigit` sets and its
+    `(?i)[[:upper:]]` = alpha rule (`patches/tre-icase-class.patch`);
+  - functions use the expression's collation (`COLLATE` in the query or
+    the column's); the ordered index scan uses the index column's
+    collation;
+  - the compiled-pattern cache is keyed by collation.
+
+  **Behaviour change:** class and `(?i)` answers over non-ASCII text can
+  differ from 4.2.x; they now match core.  One documented difference
+  remains: ICU collations classify with PostgreSQL's Unicode tables, not
+  libicu, because `pg_tre.so` does not link ICU.  See `LIMITATIONS.md`.
+- **Nondeterministic collations are refused** at `CREATE INDEX`,
+  `REINDEX` and any `ALTER` that rebuilds the index (an ICU `level1`
+  collation makes `=`/`LIKE` match strings that share no trigrams, so the
+  index silently under-returned).  Regex functions raise core's errors for
+  an indeterminate or nondeterministic collation.
+- **Vendored sparsemap v5.8.0 -> v5.8.2** (verbatim): O(1) `sm_validate`
+  check (f) (5.8.1's version cost every posting read about 75%), short
+  buffers in `sm_open`/`sm_init`, and set-operation fixes pg_tre does not
+  reach.  The wire format is byte-identical.
+
+### Fixed
+
+- **Index scans silently dropped matching rows** (index != sequential
+  scan):
+  - `[[:class:]]`, `[=e=]` and `[.c.]` brackets were read as literal
+    character sets.  `[[:alpha:]]` became `{[, :, a, l, p, h}` plus `]`.
+  - `\d \w \s` raised "not yet implemented", and `(?i)` raised an empty
+    "invalid regex pattern", on the index path only.
+  - Approximate (`k >= 1`) scans lost rows in which a non-ASCII character
+    was edited, and rows where `.`/a class/a repetition sat between
+    literals ("xq.zw" demanded trigrams no match contains).  Tiling now
+    separates literal runs and goes lossy when `spine_n <= 3k` with
+    exact-only trigrams.
+  - A randomized index-vs-seq differential over 750 queries: 4.2.2
+    disagreed on 35, 4.3.0 on none.
+- **TRE matcher bugs** (`patches/tre-upstream-fixes.patch`, from
+  gburd/tre PRs #1 and #2):
+  - multibyte back-references never matched (`(éa)\1`) or reported
+    offsets past the end of the string;
+  - `\<` `\>` `^` right after a back-reference failed in every encoding;
+  - approximate matching could not insert before a failed `$` / `\>`
+    (`^caf$` was not 1 edit from `'cafe'`);
+  - a class mismatch was not costed as a substitution in multibyte mode.
+- A stored sparsemap length under 8 bytes (page corruption) raised a
+  sparsemap over-read; it is now a `DATA_CORRUPTED` error with a REINDEX
+  hint.
+- PostgreSQL 17:
+  - an unfilterable query cost exactly `disable_cost`, so PG17 tied it
+    with a disabled seq scan;
+  - `sm_short_len.pl` passed a PG18-only initdb flag (`fsm_stale.pl` was
+    fixed in 4.2.3);
+  - PG17's `pg_newlocale_from_collation(DEFAULT)` returns NULL for libc.
+
 ## [4.2.3] - 2026-10-07 - backend crash on an ERROR during a pending-list scan
 
 **No on-disk format change; no REINDEX to upgrade or to downgrade to 4.2.2.**

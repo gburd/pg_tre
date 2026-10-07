@@ -265,6 +265,19 @@ stops wedging once 4.2.1 is loaded. **Dead TIDs already merged into an index
 by an earlier version stay there: REINDEX any `tre` index that has shown a
 read error or grew far larger than its heap.**
 
+### Upgrading to 4.3.0 on a non-UTF-8 database: REINDEX
+
+Before 4.3.0 the trigram tokenizer decoded every database as UTF-8. On a
+non-UTF-8 database (`SQL_ASCII`, `LATIN1`, `WIN1252`, `EUC_*`, ...) a row
+whose bytes did not form valid UTF-8 failed to insert. A row whose
+non-ASCII bytes happened to form valid UTF-8 (for example `Ã©` in `LATIN1`,
+or raw UTF-8 stored in `SQL_ASCII`) was indexed as Unicode code points.
+4.3.0 decodes text in the database encoding, so those characters produce
+different trigrams, and exact (`k = 0`) searches through an index built by
+an earlier version miss such rows. **After upgrading, `REINDEX` every `tre`
+index on a non-UTF-8 database that holds non-ASCII text.** UTF-8 databases
+and pure-ASCII indexes need nothing.
+
 ### The pending list is only merged by VACUUM
 
 Every `INSERT` appends to the index's pending list, and only `VACUUM` (or a

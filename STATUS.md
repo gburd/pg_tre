@@ -1,8 +1,20 @@
 # pg_tre status
 
-Released: **4.2.3** (2026-10).  See `CHANGELOG.md` for full
+Released: **4.3.0** (2026-10).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.3.0 makes pg_tre work in every server encoding (it decodes text
+in the database encoding, in the tokenizer and inside TRE) and
+makes regex character classes and `(?i)` follow PostgreSQL's own
+regex engine for the call's collation, on PostgreSQL 17 and 18.
+It also fixes index scans that silently dropped matching rows
+(bracket classes, class escapes, embedded options, and fuzzy
+edits of non-ASCII characters), carries upstream TRE matcher
+fixes (multibyte back-references, insertions before `$`), refuses
+nondeterministic collations, and vendors sparsemap v5.8.2.  No
+on-disk change; no REINDEX on UTF-8 databases.  On non-UTF-8
+databases, REINDEX every `tre` index that holds non-ASCII text.
 
 4.2.3 fixes a backend crash: any ERROR (`statement_timeout`, a
 cancel) raised while an index scan had built the pending-list

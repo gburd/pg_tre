@@ -205,6 +205,7 @@ restart:
 | 4.2.0   | 4.2.1   | ⚠️ Yes, but  | No on-disk change, no REINDEX to upgrade — but REINDEX any index that already raised `could not read blocks` or grew far past a fresh build: earlier versions left dead TIDs merged in, which the fix does not remove |
 | 4.2.1   | 4.2.2   | ✅ Yes       | No on-disk change, no REINDEX either way. UTF-8 databases with a C ctype: fuzzy queries over non-ASCII text now count characters and may return more (correct) rows |
 | 4.2.2   | 4.2.3   | ✅ Yes       | No on-disk change, no REINDEX either way. Fixes a backend crash on an ERROR during a pending-list scan (clang/flake builds) |
+| 4.2.3   | 4.3.0   | ⚠️ Yes, but  | No on-disk change. UTF-8 databases: no REINDEX. **Non-UTF-8 databases: REINDEX every `tre` index holding non-ASCII text** (its trigrams were decoded as UTF-8). Class / `(?i)` answers over non-ASCII text now follow core regex for the call's collation; index scans no longer drop rows (see CHANGELOG); nondeterministic collations refused at index build |
 
 When releasing a version with breaking changes:
 
