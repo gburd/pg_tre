@@ -77,6 +77,29 @@ posting_leaf_budget(void)
  *   payload     occupies [payload_offset, payload_offset + payload_bytes)
  *   everything  must stay below BLCKSZ - MAXALIGN(sizeof(PageTreOpaqueData))
  */
+/*
+ * Every serialized sparsemap is at least its 8-byte header (the empty map
+ * is exactly 8), and pg_tre stores lengths straight from sm_get_size().
+ * A shorter stored length can only be page corruption -- and must be
+ * caught BEFORE sm_wrap/sm_open: sparsemap's sm_open reads the 8-byte
+ * header unconditionally, so a 1..7-byte buffer is over-read, and for a
+ * stored length 0 the library would trust a header the page never held
+ * (found while qualifying sparsemap 5.8.1; present in every version).
+ */
+#define PG_TRE_SM_MIN_BYTES 8
+
+static inline void
+posting_check_sm_len(Size n, const char *what, BlockNumber blk)
+{
+    if (n < PG_TRE_SM_MIN_BYTES)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("pg_tre: corrupt %s sparsemap length %zu",
+                        what, (size_t) n),
+                 BlockNumberIsValid(blk) ? errdetail("Posting leaf block %u.", blk) : 0,
+                 errhint("REINDEX the index to rebuild it.")));
+}
+
 static inline bool
 posting_leaf_header_valid(const PgTrePostingLeafHeader *hdr)
 {
@@ -855,7 +878,10 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sm_t **out,
         /* Wrap over a palloc'd copy so we own stable storage.
          * Call sm_open so m_data_used reflects the serialized
          * content (wrap alone leaves m_data_used=0). */
-        uint8 *buf = (uint8 *) palloc(s->inline_bytes);
+        uint8 *buf;
+
+        posting_check_sm_len(s->inline_bytes, "inline", InvalidBlockNumber);
+        buf = (uint8 *) palloc(s->inline_bytes);
         memcpy(buf, s->inline_data, s->inline_bytes);
         s->smap = sm_wrap(buf, s->inline_bytes);
         if (s->smap != NULL)
@@ -914,6 +940,14 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sm_t **out,
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("pg_tre: corrupt posting leaf at block %u",
                             s->cur_blk)));
+        }
+
+        if (hdr->sparsemap_bytes < PG_TRE_SM_MIN_BYTES)
+        {
+            BlockNumber bad_blk = s->cur_blk;
+
+            UnlockReleaseBuffer(buf);
+            posting_check_sm_len(hdr->sparsemap_bytes, "leaf", bad_blk);
         }
 
         /* Copy bytes out so the caller's sparsemap survives unlock. */
@@ -1696,6 +1730,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
      * ascending order.  Payload entries are stored in this same rank
      * order, so we walk both in lockstep.
      */
+    posting_check_sm_len(smap_size, "leaf", blkno);
     smap = sm_wrap(sm_bytes, smap_size);
     if (smap != NULL)
     {
