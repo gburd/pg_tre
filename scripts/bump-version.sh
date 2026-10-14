@@ -199,7 +199,6 @@ perl -i -pe "s/\Q$OLD\E/$NEW/g" "$DST_MAIN"
 common_files=(
     pg_tre.control
     META.json
-    include/pg_tre/pg_tre.h
     debian/changelog
     packaging/pg_tre.spec
     scripts/release-check.sh
@@ -210,6 +209,15 @@ for f in "${common_files[@]}"; do
         perl -i -pe "s/\Q$OLD\E/$NEW/g" "$f"
     fi
 done
+
+# pg_tre.h: only the version-string line.  Its comments name vendored
+# sparsemap versions ("sparsemap v4.0.0 wire format"), which a blanket
+# s/OLD/NEW/ rewrote whenever the pg_tre version matched (the 4.0.0
+# reference drifted to 4.1.0, 4.2.x and 4.3.0 over successive releases).
+perl -i -pe "s/^(#define PG_TRE_VERSION_STRING \"pg_tre )\Q$OLD\E\"/\${1}$NEW\"/" \
+    include/pg_tre/pg_tre.h
+grep -q "^#define PG_TRE_VERSION_STRING \"pg_tre $NEW\"" include/pg_tre/pg_tre.h \
+    || { echo "Error: PG_TRE_VERSION_STRING not updated in include/pg_tre/pg_tre.h" >&2; exit 1; }
 
 # Update the Makefile PG_TRE_VERSION line specifically. (The
 # DATA-list rewriting above already handled SQL filenames.)
