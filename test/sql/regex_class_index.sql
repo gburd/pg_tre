@@ -52,12 +52,13 @@ CREATE FUNCTION rci_rows(pat text, use_index bool) RETURNS int[]
 LANGUAGE plpgsql AS $$
 DECLARE r int[];
 BEGIN
-  IF use_index THEN
-    SET LOCAL enable_seqscan = off;
-  ELSE
-    SET LOCAL enable_indexscan = off;
-    SET LOCAL enable_bitmapscan = off;
-  END IF;
+  -- All three, every call: SET LOCAL outlives this function, so setting
+  -- only one side let the "seq" call inherit enable_seqscan = off from
+  -- the "index" call before it in the same SELECT, and compare the index
+  -- with itself.
+  PERFORM set_config('enable_seqscan',    (NOT use_index)::text, true);
+  PERFORM set_config('enable_indexscan',  use_index::text,       true);
+  PERFORM set_config('enable_bitmapscan', use_index::text,       true);
   EXECUTE 'SELECT array_agg(id ORDER BY id) FROM rci WHERE s ~ $1'
     INTO r USING pat;
   RETURN r;

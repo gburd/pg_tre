@@ -153,6 +153,7 @@ typedef struct LinCtx
     int         run_cap;
     TrigramAccum *acc;
     MemoryContext cxt;
+    int         flushes;    /* run_flush calls so far */
 } LinCtx;
 
 static void lin_append_node(LinCtx *lc, const RegexAst *ast);
@@ -189,6 +190,7 @@ run_flush(LinCtx *lc)
         accum_add(lc->acc, &lc->run[i], lc->cxt);
 
     lc->run_n = 0;
+    lc->flushes++;
 }
 
 static void
@@ -305,8 +307,24 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
                  * child m times (capped at 2 to keep the run bounded). */
                 int k = (m > 2) ? 2 : m;
                 int i;
+                int before = lc->run_n;
+                int flushes = lc->flushes;
+
                 for (i = 0; i < k; i++)
                     lin_append_node(lc, ast->u.rep.child);
+
+                /*
+                 * A single inlined copy that put just one character in
+                 * the run lets a trigram span from before the repetition
+                 * to after it -- 'ab+c' demanded "abc", and the index
+                 * dropped rows holding only "abbc".  When more copies may
+                 * follow, end the run there.  Two inlined copies, or one
+                 * of two or more characters, keep every window inside the
+                 * first or last copy, which is sound.
+                 */
+                if (ast->u.rep.max_rep != m && k == 1 &&
+                    lc->flushes == flushes && lc->run_n - before <= 1)
+                    run_flush(lc);
             }
             break;
         }

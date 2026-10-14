@@ -1,0 +1,144 @@
+-- test/sql/rep_extract.sql
+--
+-- Trigram extraction across a repetition must not demand trigrams a
+-- matching row lacks, and EXPLAIN must count index searches.
+--
+-- Before 4.3.1 a repetition with a minimum of one and room for more ('b+',
+-- 'b{1,3}') was inlined as a single copy and the literal run carried on
+-- through it, so 'ab+c' required the trigram "abc" and the index silently
+-- dropped rows holding only "abbc".  The %~~ operator at k=0 did the same.
+-- Now the run ends after a one-character copy that may repeat.
+--
+-- pg_tre also never counted an index search, so EXPLAIN ANALYZE printed
+-- "Index Searches: 0" (PG 18) for scans that had read the index and
+-- pg_stat_user_indexes.idx_scan stayed at zero.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+CREATE EXTENSION
+SET client_min_messages = warning;
+SET
+DROP TABLE IF EXISTS rpx;
+DROP TABLE
+CREATE TABLE rpx (id int, s text);
+CREATE TABLE
+INSERT INTO rpx VALUES
+  (1, 'xabbcx'), (2, 'xabcx'), (3, 'zsuuuz'), (4, 'qaabccq'),
+  (5, 'sususu'), (6, 'abababc'), (7, 'xyzzzzy'), (8, 'abbbbbc');
+INSERT 0 8
+INSERT INTO rpx SELECT g, 'filler ' || g FROM generate_series(100, 1100) g;
+INSERT 0 1001
+CREATE INDEX rpx_tre ON rpx USING tre (s);
+CREATE INDEX
+ANALYZE rpx;
+ANALYZE
+CREATE TEMP TABLE pats (p text);
+CREATE TABLE
+INSERT INTO pats VALUES
+  ('ab+c'), ('ab{1,3}c'), ('ab{1,}c'), ('xab+cx'), ('a+bc'), ('abc+'),
+  ('su+z'), ('zsu{1,5}z'), ('(ab)+c'), ('(ab){1,3}c'), ('(su){3}'),
+  ('su{3}'), ('xyz+y'), ('xyz{2,}y'), ('ab{2}c'), ('ab{2,}c'),
+  ('a(b|bb)c'), ('ab*c'), ('ab?c');
+INSERT 0 19
+-- mode: 'bitmap', 'index' (plain Index Scan) or 'seq'.
+CREATE FUNCTION rpx_rows(pat text, mode text, tre bool) RETURNS int[]
+LANGUAGE plpgsql AS $$
+DECLARE r int[];
+BEGIN
+  -- Set all three every time: SET LOCAL lasts until the end of the
+  -- transaction, so one SELECT calling this repeatedly would otherwise
+  -- accumulate settings from earlier calls and compare nothing.
+  PERFORM set_config('enable_seqscan',    (mode = 'seq')::text,    true);
+  PERFORM set_config('enable_bitmapscan', (mode = 'bitmap')::text, true);
+  PERFORM set_config('enable_indexscan',  (mode = 'index')::text,  true);
+  IF tre THEN
+    EXECUTE 'SELECT array_agg(id) FROM (SELECT id FROM rpx WHERE s %~~ tre_pattern($1, 0)) m'
+      INTO r USING pat;
+  ELSE
+    EXECUTE 'SELECT array_agg(id) FROM (SELECT id FROM rpx WHERE s ~ $1) m'
+      INTO r USING pat;
+  END IF;
+  RETURN (SELECT array_agg(x ORDER BY x) FROM unnest(r) x);
+END $$;
+CREATE FUNCTION
+SELECT p, rpx_rows(p, 'seq', false) AS via_seq,
+       rpx_rows(p, 'bitmap', false) IS NOT DISTINCT FROM rpx_rows(p, 'seq', false) AS bitmap_ok,
+       rpx_rows(p, 'index', false) IS NOT DISTINCT FROM rpx_rows(p, 'seq', false) AS index_ok,
+       rpx_rows(p, 'bitmap', true) IS NOT DISTINCT FROM rpx_rows(p, 'seq', true) AS tre_bitmap_ok,
+       rpx_rows(p, 'index', true) IS NOT DISTINCT FROM rpx_rows(p, 'seq', true) AS tre_index_ok
+  FROM pats ORDER BY p;
+     p      |   via_seq   | bitmap_ok | index_ok | tre_bitmap_ok | tre_index_ok 
+------------+-------------+-----------+----------+---------------+--------------
+ (ab)+c     | {2,4,6}     | t         | t        | t             | t
+ (ab){1,3}c | {2,4,6}     | t         | t        | t             | t
+ (su){3}    | {5}         | t         | t        | t             | t
+ a(b|bb)c   | {1,2,4,6}   | t         | t        | t             | t
+ a+bc       | {2,4,6}     | t         | t        | t             | t
+ ab*c       | {1,2,4,6,8} | t         | t        | t             | t
+ ab+c       | {1,2,4,6,8} | t         | t        | t             | t
+ ab?c       | {2,4,6}     | t         | t        | t             | t
+ abc+       | {2,4,6}     | t         | t        | t             | t
+ ab{1,3}c   | {1,2,4,6}   | t         | t        | t             | t
+ ab{1,}c    | {1,2,4,6,8} | t         | t        | t             | t
+ ab{2,}c    | {1,8}       | t         | t        | t             | t
+ ab{2}c     | {1}         | t         | t        | t             | t
+ su+z       | {3}         | t         | t        | t             | t
+ su{3}      | {3}         | t         | t        | t             | t
+ xab+cx     | {1,2}       | t         | t        | t             | t
+ xyz+y      | {7}         | t         | t        | t             | t
+ xyz{2,}y   | {7}         | t         | t        | t             | t
+ zsu{1,5}z  | {3}         | t         | t        | t             | t
+(19 rows)
+
+-- Index searches are counted, once per scan, on both scan paths.
+SET enable_seqscan = off;
+SET
+SET enable_indexscan = off;
+SET
+CREATE FUNCTION rpx_searches(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE l text; out text := '';
+BEGIN
+  FOR l IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || q LOOP
+    IF l LIKE '%Index Searches%' THEN out := out || btrim(l); END IF;
+  END LOOP;
+  RETURN out;
+END $$;
+CREATE FUNCTION
+SELECT current_setting('server_version_num')::int < 180000
+       OR rpx_searches($$SELECT * FROM rpx WHERE s ~ 'ab+c'$$) = 'Index Searches: 1'
+       AS bitmap_counts_search;
+ bitmap_counts_search 
+----------------------
+ t
+(1 row)
+
+RESET enable_indexscan;
+RESET
+SET enable_bitmapscan = off;
+SET
+SELECT current_setting('server_version_num')::int < 180000
+       OR rpx_searches($$SELECT * FROM rpx WHERE s ~ 'ab+c'$$) = 'Index Searches: 1'
+       AS indexscan_counts_search;
+ indexscan_counts_search 
+-------------------------
+ t
+(1 row)
+
+RESET enable_bitmapscan;
+RESET
+RESET enable_seqscan;
+RESET
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT idx_scan > 0 AS idx_scan_counted
+  FROM pg_stat_user_indexes WHERE indexrelname = 'rpx_tre';
+ idx_scan_counted 
+------------------
+ t
+(1 row)
+
+DROP TABLE rpx;
+DROP TABLE

@@ -32,33 +32,37 @@ INSERT INTO pats VALUES
   ('su{3}'), ('xyz+y'), ('xyz{2,}y'), ('ab{2}c'), ('ab{2,}c'),
   ('a(b|bb)c'), ('ab*c'), ('ab?c');
 
-CREATE FUNCTION rpx_rows(pat text, use_index bool, tre bool) RETURNS int[]
+-- mode: 'bitmap', 'index' (plain Index Scan) or 'seq'.
+CREATE FUNCTION rpx_rows(pat text, mode text, tre bool) RETURNS int[]
 LANGUAGE plpgsql AS $$
 DECLARE r int[];
 BEGIN
-  IF use_index THEN
-    SET LOCAL enable_seqscan = off;
-  ELSE
-    SET LOCAL enable_indexscan = off;
-    SET LOCAL enable_bitmapscan = off;
-  END IF;
+  -- Set all three every time: SET LOCAL lasts until the end of the
+  -- transaction, so one SELECT calling this repeatedly would otherwise
+  -- accumulate settings from earlier calls and compare nothing.
+  PERFORM set_config('enable_seqscan',    (mode = 'seq')::text,    true);
+  PERFORM set_config('enable_bitmapscan', (mode = 'bitmap')::text, true);
+  PERFORM set_config('enable_indexscan',  (mode = 'index')::text,  true);
   IF tre THEN
-    EXECUTE 'SELECT array_agg(id ORDER BY id) FROM rpx WHERE s %~~ tre_pattern($1, 0)'
+    EXECUTE 'SELECT array_agg(id) FROM (SELECT id FROM rpx WHERE s %~~ tre_pattern($1, 0)) m'
       INTO r USING pat;
   ELSE
-    EXECUTE 'SELECT array_agg(id ORDER BY id) FROM rpx WHERE s ~ $1'
+    EXECUTE 'SELECT array_agg(id) FROM (SELECT id FROM rpx WHERE s ~ $1) m'
       INTO r USING pat;
   END IF;
-  RETURN r;
+  RETURN (SELECT array_agg(x ORDER BY x) FROM unnest(r) x);
 END $$;
 
-SELECT p, rpx_rows(p, true, false) AS via_index, rpx_rows(p, false, false) AS via_seq,
-       rpx_rows(p, true, false) IS NOT DISTINCT FROM rpx_rows(p, false, false) AS agree,
-       rpx_rows(p, true, true) IS NOT DISTINCT FROM rpx_rows(p, false, true) AS agree_tre
+SELECT p, rpx_rows(p, 'seq', false) AS via_seq,
+       rpx_rows(p, 'bitmap', false) IS NOT DISTINCT FROM rpx_rows(p, 'seq', false) AS bitmap_ok,
+       rpx_rows(p, 'index', false) IS NOT DISTINCT FROM rpx_rows(p, 'seq', false) AS index_ok,
+       rpx_rows(p, 'bitmap', true) IS NOT DISTINCT FROM rpx_rows(p, 'seq', true) AS tre_bitmap_ok,
+       rpx_rows(p, 'index', true) IS NOT DISTINCT FROM rpx_rows(p, 'seq', true) AS tre_index_ok
   FROM pats ORDER BY p;
 
--- Index searches are counted: once per bitmap scan.
+-- Index searches are counted, once per scan, on both scan paths.
 SET enable_seqscan = off;
+SET enable_indexscan = off;
 CREATE FUNCTION rpx_searches(q text) RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE l text; out text := '';
@@ -71,6 +75,12 @@ END $$;
 SELECT current_setting('server_version_num')::int < 180000
        OR rpx_searches($$SELECT * FROM rpx WHERE s ~ 'ab+c'$$) = 'Index Searches: 1'
        AS bitmap_counts_search;
+RESET enable_indexscan;
+SET enable_bitmapscan = off;
+SELECT current_setting('server_version_num')::int < 180000
+       OR rpx_searches($$SELECT * FROM rpx WHERE s ~ 'ab+c'$$) = 'Index Searches: 1'
+       AS indexscan_counts_search;
+RESET enable_bitmapscan;
 RESET enable_seqscan;
 
 SELECT pg_stat_force_next_flush();

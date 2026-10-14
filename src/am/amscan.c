@@ -29,6 +29,7 @@
 #include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "nodes/tidbitmap.h"
+#include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "utils/elog.h"
 #include "utils/memutils.h"
@@ -1098,6 +1099,22 @@ pg_tre_surf_prefilter_rejects(IndexScanDesc scan, TreScanState *st)
     return rejects;
 }
 
+/*
+ * Count one index search, as every core AM does when it descends the index
+ * (pg_stat_user_indexes.idx_scan, and EXPLAIN ANALYZE's "Index Searches",
+ * PG 18+).  pg_tre never did, so EXPLAIN reported "Index Searches: 0" for
+ * scans that had read the index.
+ */
+static void
+count_index_search(IndexScanDesc scan)
+{
+    pgstat_count_index_scan(scan->indexRelation);
+#if PG_VERSION_NUM >= 180000
+    if (scan->instrument)
+        scan->instrument->nsearches++;
+#endif
+}
+
 int64
 pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
@@ -1111,6 +1128,8 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: amgetbitmap called without amrescan")));
+
+    count_index_search(scan);
 
     /*
      * SuRF prefilter: an anchored-prefix pattern whose leading trigram key
@@ -1661,7 +1680,10 @@ pg_tre_amgettuple(IndexScanDesc scan, ScanDirection dir)
                  errmsg("pg_tre: backward index scan not supported")));
 
     if (!st->knn_ready)
+    {
+        count_index_search(scan);
         knn_build(scan, st);
+    }
 
     if (st->knn_pos >= st->knn_n)
         return false;
