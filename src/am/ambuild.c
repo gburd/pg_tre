@@ -99,6 +99,7 @@ typedef struct BuildState
 
     double      heap_tuples;
     MemoryContext tmpctx;
+    MemoryContext rowctx;        /* per-heap-tuple scratch, reset per row */
 
     /*
      * Parallel build coordination.  NULL/absent for a serial build.
@@ -508,6 +509,7 @@ build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull,
                bool tupleIsAlive, void *state)
 {
     BuildState *bstate = (BuildState *) state;
+    MemoryContext oldcxt;
 
     /*
      * Heap scan can run for minutes on large relations; without an
@@ -518,6 +520,18 @@ build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull,
     CHECK_FOR_INTERRUPTS();
 
     /*
+     * Per-tuple memory, reset after every row (as nbtree and GIN do).
+     * extract_trigrams detoasts the value, and a compressed or out-of-line
+     * body is decompressed into CurrentMemoryContext -- before this, the
+     * statement's PortalContext, so every such row leaked its full text
+     * for the whole scan.  A 30 GB corpus with half its rows compressed
+     * grew the build backend by ~5 MB/s to tens of GB (issue #1).
+     * tuplesort_putdatum copies the key into the sort's own memory, so
+     * nothing allocated here outlives the row.
+     */
+    oldcxt = MemoryContextSwitchTo(bstate->rowctx);
+
+    /*
      * Phase 2: only index the first column (assume it's text).
      * Later phases handle multi-column and operator classes properly.
      */
@@ -525,6 +539,9 @@ build_callback(Relation index, ItemPointer tid, Datum *values, bool *isnull,
     {
         extract_trigrams(bstate, values[0], isnull[0], tid);
     }
+
+    MemoryContextSwitchTo(oldcxt);
+    MemoryContextReset(bstate->rowctx);
 
     bstate->heap_tuples += 1.0;
 }
@@ -787,6 +804,9 @@ pgtre_parallel_heapscan(PgTreLeader *leader, double *indtuples)
 static void
 pgtre_scan_and_sort(BuildState *bstate, bool progress)
 {
+    bstate->rowctx = AllocSetContextCreate(CurrentMemoryContext,
+                                           "pg_tre build per-row context",
+                                           ALLOCSET_DEFAULT_SIZES);
     if (bstate->pgtshared != NULL)
     {
         /* Parallel: scan our slice of the shared parallel scan. */
@@ -808,6 +828,8 @@ pgtre_scan_and_sort(BuildState *bstate, bool progress)
                                    bstate->indexInfo, true, progress,
                                    build_callback, bstate, NULL);
     }
+    MemoryContextDelete(bstate->rowctx);
+    bstate->rowctx = NULL;
 }
 
 /*
