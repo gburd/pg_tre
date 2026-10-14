@@ -44,7 +44,7 @@ psql:test/sql/regex_syntax_edges.sql:34: ERROR:  regex syntax error: unexpected 
 SELECT tre_parse_debug('a{~x}');
 psql:test/sql/regex_syntax_edges.sql:35: ERROR:  regex syntax error: expected digit in repetition count
 SELECT tre_parse_debug('a{,2}');
-psql:test/sql/regex_syntax_edges.sql:36: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:36: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('x[[:alpha');
 psql:test/sql/regex_syntax_edges.sql:37: ERROR:  regex syntax error: unterminated [: in bracket expression
 SELECT tre_parse_debug('x[[=e');
@@ -52,17 +52,17 @@ psql:test/sql/regex_syntax_edges.sql:38: ERROR:  regex syntax error: unterminate
 SELECT tre_parse_debug('x[[.e');
 psql:test/sql/regex_syntax_edges.sql:39: ERROR:  regex syntax error: unterminated [. in bracket expression
 SELECT tre_parse_debug('a{2');
-psql:test/sql/regex_syntax_edges.sql:40: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:40: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('a(');
-psql:test/sql/regex_syntax_edges.sql:41: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:41: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('[a-');
-psql:test/sql/regex_syntax_edges.sql:42: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:42: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('x[a[');
-psql:test/sql/regex_syntax_edges.sql:43: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:43: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('[a^b]');
-psql:test/sql/regex_syntax_edges.sql:44: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:44: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('[]^a]');
-psql:test/sql/regex_syntax_edges.sql:45: ERROR:  regex syntax error: 
+psql:test/sql/regex_syntax_edges.sql:45: ERROR:  regex syntax error: unsupported syntax
 SELECT tre_parse_debug('a{~1~}');
 psql:test/sql/regex_syntax_edges.sql:46: ERROR:  regex syntax error: unexpected character '~' inside {}
 SELECT tre_amatch('cafa', 'caf[[.a.]]', 0);
@@ -78,7 +78,7 @@ SELECT tre_parse_debug('x[[:al:pha:]]') IS NOT NULL AS tokenizer_accepts;
 SET enable_seqscan = off;
 SET
 SELECT id FROM rse WHERE s %~~ tre_pattern('x[[:alpha', 0);
-psql:test/sql/regex_syntax_edges.sql:51: ERROR:  pg_tre: invalid regex pattern: unterminated [: in bracket expression
+psql:test/sql/regex_syntax_edges.sql:51: ERROR:  invalid regular expression: Unknown character class name
 SELECT id FROM rse WHERE s ~ 'abc\';
 psql:test/sql/regex_syntax_edges.sql:52: ERROR:  invalid regular expression: invalid escape \ sequence
 RESET enable_seqscan;

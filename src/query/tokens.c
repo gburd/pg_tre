@@ -78,7 +78,76 @@ typedef struct TokenizerState
 	/* The current bracket held a [:class:], [=e=], [.c.] or \w-style
 	 * member, so its membership is collation-dependent: treat as '.'. */
 	bool        bracket_opaque;
+	/* A token queued by the previous call (0 = none); see lookarounds. */
+	int         pending;
 } TokenizerState;
+
+/*
+ * After a quantifier: skip a following '?' (lazy, "*?" "{2,5}?").  Lazy
+ * and greedy repetition match the same set of strings, which is all the
+ * index needs to know; without this "x*?" failed to parse on the index
+ * path only.
+ */
+static void
+skip_lazy(TokenizerState *ts)
+{
+	if (ts->pos < ts->len && ts->input[ts->pos] == '?')
+		ts->pos++;
+}
+
+/*
+ * ts->pos is just past "(?=", "(?!", "(?<=" or "(?<!".  Skip to the
+ * parenthesis that closes the group, honouring nesting, escapes and
+ * bracket expressions.  Returns false when the group never closes.
+ */
+static bool
+skip_group(TokenizerState *ts)
+{
+	int		depth = 1;
+	bool	in_bracket = false;
+
+	while (ts->pos < ts->len)
+	{
+		char	c = ts->input[ts->pos++];
+
+		if (c == '\\')
+		{
+			if (ts->pos < ts->len)
+				ts->pos++;
+		}
+		else if (in_bracket)
+		{
+			if (c == '[' && ts->pos < ts->len &&
+			    (ts->input[ts->pos] == ':' || ts->input[ts->pos] == '=' ||
+			     ts->input[ts->pos] == '.'))
+			{
+				/* [:class:] [=e=] [.c.]: skip to the closing "x]". */
+				char	delim = ts->input[ts->pos++];
+
+				while (ts->pos + 1 < ts->len &&
+				       !(ts->input[ts->pos] == delim &&
+				         ts->input[ts->pos + 1] == ']'))
+					ts->pos++;
+				ts->pos += 2;
+			}
+			else if (c == ']')
+				in_bracket = false;
+		}
+		else if (c == '[')
+		{
+			in_bracket = true;
+			if (ts->pos < ts->len && ts->input[ts->pos] == '^')
+				ts->pos++;
+			if (ts->pos < ts->len && ts->input[ts->pos] == ']')
+				ts->pos++;			/* ']' first is a member */
+		}
+		else if (c == '(')
+			depth++;
+		else if (c == ')' && --depth == 0)
+			return true;
+	}
+	return false;
+}
 
 /*
  * Initialize tokenizer state.
@@ -268,6 +337,14 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 		ts = (TokenizerState *) ctx->tokenizer_state;
 	}
 
+	if (ts->pending)
+	{
+		int		t = ts->pending;
+
+		ts->pending = 0;
+		return t;
+	}
+
 	/* EOF */
 	if (ts->pos >= ts->len)
 		return 0;
@@ -406,7 +483,10 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 		{
 			ts->brace_depth--;
 			if (ts->brace_depth == 0)
+			{
 				ts->mode = MODE_NORMAL;
+				skip_lazy(ts);
+			}
 			return TOK_RBRACE;
 		}
 		else if (c == ',')
@@ -449,12 +529,15 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 			return TOK_PIPE;
 
 		case '*':
+			skip_lazy(ts);
 			return TOK_STAR;
 
 		case '+':
+			skip_lazy(ts);
 			return TOK_PLUS;
 
 		case '?':
+			skip_lazy(ts);
 			return TOK_QUESTION;
 
 		case '(':
@@ -470,6 +553,41 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 			 */
 			if (ts->pos < ts->len && ts->input[ts->pos] == '?')
 			{
+				const char *g = ts->input + ts->pos + 1;
+				int		left = ts->len - ts->pos - 1;
+
+				/* "(?:...)": a group that does not capture. */
+				if (left >= 1 && g[0] == ':')
+				{
+					ts->pos += 2;
+					return TOK_LPAREN;
+				}
+
+				/*
+				 * Lookahead / lookbehind, "(?=" "(?!" "(?<=" "(?<!": a
+				 * zero-width test.  Skip the group and stand in ".?" --
+				 * every string the pattern matches also matches with the
+				 * test replaced by an optional character, so the trigrams
+				 * required by that stay sound, and the literals on either
+				 * side keep their own.  (TRE, behind %~~, has no
+				 * lookarounds; its recheck reports that.)
+				 */
+				if (left >= 1 && (g[0] == '=' || g[0] == '!' ||
+				                  (left >= 2 && g[0] == '<' &&
+				                   (g[1] == '=' || g[1] == '!'))))
+				{
+					ts->pos += (g[0] == '<') ? 3 : 2;
+					if (!skip_group(ts))
+					{
+						ctx->syntax_error = true;
+						snprintf(ctx->errmsg, sizeof(ctx->errmsg),
+								 "unterminated lookaround group");
+						return -1;
+					}
+					ts->pending = TOK_QUESTION;
+					return TOK_DOT;
+				}
+
 				ctx->force_always_true = true;
 				ts->pos = ts->len;      /* stop tokenizing */
 				return TOK_DOT;

@@ -63,4 +63,6 @@ classitem(A)     ::= LITERAL(C1) DASH LITERAL(C2).               { A = regex_ast
 
 %syntax_error {
     ctx->syntax_error = true;
+    if (ctx->errmsg[0] == '\0')
+        snprintf(ctx->errmsg, sizeof(ctx->errmsg), "unsupported syntax");
 }

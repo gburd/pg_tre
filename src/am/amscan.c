@@ -275,15 +275,28 @@ pg_tre_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
      * Extraction may still return always_true if the pattern defeats tiling
      * (too short, no literal runs, etc.); amgetbitmap handles that case. */
 
-    /* Parse regex into AST. */
+    /*
+     * Parse regex into AST.  This parser exists only to find trigrams; the
+     * recheck's engine (core regex for ~, TRE for %~~) is the authority on
+     * the pattern.  So when this parser does not understand a pattern it
+     * must not be the one to reject it: scan lossily and let the recheck
+     * match it, or raise that engine's own error.  Raising here made the
+     * same query fail or succeed depending on the plan, often with an
+     * empty message ("pg_tre: invalid regex pattern:").
+     */
     if (!tre_parse_regex(&st->parse_ctx, pattern_str, pattern_len))
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
-                 errmsg("pg_tre: invalid regex pattern: %s",
-                        st->parse_ctx.errmsg)));
-
+    {
+        ereport(DEBUG1,
+                (errmsg("pg_tre: no trigrams for pattern, scanning lossily: %s",
+                        st->parse_ctx.errmsg[0] ? st->parse_ctx.errmsg
+                                                : "unsupported syntax")));
+        memset(&st->q, 0, sizeof(st->q));
+        st->q.always_true = true;
+        st->q.global_max_cost = max_cost;
+        st->q.mode = TRIGRAM_QUERY_CNF;
+    }
     /* Extract trigram query (now handles k > 0 via tiling). */
-    if (!regex_extract_query(&st->parse_ctx, max_cost, &st->q))
+    else if (!regex_extract_query(&st->parse_ctx, max_cost, &st->q))
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("pg_tre: trigram extraction failed")));

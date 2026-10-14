@@ -1,0 +1,116 @@
+-- test/sql/regex_groups_index.sql
+--
+-- Patterns core's regex accepts must work through the index, with the same
+-- rows as a sequential scan, and with trigrams where the pattern has them.
+--
+-- pg_tre's own pattern parser exists only to find trigrams for the index;
+-- the recheck's engine (core regex for ~, TRE for %~~) decides matches.
+-- Before 4.3.1 that parser rejected patterns it did not know -- lazy
+-- quantifiers ('x*?'), empty alternatives ('(|a)'), director prefixes
+-- ('***='), '{,3}' -- with "pg_tre: invalid regex pattern:" and an empty
+-- message, only on the index path.  Lookarounds and '(?:...)' were scanned
+-- with no trigrams at all.  Reported by depesz for '(?<=e.)aa[bc]c[b-d]'.
+-- Now: '(?:X)' is a group, a lookaround stands in for an optional
+-- character, a lazy quantifier is its greedy twin, and anything else the
+-- parser cannot read is scanned lossily and left to the recheck.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/regex_groups_index.sql:17: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+SET client_min_messages = warning;
+SET
+DROP TABLE IF EXISTS rgx;
+DROP TABLE
+CREATE TABLE rgx (id int, s text);
+CREATE TABLE
+INSERT INTO rgx VALUES
+  (1, 'xe.aacbz'), (2, 'xf.aacbz'), (3, 'the nation'), (4, 'motion'),
+  (5, 'fooxbar'), (6, 'foo bar'), (7, '{,3}'), (8, 'a{,3}b'),
+  (9, 'tion'), (10, 'ab'), (11, 'abc)def'), (12, 'xx(ab'),
+  (13, '***=lit'), (14, 'aaa'), (15, 'nation-wide');
+INSERT 0 15
+INSERT INTO rgx SELECT g, 'filler ' || g FROM generate_series(100, 1100) g;
+INSERT 0 1001
+CREATE INDEX rgx_tre ON rgx USING tre (s);
+CREATE INDEX
+ANALYZE rgx;
+ANALYZE
+CREATE TEMP TABLE pats (p text);
+CREATE TABLE
+INSERT INTO pats VALUES
+  ('(?<=e.)aa[bc]c[b-d]'), ('(?<=e\.)aac'), ('(?<!f.)aacb'),
+  ('(?=tion)tio'), ('na(?=tion)tion'), ('(?!x)motion'), ('mo(?!x)tion'),
+  ('(?<=[a-z])ation'), ('(?<=(n|m))ation'), ('foo(?=[x ])'),
+  ('(?:na)tion'), ('(?:fo)+o.bar'), ('(?:a|b)c\)def'),
+  ('x*?tion'), ('fo+?x'), ('ab{1,3}?'), ('tio??n'),
+  ('a{,3}'), ('()tion'), ('(|a)tion'), ('a||b'), ('***=lit'), ('***:tion'),
+  ('(?i)TION');
+INSERT 0 24
+-- mode: 'bitmap', 'index' (plain Index Scan) or 'seq'.
+CREATE FUNCTION rgx_rows(pat text, mode text) RETURNS int[]
+LANGUAGE plpgsql AS $$
+DECLARE r int[];
+BEGIN
+  PERFORM set_config('enable_seqscan',    (mode = 'seq')::text,    true);
+  PERFORM set_config('enable_bitmapscan', (mode = 'bitmap')::text, true);
+  PERFORM set_config('enable_indexscan',  (mode = 'index')::text,  true);
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM rgx WHERE s ~ $1'
+    INTO r USING pat;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+SELECT p, cardinality(rgx_rows(p, 'seq')) AS n_rows,
+       rgx_rows(p, 'bitmap') IS NOT DISTINCT FROM rgx_rows(p, 'seq') AS bitmap_ok,
+       rgx_rows(p, 'index') IS NOT DISTINCT FROM rgx_rows(p, 'seq') AS index_ok
+  FROM pats ORDER BY p;
+          p          | n_rows | bitmap_ok | index_ok 
+---------------------+--------+-----------+----------
+ ()tion              |      4 | t         | t
+ (?!x)motion         |      1 | t         | t
+ (?:a|b)c\)def       |      1 | t         | t
+ (?:fo)+o.bar        |      2 | t         | t
+ (?:na)tion          |      2 | t         | t
+ (?<!f.)aacb         |      1 | t         | t
+ (?<=(n|m))ation     |      2 | t         | t
+ (?<=[a-z])ation     |      2 | t         | t
+ (?<=e.)aa[bc]c[b-d] |        | t         | t
+ (?<=e\.)aac         |      1 | t         | t
+ (?=tion)tio         |      4 | t         | t
+ (?i)TION            |      4 | t         | t
+ (|a)tion            |      4 | t         | t
+ ***:tion            |      4 | t         | t
+ ***=lit             |      1 | t         | t
+ ab{1,3}?            |      3 | t         | t
+ a{,3}               |      1 | t         | t
+ a||b                |   1016 | t         | t
+ fo+?x               |      1 | t         | t
+ foo(?=[x ])         |      2 | t         | t
+ mo(?!x)tion         |      1 | t         | t
+ na(?=tion)tion      |      2 | t         | t
+ tio??n              |      4 | t         | t
+ x*?tion             |      4 | t         | t
+(24 rows)
+
+-- Trigrams are still extracted around a lookaround or (?:...): the index
+-- narrows the scan instead of reading every heap block.
+SELECT p, tre_extract_debug(p) NOT LIKE '%ALWAYS_TRUE%' AS has_trigrams
+  FROM (VALUES ('(?<=e\.)aacb'), ('na(?=tion)tion'), ('(?:na)tion'),
+               ('x*?tion')) v(p);
+       p        | has_trigrams 
+----------------+--------------
+ (?<=e\.)aacb   | t
+ na(?=tion)tion | t
+ (?:na)tion     | t
+ x*?tion        | t
+(4 rows)
+
+-- A pattern no engine accepts still fails, with the engine's message.
+SET enable_seqscan = off;
+SET
+SELECT count(*) FROM rgx WHERE s ~ 'a(b';
+psql:test/sql/regex_groups_index.sql:67: ERROR:  invalid regular expression: parentheses () not balanced
+SELECT count(*) FROM rgx WHERE s %~~ tre_pattern('(?<=e.)aac', 0);
+psql:test/sql/regex_groups_index.sql:68: ERROR:  invalid regular expression: Invalid regexp
+RESET enable_seqscan;
+RESET
+DROP TABLE rgx;
+DROP TABLE
