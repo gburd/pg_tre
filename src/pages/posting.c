@@ -624,6 +624,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             int tid_idx = 0;
             BlockNumber right_link = InvalidBlockNumber;
             BlockNumber leftmost_blk = InvalidBlockNumber;
+            int prev_leaf = 0;
 
             /* Process TIDs right-to-left, building leaves from the end. */
             while (tid_idx < n_tids)
@@ -684,7 +685,26 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 CHECK_FOR_INTERRUPTS();
                 {
                     Size whole_sz;
-                    SLICE_SIZE_OF(avail, whole_sz);
+                    /*
+                     * Probe a window, not the whole remainder: encoding
+                     * all `avail` TIDs for every leaf made a posting of
+                     * N TIDs cost O(N^2 / leaf) -- hours of CREATE INDEX
+                     * on hot trigrams of a large table (issue #1).  The
+                     * window starts at twice the previous leaf (the
+                     * density of adjacent slices is similar) and doubles
+                     * while the whole window still fits, so each leaf
+                     * costs O(leaf) encodes; the first leaf of a posting
+                     * still probes everything once.
+                     */
+                    int win = (prev_leaf > 0 && prev_leaf < avail / 2)
+                        ? prev_leaf * 2 : avail;
+                    for (;;)
+                    {
+                        SLICE_SIZE_OF(win, whole_sz);
+                        if (whole_sz > budget || win == avail)
+                            break;
+                        win = (win < avail / 2) ? win * 2 : avail;
+                    }
                     if (whole_sz <= budget)
                     {
                         /* Everything left fits in one leaf. */
@@ -701,24 +721,28 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                          * For a uniform-density slice this converges in
                          * 1-3 probes vs ~log2(avail) for binary search.
                          */
-                        int est = (int) (((double) avail * (double) budget
+                        int est = (int) (((double) win * (double) budget
                                           / (double) whole_sz) * 0.95);
                         int len;
                         Size esz;
                         if (est < 1)
                             est = 1;
-                        if (est > avail)
-                            est = avail;
+                        if (est >= win)
+                            est = win - 1;
+                        if (est < 1)
+                            est = 1;
                         len = est;
                         SLICE_SIZE_OF(len, esz);
                         if (esz <= budget)
                         {
-                            /* Grow geometrically while it still fits. */
-                            while (len < avail)
+                            /* Grow while it still fits; win overflows. */
+                            while (len < win - 1)
                             {
-                                int step = (avail - len + 7) / 8;
+                                int step = (win - len + 7) / 8;
                                 int nlen = len + step;
                                 Size nsz;
+                                if (nlen >= win)
+                                    nlen = win - 1;
                                 CHECK_FOR_INTERRUPTS();
                                 SLICE_SIZE_OF(nlen, nsz);
                                 if (nsz > budget)
@@ -792,6 +816,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 leftmost_blk = leaf_blk;
                 right_link = leaf_blk;
                 tid_idx += tids_in_leaf;
+                prev_leaf = tids_in_leaf;
             }
 
             /* Cleanup original buffers */
