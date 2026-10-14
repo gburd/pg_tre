@@ -616,161 +616,80 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             return blk;
         }
 
-        /* Multi-leaf case: partition TIDs and write right-to-left chain.
-         * Each leaf is binary-searched to the largest TID prefix that
-         * still fits the page budget. */
+        /* Multi-leaf case: partition TIDs and write right-to-left chain,
+         * each leaf the longest TID prefix that fits the page budget. */
         {
             int n_tids = b->n_tids;
             int tid_idx = 0;
             BlockNumber right_link = InvalidBlockNumber;
             BlockNumber leftmost_blk = InvalidBlockNumber;
-            int prev_leaf = 0;
 
             /* Process TIDs right-to-left, building leaves from the end. */
             while (tid_idx < n_tids)
             {
                 /*
                  * Size each leaf by SERIALIZED bytes, not a fixed TID
-                 * count.  The old heuristic (budget / 8 bytes-per-TID)
-                 * catastrophically under-filled leaves for well-
-                 * compressing postings: a dense trigram's TIDs RLE-
-                 * compress to <1 B/TID, so 710 TIDs occupied ~190 B of
-                 * an 8 KB page (~2-6% full) and a high-cardinality
-                 * trigram sprawled across dozens of near-empty leaves --
-                 * the ~50x density blowup past ~10k rows in the v2.0.2
-                 * field report.  b->tids is ascending (tuplesort order),
-                 * so each leaf is a contiguous, RLE-friendly prefix; we
-                 * binary-search its length below.
-                 */
-                /*
-                 * Pick the largest contiguous TID prefix whose
-                 * SERIALIZED sparsemap stays within the page budget.
+                 * count: dense trigrams RLE-compress to <1 B/TID, so a
+                 * fixed estimate under-fills leaves badly (the v2.0.2
+                 * density blowup).  b->tids is ascending (tuplesort
+                 * order), so each leaf is a contiguous prefix of what is
+                 * left.
                  *
-                 * We must size by serialized bytes, not a fixed TID
-                 * count: a dense trigram RLE-compresses to <1 B/TID, so
-                 * a fixed estimate catastrophically under-fills (the
-                 * v2.0.2 density blowup).  But probing incrementally
-                 * with per-TID sm_add_grow is O(M^2) -- sm_add_grow
-                 * re-walks the chunk directory from the front on every
-                 * add (the 100k-row CREATE INDEX hang).  Instead we
-                 * estimate the prefix length proportionally
-                 * (bytes ~ k*tids for a contiguous ascending slice) and
-                 * correct with a few one-shot sm_add_many_grow probes --
-                 * far fewer than a full binary search's ~log2(avail).
+                 * Fill greedily: append TIDs through a cursor (O(1) each
+                 * at the tail) to a map whose buffer is exactly one page
+                 * budget; the first TID that makes it grow does not fit
+                 * and ends the leaf.  One pass per leaf.  The previous
+                 * scheme re-encoded candidate prefixes with
+                 * sm_add_many_grow -- first the whole remainder of the
+                 * posting for every leaf, O(N^2 / leaf) for a posting of
+                 * N TIDs, which kept a 30 GB build (issue #1) in this
+                 * loop for hours.
                  */
                 int avail = n_tids - tid_idx;
-                int tids_in_leaf;
-                uint8 *slice_bytes;
-                Size slice_sz;
-
-                /* slice_size_of(len): serialized bytes of the first len
-                 * TIDs starting at tid_idx, via a one-shot bulk load. */
-#define SLICE_SIZE_OF(len_, out_sz_)                                       \
-                do {                                                      \
-                    sm_t *probe = sm_create((size_t) (len_) * 4 + 1024);  \
-                    if (probe == NULL)                                    \
-                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),   \
-                            errmsg("pg_tre: failed to allocate slice sparsemap"))); \
-                    if (!sm_add_many_grow(&probe, (const uint64_t *) b->tids + tid_idx, \
-                                          (size_t) (len_)))               \
-                    {                                                     \
-                        sm_free(probe);                                   \
-                        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), \
-                            errmsg("pg_tre: multi-leaf slice sm_add_many_grow failed (len=%d)", (len_)))); \
-                    }                                                     \
-                    (out_sz_) = sm_get_size(probe);                       \
-                    sm_free(probe);                                       \
-                } while (0)
+                int tids_in_leaf = 0;
+                uint8 *slice_bytes = NULL;
+                Size slice_sz = 0;
 
                 CHECK_FOR_INTERRUPTS();
                 {
-                    Size whole_sz;
-                    /*
-                     * Probe a window, not the whole remainder: encoding
-                     * all `avail` TIDs for every leaf made a posting of
-                     * N TIDs cost O(N^2 / leaf) -- hours of CREATE INDEX
-                     * on hot trigrams of a large table (issue #1).  The
-                     * window starts at twice the previous leaf (the
-                     * density of adjacent slices is similar) and doubles
-                     * while the whole window still fits, so each leaf
-                     * costs O(leaf) encodes; the first leaf of a posting
-                     * still probes everything once.
-                     */
-                    int win = (prev_leaf > 0 && prev_leaf < avail / 2)
-                        ? prev_leaf * 2 : avail;
-                    for (;;)
+                    sm_t       *fill = sm_create(budget);
+                    sm_cursor_t cur = SM_CURSOR_INIT;
+                    size_t      cap0;
+                    bool        oom = false;
+
+                    if (fill == NULL)
+                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                            errmsg("pg_tre: failed to allocate leaf sparsemap")));
+                    cap0 = sm_get_capacity(fill);
+                    while (tids_in_leaf < avail)
                     {
-                        SLICE_SIZE_OF(win, whole_sz);
-                        if (whole_sz > budget || win == avail)
+                        if (sm_add_grow_cursor(&fill,
+                                               (uint64_t) b->tids[tid_idx + tids_in_leaf],
+                                               &cur) == SM_IDX_MAX)
+                        {
+                            oom = true;
                             break;
-                        win = (win < avail / 2) ? win * 2 : avail;
-                    }
-                    if (whole_sz <= budget)
-                    {
-                        /* Everything left fits in one leaf. */
-                        tids_in_leaf = avail;
-                    }
-                    else
-                    {
-                        /*
-                         * Proportional estimate: bytes ~ k*tids, so
-                         * len ~ avail * budget / whole_sz.  Aim a touch
-                         * under (95%) to land at-or-below budget on the
-                         * first probe, then correct: grow while the
-                         * slice still fits, shrink while it overshoots.
-                         * For a uniform-density slice this converges in
-                         * 1-3 probes vs ~log2(avail) for binary search.
-                         */
-                        int est = (int) (((double) win * (double) budget
-                                          / (double) whole_sz) * 0.95);
-                        int len;
-                        Size esz;
-                        if (est < 1)
-                            est = 1;
-                        if (est >= win)
-                            est = win - 1;
-                        if (est < 1)
-                            est = 1;
-                        len = est;
-                        SLICE_SIZE_OF(len, esz);
-                        if (esz <= budget)
-                        {
-                            /* Grow while it still fits; win overflows. */
-                            while (len < win - 1)
-                            {
-                                int step = (win - len + 7) / 8;
-                                int nlen = len + step;
-                                Size nsz;
-                                if (nlen >= win)
-                                    nlen = win - 1;
-                                CHECK_FOR_INTERRUPTS();
-                                SLICE_SIZE_OF(nlen, nsz);
-                                if (nsz > budget)
-                                    break;
-                                len = nlen;
-                            }
                         }
-                        else
-                        {
-                            /* Shrink by 1/8ths until it fits. */
-                            while (len > 1)
-                            {
-                                int step = (len + 7) / 8;
-                                len -= step;
-                                if (len < 1)
-                                    len = 1;
-                                CHECK_FOR_INTERRUPTS();
-                                SLICE_SIZE_OF(len, esz);
-                                if (esz <= budget)
-                                    break;
-                            }
-                        }
-                        tids_in_leaf = len;
+                        if (sm_get_capacity(fill) > cap0)
+                            break;      /* this TID overflowed the page */
+                        tids_in_leaf++;
                     }
+                    sm_free(fill);
+                    if (oom)
+                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+                            errmsg("pg_tre: failed to grow leaf sparsemap")));
                 }
                 if (tids_in_leaf < 1)
                     tids_in_leaf = 1;
 
+                /*
+                 * Encode the leaf exactly as before.  The capacity test is
+                 * conservative (it keeps slack for the chunk-count
+                 * header), so this fits; if a pathological input ever
+                 * says otherwise, give the leaf fewer TIDs rather than
+                 * fail the build.
+                 */
+                for (;;)
                 {
                     sm_t *exact = sm_create((size_t) tids_in_leaf * 4 + 1024);
                     if (exact == NULL)
@@ -785,11 +704,18 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                                    tids_in_leaf)));
                     }
                     slice_sz = sm_get_size(exact);
-                    slice_bytes = (uint8 *) palloc(slice_sz + 16);
-                    memcpy(slice_bytes, sm_get_data(exact), slice_sz);
+                    if (slice_sz <= budget || tids_in_leaf == 1)
+                    {
+                        slice_bytes = (uint8 *) palloc(slice_sz + 16);
+                        memcpy(slice_bytes, sm_get_data(exact), slice_sz);
+                        sm_free(exact);
+                        break;
+                    }
                     sm_free(exact);
+                    tids_in_leaf -= (tids_in_leaf + 7) / 8;
+                    if (tids_in_leaf < 1)
+                        tids_in_leaf = 1;
                 }
-#undef SLICE_SIZE_OF
                 memset(slice_bytes + slice_sz, 0, 16);
 
                 /* Slice is bounded <= budget by construction above. */
@@ -816,7 +742,6 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 leftmost_blk = leaf_blk;
                 right_link = leaf_blk;
                 tid_idx += tids_in_leaf;
-                prev_leaf = tids_in_leaf;
             }
 
             /* Cleanup original buffers */
