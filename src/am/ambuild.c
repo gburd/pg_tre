@@ -1,25 +1,16 @@
 /*
- * src/am/ambuild.c - index build phase.
+ * src/am/ambuild.c - index build.
  *
- * Phase 2: in-memory sort-based bulk build.
- *
- * Algorithm:
- *   1. Initialize empty meta page
- *   2. Scan heap, extract byte trigrams from indexed text column
- *   3. Hash each trigram to uint64, accumulate (hash, TID) in memory
- *   4. Sort by (hash, TID) using qsort
- *   5. For each run of same hash:
- *      - Accumulate TIDs into a PgTrePostingBuilder
- *      - Call finish() to get inline blob or posting root
- *      - Record (hash, root|inline) in memory
- *   6. Bulk-load upper tree from sorted (hash, root) list
- *   7. Update meta page with root_upper and stats
- *
- * For Phase 2, we skip:
- *   - Positions and tuple blooms (Phase 5)
- *   - Range summary tree (Phase 5)
- *   - Parallel build (Phase 2 optional; Phase 8 refinement)
- *   - Disk-based external sort (Phase 8 for large builds)
+ *   1. Initialize the meta page.
+ *   2. Scan the heap (in parallel when workers are available), extract the
+ *      codepoint trigrams of each row, and feed (trigram_hash, tid, key)
+ *      to a disk-spillable tuplesort.
+ *   3. Read the sorted stream back and write one posting tree per distinct
+ *      trigram.  A parallel build routes each trigram to one of several
+ *      hash-range sorts and builds the ranges on every participant at once
+ *      (doc/design/parallel-posting-build.md).
+ *   4. Bulk-load the upper tree from the (hash, root|inline) list in hash
+ *      order, build the SuRF prefix filter, and update the meta page.
  */
 
 #include "postgres.h"
@@ -40,8 +31,10 @@
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "optimizer/optimizer.h"
+#include "storage/buffile.h"
 #include "storage/bufmgr.h"
 #include "storage/condition_variable.h"
+#include "storage/sharedfileset.h"
 #include "tcop/tcopprot.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -97,6 +90,15 @@ typedef struct BuildState
     Tuplesortstate *sortstate;
     int64       n_emitted;       /* total tuples put into the sort */
 
+    /*
+     * Parallel participant: one worker-role sort per trigram-hash range
+     * (see doc/design/parallel-posting-build.md); a trigram goes to sort
+     * hash / range_width.  nranges == 0 means "use sortstate".
+     */
+    Tuplesortstate **rsorts;
+    int         nranges;
+    uint64      range_width;
+
     double      heap_tuples;
     MemoryContext tmpctx;
     MemoryContext rowctx;        /* per-heap-tuple scratch, reset per row */
@@ -129,8 +131,19 @@ typedef struct PgTreShared
     slock_t     mutex;
     ConditionVariable workersdonecv;
 
+    /* Trigram-hash ranges: one shared sort each, sortstride bytes apart. */
+    int         nranges;
+    Size        sortstride;
+
+    /* Per-range results (posting list + SuRF keys), one BufFile each. */
+    SharedFileSet resultfs;
+    ConditionVariable rangesdonecv;
+
     /* Mutable state, protected by mutex. */
     int         nparticipantsdone;
+    int         nparticipants;   /* leader + launched workers; 0 = not yet known */
+    int         nextrange;       /* next range to claim */
+    int         rangesdone;
     double      reltuples;       /* summed heap tuples scanned */
     double      indtuples;       /* summed trigram tuples emitted */
 
@@ -149,6 +162,18 @@ typedef struct PgTreShared
 #define PG_TRE_BUILD_KEY_BUFFER_USAGE   UINT64CONST(0xB000000000000005)
 
 /*
+ * Hash ranges per planned participant in a parallel build.  Each range is a
+ * sort per participant, so more ranges means smaller sort memory each.
+ * ponytail: fixed ratio; size ranges from a hash sample if skew at scale
+ * proves this too coarse.
+ */
+#define PG_TRE_RANGES_PER_PARTICIPANT 4
+
+/* The shared sort of hash range r; ranges are laid out stride bytes apart. */
+#define RANGE_SORT(base, stride, r) \
+    ((Sharedsort *) ((char *) (base) + (Size) (r) * (stride)))
+
+/*
  * Leader-private state for a parallel build: the ParallelContext plus
  * pointers into the DSM segment.  Mirrors nbtree's BTLeader.
  */
@@ -157,7 +182,8 @@ typedef struct PgTreLeader
     ParallelContext *pcxt;
     int              nparticipanttuplesorts;
     PgTreShared     *pgtshared;
-    Sharedsort      *sharedsort;
+    Sharedsort      *sharedsort;     /* range 0; others sortstride apart */
+    int              nranges;
     Snapshot         snapshot;
     WalUsage        *walusage;
     BufferUsage     *bufferusage;
@@ -489,7 +515,9 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
                          pg_tre_trigram_key_cp(ring));
             SET_VARSIZE(&wrap, VARHDRSZ + PG_TRE_SORTKEY_LEN);
             memcpy(wrap.data, key, PG_TRE_SORTKEY_LEN);
-            tuplesort_putdatum(bstate->sortstate,
+            tuplesort_putdatum(bstate->nranges > 0
+                               ? bstate->rsorts[trigram_hash / bstate->range_width]
+                               : bstate->sortstate,
                                PointerGetDatum(&wrap), false);
 
         skip_emit:
@@ -567,15 +595,174 @@ upper_iter(void *ctx, uint64 *hash, BlockNumber *root,
     return true;
 }
 
+/*
+ * Output of the posting phase for one stream (the whole sort in a serial
+ * build, one hash range in a parallel one): the (hash, root|inline) list
+ * the upper tree is built from, in ascending hash order, and the SuRF keys
+ * of every distinct trigram (skipped ones included).
+ */
+typedef struct PostingOut
+{
+    PostingAccum *accums;
+    int         n_accums;
+    int         accums_alloced;
+    uint64     *surf_keys;
+    uint32      surf_n;
+    uint32      surf_cap;
+    int         n_skipped;      /* below pg_tre.min_trigram_freq */
+} PostingOut;
+
+static void
+posting_out_init(PostingOut *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->accums_alloced = 1024;
+    out->accums = (PostingAccum *) palloc(out->accums_alloced * sizeof(PostingAccum));
+}
+
+static void
+posting_out_add(PostingOut *out, uint64 hash, BlockNumber root,
+                const uint8 *inline_data, Size inline_bytes)
+{
+    if (out->n_accums >= out->accums_alloced)
+    {
+        out->accums_alloced *= 2;
+        out->accums = (PostingAccum *)
+            repalloc_huge(out->accums,
+                          (Size) out->accums_alloced * sizeof(PostingAccum));
+    }
+    out->accums[out->n_accums].trigram_hash = hash;
+    out->accums[out->n_accums].root = root;
+    out->accums[out->n_accums].inline_data = inline_data;
+    out->accums[out->n_accums].inline_bytes = inline_bytes;
+    out->n_accums++;
+}
+
+static void
+posting_out_add_key(PostingOut *out, uint64 key)
+{
+    if (out->surf_n >= out->surf_cap)
+    {
+        out->surf_cap = out->surf_cap ? out->surf_cap * 2 : 1024;
+        out->surf_keys = out->surf_keys
+            ? (uint64 *) repalloc_huge(out->surf_keys,
+                                       (Size) out->surf_cap * sizeof(uint64))
+            : (uint64 *) palloc(out->surf_cap * sizeof(uint64));
+    }
+    out->surf_keys[out->surf_n++] = key;
+}
+
+/* Write one trigram's posting (or skip it) and record the result. */
+static void
+finish_posting(PostingOut *out, PgTrePostingBuilder *b, uint64 hash,
+               PgTreCoalescedWriter *cw)
+{
+    const uint8 *inline_data;
+    Size        inline_bytes;
+    BlockNumber root;
+    bool        coalesced;
+    BlockNumber cblk;
+    uint16      cslot;
+
+    /*
+     * Cardinality-aware build (1.2.1+): trigrams in fewer than
+     * pg_tre.min_trigram_freq rows are not useful filters; the recheck
+     * handles correctness.
+     */
+    if (pg_tre_min_trigram_freq > 1 &&
+        pg_tre_posting_build_n_tids(b) < pg_tre_min_trigram_freq)
+    {
+        pg_tre_posting_build_free(b);
+        out->n_skipped++;
+        return;
+    }
+
+    root = pg_tre_posting_build_finish_ex(b, &inline_data, &inline_bytes,
+                                          cw, &coalesced, &cblk, &cslot);
+    pg_tre_posting_build_free(b);
+    if (coalesced)
+        posting_out_add(out, hash, cblk, NULL, PG_TRE_COALESCED_FLAG | cslot);
+    else
+        posting_out_add(out, hash, root, inline_data, inline_bytes);
+}
+
+/*
+ * Step 5: read a sorted (trigram_hash, tid, key) stream and write one
+ * posting tree per distinct trigram.  Allocates in the current context.
+ */
+static void
+build_postings(Tuplesortstate *sortstate, Relation index, PostingOut *out)
+{
+    PgTrePostingBuilder *builder = NULL;
+    PgTreCoalescedWriter *cw = NULL;
+    uint64      cur_hash = 0;
+    uint64      last_tid = UINT64_MAX;      /* none yet */
+    Datum       sort_datum;
+    bool        sort_isnull;
+
+    /*
+     * v2.0 posting-page coalescing (off by default): medium postings pack
+     * onto shared coalesced pages instead of one dedicated leaf each.
+     */
+    if (pg_tre_coalesce_enable)
+        cw = pg_tre_coalesced_writer_begin(index);
+
+    while (tuplesort_getdatum(sortstate, true, false,
+                              &sort_datum, &sort_isnull, NULL))
+    {
+        bytea      *kb = DatumGetByteaPP(sort_datum);
+        uint64      hash;
+        uint64      tid;
+        uint64      key;
+
+        /*
+         * Allow CREATE INDEX [CONCURRENTLY] to be cancelled: on large heaps
+         * this readout runs for minutes.
+         */
+        CHECK_FOR_INTERRUPTS();
+
+        Assert(!sort_isnull);
+        Assert(VARSIZE_ANY_EXHDR(kb) == PG_TRE_SORTKEY_LEN);
+        decode_entry((const uint8 *) VARDATA_ANY(kb), &hash, &tid, &key);
+
+        if (builder == NULL || hash != cur_hash)
+        {
+            if (builder != NULL)
+                finish_posting(out, builder, cur_hash, cw);
+            cur_hash = hash;
+            /* A trigram_hash identifies a trigram: one SuRF key each. */
+            posting_out_add_key(out, key);
+            builder = pg_tre_posting_build_begin(index, hash,
+                                                 false /* no payload (3.0.0) */);
+            last_tid = UINT64_MAX;
+        }
+        if (tid != last_tid)
+        {
+            ItemPointerData itid;
+
+            pg_tre_unpack_tid(tid, &itid);
+            pg_tre_posting_build_add(builder, &itid, NULL, 0, NULL);
+            last_tid = tid;
+        }
+    }
+    if (builder != NULL)
+        finish_posting(out, builder, cur_hash, cw);
+
+    /* Flush the coalesced writer's last partial page so all coalesced
+     * pages exist before the upper-tree bulkload references them. */
+    if (cw != NULL)
+        pg_tre_coalesced_writer_finish(cw);
+}
+
 /* ---------------------------------------------------------------------
  * Parallel build support.
  *
- * The parallelizable phase is the heap scan + trigram extraction + sort
- * ingestion.  All participants (leader + workers) feed one coordinated
- * tuplesort; after every participant finishes its portion, the leader
- * performs the final merge, then serially builds the posting trees,
- * upper tree, and range tier from the fully-sorted stream.  This mirrors
- * nbtree's _bt_begin_parallel / _bt_parallel_scan_and_sort split.
+ * All participants (leader + workers) scan a slice of the heap and feed
+ * one worker-role sort per trigram-hash range.  Once every participant has
+ * sorted, each claims ranges one at a time and builds their posting trees;
+ * the leader then reads the ranges' results back in hash order for the
+ * upper tree and SuRF.  The launch/teardown follows nbtree's
+ * _bt_begin_parallel / _bt_parallel_scan_and_sort.
  * ------------------------------------------------------------------- */
 
 /* Forward declarations. */
@@ -604,6 +791,9 @@ pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
     char            *sharedquery;
     int              querylen;
     int              scantuplesortstates;
+    int              nranges;
+    Size             sortstride;
+    int              r;
 
     EnterParallelMode();
     Assert(request > 0);
@@ -643,8 +833,20 @@ pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
                                                      snapshot));
     shm_toc_estimate_chunk(&pcxt->estimator, estshared);
 
-    /* Tuplesort coordination object. */
-    estsort = tuplesort_estimate_shared(scantuplesortstates);
+    /*
+     * Tuplesort coordination: one shared sort per trigram-hash range, so
+     * the posting phase can build ranges on every participant at once.
+     * Participants claim ranges as they go, so a participant that never
+     * launches just leaves its share to the others.  Trigram hashes are
+     * far from uniform in their high bits, and the TID volume per trigram
+     * is Zipf-skewed, so equal hash ranges are unequal work: with one
+     * range per participant the largest kept the posting phase waiting
+     * on one core.  PG_TRE_RANGES_PER_PARTICIPANT finer ranges, claimed
+     * dynamically, even that out.
+     */
+    nranges = scantuplesortstates * PG_TRE_RANGES_PER_PARTICIPANT;
+    sortstride = BUFFERALIGN(tuplesort_estimate_shared(scantuplesortstates));
+    estsort = mul_size(sortstride, nranges);
     shm_toc_estimate_chunk(&pcxt->estimator, estsort);
 
     shm_toc_estimate_keys(&pcxt->estimator, 2);
@@ -686,6 +888,13 @@ pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
     SpinLockInit(&pgtshared->mutex);
     ConditionVariableInit(&pgtshared->workersdonecv);
     pgtshared->nparticipantsdone = 0;
+    pgtshared->nparticipants = 0;
+    pgtshared->nranges = nranges;
+    pgtshared->sortstride = sortstride;
+    pgtshared->nextrange = 0;
+    pgtshared->rangesdone = 0;
+    SharedFileSetInit(&pgtshared->resultfs, pcxt->seg);
+    ConditionVariableInit(&pgtshared->rangesdonecv);
     pgtshared->reltuples = 0.0;
     pgtshared->indtuples = 0.0;
 
@@ -697,7 +906,9 @@ pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
 
     /* Set up the shared tuplesort coordination object. */
     sharedsort = (Sharedsort *) shm_toc_allocate(pcxt->toc, estsort);
-    tuplesort_initialize_shared(sharedsort, scantuplesortstates, pcxt->seg);
+    for (r = 0; r < nranges; r++)
+        tuplesort_initialize_shared(RANGE_SORT(sharedsort, sortstride, r),
+                                    scantuplesortstates, pcxt->seg);
     shm_toc_insert(pcxt->toc, PG_TRE_BUILD_KEY_TUPLESORT, sharedsort);
 
     /* Store the query text. */
@@ -723,6 +934,7 @@ pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
     leader->nparticipanttuplesorts = pcxt->nworkers_launched + 1;
     leader->pgtshared = pgtshared;
     leader->sharedsort = sharedsort;
+    leader->nranges = nranges;
     leader->snapshot = snapshot;
     leader->walusage = walusage;
     leader->bufferusage = bufferusage;
@@ -733,6 +945,11 @@ pgtre_begin_parallel(BuildState *bstate, bool isconcurrent, int request)
         pgtre_end_parallel(leader);
         return NULL;
     }
+
+    /* Participants may only claim ranges once this is known. */
+    SpinLockAcquire(&pgtshared->mutex);
+    pgtshared->nparticipants = leader->nparticipanttuplesorts;
+    SpinLockRelease(&pgtshared->mutex);
 
     bstate->pgtshared = pgtshared;
     bstate->sharedsort = sharedsort;
@@ -833,6 +1050,238 @@ pgtre_scan_and_sort(BuildState *bstate, bool progress)
 }
 
 /*
+ * Range-partitioned posting phase (doc/design/parallel-posting-build.md).
+ *
+ * Each participant scans its heap slice into one worker-role sort per
+ * trigram-hash range, signals, waits until every participant has, then
+ * claims ranges one at a time: a leader-role merge of that range's sort
+ * builds its posting trees, and the (hash, root|inline) list plus the SuRF
+ * keys go to a BufFile the leader reads back in range order.
+ */
+
+/* Open this participant's worker-role sorts, one per range. */
+static void
+pgtre_begin_range_sorts(BuildState *st, PgTreShared *shared,
+                        Sharedsort *base, Oid lt_opr, int sortmem)
+{
+    int         r;
+
+    st->nranges = shared->nranges;
+    st->range_width = PG_UINT64_MAX / (uint64) shared->nranges + 1;
+    st->rsorts = (Tuplesortstate **) palloc(sizeof(Tuplesortstate *) * st->nranges);
+    for (r = 0; r < st->nranges; r++)
+    {
+        SortCoordinate coord = palloc0(sizeof(SortCoordinateData));
+
+        coord->isWorker = true;
+        coord->nParticipants = -1;
+        coord->sharedsort = RANGE_SORT(base, shared->sortstride, r);
+        st->rsorts[r] = tuplesort_begin_datum(BYTEAOID, lt_opr, InvalidOid,
+                                              false,
+                                              Max(sortmem / st->nranges, 64),
+                                              coord, TUPLESORT_NONE);
+    }
+}
+
+/* Sort every range run and report the scan to the others. */
+static void
+pgtre_finish_range_sorts(BuildState *st, PgTreShared *shared)
+{
+    int         r;
+
+    for (r = 0; r < st->nranges; r++)
+    {
+        tuplesort_performsort(st->rsorts[r]);
+        tuplesort_end(st->rsorts[r]);
+    }
+
+    SpinLockAcquire(&shared->mutex);
+    shared->nparticipantsdone++;
+    shared->reltuples += st->heap_tuples;
+    shared->indtuples += (double) st->n_emitted;
+    SpinLockRelease(&shared->mutex);
+    ConditionVariableBroadcast(&shared->workersdonecv);
+}
+
+static void
+range_file_name(char *name, int r)
+{
+    snprintf(name, MAXPGPATH, "pg_tre-range-%d", r);
+}
+
+/*
+ * Claim and build ranges until none is left.  Waits first for every
+ * participant's scan: a range's leader-role merge needs all their runs.
+ */
+static void
+pgtre_build_ranges(PgTreShared *shared, Sharedsort *base, Relation index,
+                   Oid lt_opr)
+{
+    for (;;)
+    {
+        int         nparticipants;
+        int         done;
+
+        SpinLockAcquire(&shared->mutex);
+        nparticipants = shared->nparticipants;
+        done = shared->nparticipantsdone;
+        SpinLockRelease(&shared->mutex);
+        if (nparticipants > 0 && done == nparticipants)
+            break;
+        ConditionVariableSleep(&shared->workersdonecv,
+                               WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+    }
+    ConditionVariableCancelSleep();
+
+    for (;;)
+    {
+        int         r;
+        int         nparticipants;
+        SortCoordinate coord;
+        Tuplesortstate *sort;
+        MemoryContext cxt;
+        MemoryContext old;
+        PostingOut  out;
+        BufFile    *f;
+        char        name[MAXPGPATH];
+        int         i;
+
+        SpinLockAcquire(&shared->mutex);
+        r = shared->nextrange++;
+        nparticipants = shared->nparticipants;
+        SpinLockRelease(&shared->mutex);
+        if (r >= shared->nranges)
+            break;
+
+        cxt = AllocSetContextCreate(CurrentMemoryContext,
+                                    "pg_tre range build",
+                                    ALLOCSET_DEFAULT_SIZES);
+        old = MemoryContextSwitchTo(cxt);
+
+        coord = palloc0(sizeof(SortCoordinateData));
+        coord->isWorker = false;
+        coord->nParticipants = nparticipants;
+        coord->sharedsort = RANGE_SORT(base, shared->sortstride, r);
+        sort = tuplesort_begin_datum(BYTEAOID, lt_opr, InvalidOid, false,
+                                     maintenance_work_mem / nparticipants,
+                                     coord, TUPLESORT_NONE);
+        tuplesort_performsort(sort);
+
+        posting_out_init(&out);
+        build_postings(sort, index, &out);
+        tuplesort_end(sort);
+        ereport(DEBUG1,
+                (errmsg("pg_tre: range %d/%d: %d posting trees",
+                        r + 1, shared->nranges, out.n_accums)));
+
+        /* counts, accums (+ inline bytes), keys */
+        range_file_name(name, r);
+        f = BufFileCreateFileSet(&shared->resultfs.fs, name);
+        BufFileWrite(f, &out.n_accums, sizeof(out.n_accums));
+        BufFileWrite(f, &out.n_skipped, sizeof(out.n_skipped));
+        BufFileWrite(f, &out.surf_n, sizeof(out.surf_n));
+        for (i = 0; i < out.n_accums; i++)
+        {
+            PostingAccum *a = &out.accums[i];
+            uint32      ib = (uint32) a->inline_bytes;
+
+            BufFileWrite(f, &a->trigram_hash, sizeof(a->trigram_hash));
+            BufFileWrite(f, &a->root, sizeof(a->root));
+            BufFileWrite(f, &ib, sizeof(ib));
+            if (!(ib & PG_TRE_COALESCED_FLAG) && ib > 0 &&
+                a->root == InvalidBlockNumber)
+            {
+                Assert(a->inline_data != NULL);
+                BufFileWrite(f, a->inline_data, ib);     /* inline posting */
+            }
+        }
+        if (out.surf_n > 0)
+            BufFileWrite(f, out.surf_keys, sizeof(uint64) * out.surf_n);
+        BufFileClose(f);
+
+        MemoryContextSwitchTo(old);
+        MemoryContextDelete(cxt);
+
+        SpinLockAcquire(&shared->mutex);
+        shared->rangesdone++;
+        SpinLockRelease(&shared->mutex);
+        ConditionVariableBroadcast(&shared->rangesdonecv);
+    }
+}
+
+/*
+ * Leader: build ranges alongside the workers, wait for all of them, and
+ * read the results back in range (= hash) order into one PostingOut.
+ */
+static void
+pgtre_parallel_postings(PgTreLeader *leader, Relation index, PostingOut *out)
+{
+    PgTreShared *shared = leader->pgtshared;
+    TypeCacheEntry *tc = lookup_type_cache(BYTEAOID, TYPECACHE_LT_OPR);
+    int         r;
+    pgtre_build_ranges(shared, leader->sharedsort, index, tc->lt_opr);
+
+    for (;;)
+    {
+        int         done;
+
+        SpinLockAcquire(&shared->mutex);
+        done = shared->rangesdone;
+        SpinLockRelease(&shared->mutex);
+        if (done == shared->nranges)
+            break;
+        ConditionVariableSleep(&shared->rangesdonecv,
+                               WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+    }
+    ConditionVariableCancelSleep();
+
+    posting_out_init(out);
+    for (r = 0; r < shared->nranges; r++)
+    {
+        char        name[MAXPGPATH];
+        BufFile    *f;
+        int         n_accums;
+        int         n_skipped;
+        uint32      surf_n;
+        int         i;
+
+        range_file_name(name, r);
+        f = BufFileOpenFileSet(&shared->resultfs.fs, name, O_RDONLY, false);
+        BufFileReadExact(f, &n_accums, sizeof(n_accums));
+        BufFileReadExact(f, &n_skipped, sizeof(n_skipped));
+        BufFileReadExact(f, &surf_n, sizeof(surf_n));
+        out->n_skipped += n_skipped;
+        for (i = 0; i < n_accums; i++)
+        {
+            uint64      hash;
+            BlockNumber root;
+            uint32      ib;
+            uint8      *data = NULL;
+
+            BufFileReadExact(f, &hash, sizeof(hash));
+            BufFileReadExact(f, &root, sizeof(root));
+            BufFileReadExact(f, &ib, sizeof(ib));
+            if (!(ib & PG_TRE_COALESCED_FLAG) && ib > 0 &&
+                root == InvalidBlockNumber)
+            {
+                /* +16: the zero tail the posting reader may touch */
+                data = (uint8 *) palloc0(ib + 16);
+                BufFileReadExact(f, data, ib);
+            }
+            posting_out_add(out, hash, root, data, ib);
+        }
+        for (i = 0; i < (int) surf_n; i++)
+        {
+            uint64      key;
+
+            BufFileReadExact(f, &key, sizeof(key));
+            posting_out_add_key(out, key);
+        }
+        BufFileClose(f);
+    }
+}
+
+/*
  * Parallel worker entry point.  Attaches to the DSM segment, opens the
  * heap+index, feeds its heap slice into the coordinated tuplesort, and
  * reports its tuple counts back to the leader.
@@ -897,35 +1346,21 @@ pg_tre_parallel_build_main(dsm_segment *seg, shm_toc *toc)
     if (!OidIsValid(tc->lt_opr))
         elog(ERROR, "pg_tre: no btree \"<\" operator for bytea");
 
-    tuplesort_attach_shared(sharedsort, seg);
+    {
+        int         r;
+
+        for (r = 0; r < pgtshared->nranges; r++)
+            tuplesort_attach_shared(RANGE_SORT(sharedsort, pgtshared->sortstride, r),
+                                    seg);
+    }
+    SharedFileSetAttach(&pgtshared->resultfs, seg);
     sortmem = maintenance_work_mem / pgtshared->scantuplesortstates;
 
-    {
-        SortCoordinate coordinate = palloc0(sizeof(SortCoordinateData));
-
-        coordinate->isWorker = true;
-        coordinate->nParticipants = -1;
-        coordinate->sharedsort = sharedsort;
-
-        wstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
-                                                 InvalidOid, false, sortmem,
-                                                 coordinate, TUPLESORT_NONE);
-    }
-
-    /* Scan our heap slice, feeding the sort. */
+    /* Scan our heap slice into the range sorts, then build ranges. */
+    pgtre_begin_range_sorts(&wstate, pgtshared, sharedsort, tc->lt_opr, sortmem);
     pgtre_scan_and_sort(&wstate, false);
-    tuplesort_performsort(wstate.sortstate);
-
-    /* Report our tuple counts to the leader. */
-    SpinLockAcquire(&pgtshared->mutex);
-    pgtshared->nparticipantsdone++;
-    pgtshared->reltuples += wstate.heap_tuples;
-    pgtshared->indtuples += (double) wstate.n_emitted;
-    SpinLockRelease(&pgtshared->mutex);
-
-    ConditionVariableSignal(&pgtshared->workersdonecv);
-
-    tuplesort_end(wstate.sortstate);
+    pgtre_finish_range_sorts(&wstate, pgtshared);
+    pgtre_build_ranges(pgtshared, sharedsort, indexRel, tc->lt_opr);
 
     /* Publish instrumentation into the leader-visible arrays. */
     walusage = shm_toc_lookup(toc, PG_TRE_BUILD_KEY_WAL_USAGE, false);
@@ -944,23 +1379,10 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     IndexBuildResult *result;
     BuildState  bstate;
     MemoryContext oldcxt;
-    PostingAccum *accums;
-    int         n_accums;
-    int         n_skipped_trigrams;  /* dropped via min_trigram_freq */
-    int         accums_alloced;
-    uint64      current_hash;
-    PgTrePostingBuilder *current_builder;
+    PostingOut  pout;
     BlockNumber root_upper;
     UpperIterState iter_state;
-    PgTreCoalescedWriter *coalesce_writer = NULL;
     PgTreLeader *build_leader = NULL;
-
-    /* v10 SuRF: distinct order-preserving trigram keys, collected in
-     * ascending order from the merged sort stream (keys arrive grouped by
-     * hash, NOT by key, so we sort the collected array before building). */
-    uint64     *surf_keys = NULL;
-    uint32      surf_n = 0;
-    uint32      surf_cap = 0;
 
     /* Phase 2 real build starts here. */
 
@@ -989,6 +1411,8 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     bstate.index = index;
     bstate.indexInfo = indexInfo;
+    bstate.rsorts = NULL;
+    bstate.nranges = 0;
     bstate.n_emitted = 0;
     bstate.pgtshared = NULL;
     bstate.sharedsort = NULL;
@@ -1022,73 +1446,32 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
         if (leader != NULL)
         {
             /*
-             * Parallel build.  Two tuplesort roles for the leader:
-             *
-             *  1. bstate.sortstate is the *leader-role* sort
-             *     (isWorker=false, nParticipants=N): it is NOT fed tuples,
-             *     only tuplesort_performsort()'d to merge every worker's
-             *     partial run and read out below.
-             *
-             *  2. The leader also participates as a *worker* by scanning
-             *     its own heap slice into a separate worker-role sort
-             *     (isWorker=true) that feeds the shared sort, exactly like
-             *     a background worker (mirrors nbtree's
-             *     _bt_leader_participate_as_worker).
+             * Parallel build.  The leader participates as a worker: it
+             * scans a heap slice into its own per-range worker-role sorts,
+             * exactly like a background worker (mirrors nbtree's
+             * _bt_leader_participate_as_worker).  The ranges' merges and
+             * posting trees are built in Step 5 by every participant.
              */
             build_leader = leader;
             {
-                SortCoordinate coordinate = palloc0(sizeof(SortCoordinateData));
-
-                coordinate->isWorker = false;
-                coordinate->nParticipants = leader->nparticipanttuplesorts;
-                coordinate->sharedsort = bstate.sharedsort;
-
-                bstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
-                                                         InvalidOid, false,
-                                                         maintenance_work_mem,
-                                                         coordinate,
-                                                         TUPLESORT_NONE);
-            }
-
-            /* Leader participates as a worker: scan a slice, feed shared sort. */
-            {
                 BuildState  wstate;
-                SortCoordinate wcoord = palloc0(sizeof(SortCoordinateData));
 
                 memset(&wstate, 0, sizeof(wstate));
                 wstate.heap = heap;
                 wstate.index = index;
                 wstate.indexInfo = BuildIndexInfo(index);
                 wstate.indexInfo->ii_Concurrent = indexInfo->ii_Concurrent;
-                wstate.n_emitted = 0;
                 wstate.pgtshared = bstate.pgtshared;
                 wstate.sharedsort = bstate.sharedsort;
-                wstate.heap_tuples = 0.0;
                 wstate.tmpctx = AllocSetContextCreate(CurrentMemoryContext,
                                                       "pg_tre leader-worker temp",
                                                       ALLOCSET_DEFAULT_SIZES);
 
                 sortmem = maintenance_work_mem / leader->nparticipanttuplesorts;
-                wcoord->isWorker = true;
-                wcoord->nParticipants = -1;
-                wcoord->sharedsort = bstate.sharedsort;
-                wstate.sortstate = tuplesort_begin_datum(BYTEAOID, tc->lt_opr,
-                                                         InvalidOid, false,
-                                                         sortmem, wcoord,
-                                                         TUPLESORT_NONE);
-
+                pgtre_begin_range_sorts(&wstate, bstate.pgtshared,
+                                        bstate.sharedsort, tc->lt_opr, sortmem);
                 pgtre_scan_and_sort(&wstate, true);
-                tuplesort_performsort(wstate.sortstate);
-
-                /* Report the leader-worker's tuple counts. */
-                SpinLockAcquire(&bstate.pgtshared->mutex);
-                bstate.pgtshared->nparticipantsdone++;
-                bstate.pgtshared->reltuples += wstate.heap_tuples;
-                bstate.pgtshared->indtuples += (double) wstate.n_emitted;
-                SpinLockRelease(&bstate.pgtshared->mutex);
-                ConditionVariableSignal(&bstate.pgtshared->workersdonecv);
-
-                tuplesort_end(wstate.sortstate);
+                pgtre_finish_range_sorts(&wstate, bstate.pgtshared);
                 MemoryContextDelete(wstate.tmpctx);
             }
 
@@ -1104,9 +1487,6 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
                             "%.0f heap tuples across %d participants",
                             bstate.heap_tuples,
                             leader->nparticipanttuplesorts)));
-
-            /* Merge every worker's partial run in the leader-role sort. */
-            tuplesort_performsort(bstate.sortstate);
         }
         else
         {
@@ -1131,279 +1511,27 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     /* Step 5: process sorted entries and build posting trees. */
     oldcxt = MemoryContextSwitchTo(bstate.tmpctx);
 
-    accums_alloced = 1024;
-    accums = (PostingAccum *) palloc(accums_alloced * sizeof(PostingAccum));
-    n_accums = 0;
-    n_skipped_trigrams = 0;
-
-    current_hash = 0;
-    current_builder = NULL;
-
-    /*
-     * v2.0 posting-page coalescing (off by default).  When enabled, the
-     * medium-bucket postings are packed onto shared coalesced pages
-     * instead of one dedicated leaf each.  The writer batches across
-     * trigrams and is flushed before the upper-tree bulkload.
-     */
-    if (pg_tre_coalesce_enable)
-        coalesce_writer = pg_tre_coalesced_writer_begin(index);
-
-    /* Read the sorted (trigram_hash, tid) stream and build posting trees.
-     * Positions in the sort key are ignored (per-tuple payload removed). */
+    if (build_leader != NULL)
+        pgtre_parallel_postings(build_leader, index, &pout);
+    else
     {
-        uint64 current_tid_packed = UINT64_MAX;   /* sentinel: no TID yet */
-        TrigramTidEntry cur;
-        Datum   sort_datum;
-        bool    sort_isnull;
-
-        while (tuplesort_getdatum(bstate.sortstate, true, false,
-                                  &sort_datum, &sort_isnull, NULL))
-        {
-            bytea  *kb = DatumGetByteaPP(sort_datum);
-            uint64  dec_hash;
-            uint64  dec_tid;
-            uint64  dec_key;
-            TrigramTidEntry *entry = &cur;
-            uint64  tid_packed;
-            bool    new_trigram;
-            bool    new_tid;
-
-            /*
-             * Allow CREATE INDEX [CONCURRENTLY] to be cancelled.  On
-             * large heaps this readout runs for minutes; without an
-             * interrupt check pg_cancel_backend / pg_terminate_backend
-             * are silently ignored.
-             */
-            CHECK_FOR_INTERRUPTS();
-
-            Assert(!sort_isnull);
-            Assert(VARSIZE_ANY_EXHDR(kb) == PG_TRE_SORTKEY_LEN);
-            decode_entry((const uint8 *) VARDATA_ANY(kb),
-                         &dec_hash, &dec_tid, &dec_key);
-            cur.trigram_hash = dec_hash;
-            pg_tre_unpack_tid(dec_tid, &cur.tid);
-            cur.position = 0;
-
-            tid_packed = dec_tid;
-            new_trigram = (current_builder == NULL ||
-                           entry->trigram_hash != current_hash);
-            new_tid = (new_trigram || tid_packed != current_tid_packed);
-
-            /*
-             * Collect the order-preserving key of each distinct trigram for
-             * the SuRF filter.  A trigram_hash uniquely identifies a
-             * trigram, so "new_trigram" (hash changed) marks a new distinct
-             * key.  Keys arrive grouped by hash (not sorted by key), so we
-             * append here and sort+dedup after the loop.
-             */
-            if (new_trigram)
-            {
-                if (surf_n >= surf_cap)
-                {
-                    surf_cap = surf_cap ? surf_cap * 2 : 1024;
-                    surf_keys = surf_keys
-                        ? (uint64 *) repalloc(surf_keys, surf_cap * sizeof(uint64))
-                        : (uint64 *) palloc(surf_cap * sizeof(uint64));
-                }
-                surf_keys[surf_n++] = dec_key;
-            }
-
-            if (new_trigram)
-            {
-                /* Finish previous trigram's posting tree. */
-                if (current_builder != NULL)
-                {
-                    /* Add the last accumulated TID. */
-                    if (current_tid_packed != UINT64_MAX)
-                    {
-                        ItemPointerData tid;
-
-                        pg_tre_unpack_tid(current_tid_packed, &tid);
-                        pg_tre_posting_build_add(current_builder, &tid,
-                                                NULL, 0, NULL);
-                    }
-
-                    /* Finish the posting tree. */
-                    {
-                        BlockNumber root;
-                        const uint8 *inline_data;
-                        Size        inline_bytes;
-                        int         n_tids;
-
-                        n_tids = pg_tre_posting_build_n_tids(
-                                     current_builder);
-
-                        /*
-                         * Cardinality-aware build (1.2.1+):
-                         * skip persisting posting trees for
-                         * trigrams that appear in fewer than
-                         * pg_tre.min_trigram_freq rows.  These
-                         * trigrams aren't useful candidate
-                         * filters; recheck handles correctness.
-                         */
-                        if (pg_tre_min_trigram_freq > 1 &&
-                            n_tids < pg_tre_min_trigram_freq)
-                        {
-                            pg_tre_posting_build_free(current_builder);
-                            n_skipped_trigrams++;
-                        }
-                        else
-                        {
-                            bool        coalesced;
-                            BlockNumber cblk;
-                            uint16      cslot;
-
-                            root = pg_tre_posting_build_finish_ex(
-                                       current_builder,
-                                       &inline_data,
-                                       &inline_bytes,
-                                       coalesce_writer,
-                                       &coalesced, &cblk, &cslot);
-                            pg_tre_posting_build_free(current_builder);
-
-                            /* Record the completed posting. */
-                            if (n_accums >= accums_alloced)
-                            {
-                                accums_alloced *= 2;
-                                accums = (PostingAccum *)
-                                    repalloc(accums,
-                                             accums_alloced * sizeof(PostingAccum));
-                            }
-                            accums[n_accums].trigram_hash = current_hash;
-                            if (coalesced)
-                            {
-                                accums[n_accums].root = cblk;
-                                accums[n_accums].inline_data = NULL;
-                                accums[n_accums].inline_bytes =
-                                    PG_TRE_COALESCED_FLAG | cslot;
-                            }
-                            else
-                            {
-                                accums[n_accums].root = root;
-                                accums[n_accums].inline_data = inline_data;
-                                accums[n_accums].inline_bytes = inline_bytes;
-                            }
-                            n_accums++;
-                        }
-                    }
-                }
-
-                /* Start a new posting tree. */
-                current_hash = entry->trigram_hash;
-                current_builder = pg_tre_posting_build_begin(
-                                      index, current_hash,
-                                      false /* no payload (3.0.0) */);
-                current_tid_packed = UINT64_MAX;  /* reset for new trigram */
-            }
-
-            if (new_tid && !new_trigram)
-            {
-                /* Flush the previous TID into the posting set. */
-                if (current_tid_packed != UINT64_MAX)
-                {
-                    ItemPointerData tid;
-
-                    pg_tre_unpack_tid(current_tid_packed, &tid);
-                    pg_tre_posting_build_add(current_builder, &tid,
-                                            NULL, 0, NULL);
-                }
-            }
-
-            /* Track the current TID; positions are no longer captured
-             * (per-tuple payload was removed in 3.0.0). */
-            current_tid_packed = tid_packed;
-        }
-
-        /* Finish the last posting tree. */
-        if (current_builder != NULL)
-        {
-            /* Add the last accumulated TID. */
-            if (current_tid_packed != UINT64_MAX)
-            {
-                ItemPointerData tid;
-
-                pg_tre_unpack_tid(current_tid_packed, &tid);
-                pg_tre_posting_build_add(current_builder, &tid,
-                                        NULL, 0, NULL);
-            }
-
-            /* Finish the posting tree. */
-            {
-                BlockNumber root;
-                const uint8 *inline_data;
-                Size        inline_bytes;
-                int         n_tids;
-
-                n_tids = pg_tre_posting_build_n_tids(current_builder);
-
-                if (pg_tre_min_trigram_freq > 1 &&
-                    n_tids < pg_tre_min_trigram_freq)
-                {
-                    pg_tre_posting_build_free(current_builder);
-                    n_skipped_trigrams++;
-                }
-                else
-                {
-                    bool        coalesced;
-                    BlockNumber cblk;
-                    uint16      cslot;
-
-                    root = pg_tre_posting_build_finish_ex(current_builder,
-                                                          &inline_data,
-                                                          &inline_bytes,
-                                                          coalesce_writer,
-                                                          &coalesced,
-                                                          &cblk, &cslot);
-                    pg_tre_posting_build_free(current_builder);
-
-                    if (n_accums >= accums_alloced)
-                    {
-                        accums_alloced *= 2;
-                        accums = (PostingAccum *)
-                            repalloc(accums,
-                                     accums_alloced * sizeof(PostingAccum));
-                    }
-                    accums[n_accums].trigram_hash = current_hash;
-                    if (coalesced)
-                    {
-                        accums[n_accums].root = cblk;
-                        accums[n_accums].inline_data = NULL;
-                        accums[n_accums].inline_bytes =
-                            PG_TRE_COALESCED_FLAG | cslot;
-                    }
-                    else
-                    {
-                        accums[n_accums].root = root;
-                        accums[n_accums].inline_data = inline_data;
-                        accums[n_accums].inline_bytes = inline_bytes;
-                    }
-                    n_accums++;
-                }
-            }
-        }
+        posting_out_init(&pout);
+        build_postings(bstate.sortstate, index, &pout);
     }
 
-    if (n_skipped_trigrams > 0)
+    if (pout.n_skipped > 0)
         ereport(NOTICE,
                 (errmsg("pg_tre: built %d posting trees "
                         "(%d trigrams skipped: below pg_tre.min_trigram_freq=%d)",
-                        n_accums, n_skipped_trigrams,
+                        pout.n_accums, pout.n_skipped,
                         pg_tre_min_trigram_freq)));
     else
         ereport(NOTICE,
-                (errmsg("pg_tre: built %d posting trees", n_accums)));
-
-    /* Flush the coalesced writer's last partial page so all coalesced
-     * pages exist before the upper-tree bulkload references them. */
-    if (coalesce_writer != NULL)
-    {
-        pg_tre_coalesced_writer_finish(coalesce_writer);
-        coalesce_writer = NULL;
-    }
+                (errmsg("pg_tre: built %d posting trees", pout.n_accums)));
 
     /* Step 6: bulk-load upper tree from the posting list. */
-    iter_state.accums = accums;
-    iter_state.n_accums = n_accums;
+    iter_state.accums = pout.accums;
+    iter_state.n_accums = pout.n_accums;
     iter_state.current = 0;
 
     root_upper = pg_tre_upper_bulkload(index, upper_iter, &iter_state);
@@ -1420,6 +1548,9 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
     {
         BlockNumber root_surf = InvalidBlockNumber;
         uint32      surf_distinct = 0;
+
+        uint64     *surf_keys = pout.surf_keys;
+        uint32      surf_n = pout.surf_n;
 
         if (surf_n > 0)
         {
@@ -1452,14 +1583,15 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
         /* Step 7: update meta page with roots and stats. */
         pg_tre_meta_set_roots(index, root_upper, InvalidBlockNumber,
-                              (uint64) n_accums, (uint64) bstate.heap_tuples);
+                              (uint64) pout.n_accums, (uint64) bstate.heap_tuples);
         pg_tre_meta_set_surf(index, root_surf, surf_distinct);
     }
 
     MemoryContextSwitchTo(oldcxt);
     MemoryContextDelete(bstate.tmpctx);
 
-    tuplesort_end(bstate.sortstate);
+    if (build_leader == NULL)
+        tuplesort_end(bstate.sortstate);
 
     /* Tear down parallel workers now that the shared sort is fully drained. */
     if (build_leader != NULL)
@@ -1472,7 +1604,7 @@ pg_tre_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
     ereport(NOTICE,
             (errmsg("pg_tre: build complete, indexed %.0f heap tuples into %d trigrams",
-                    bstate.heap_tuples, n_accums)));
+                    bstate.heap_tuples, pout.n_accums)));
 
     return result;
 }

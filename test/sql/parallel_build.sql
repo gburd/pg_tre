@@ -2,9 +2,9 @@
 -- Regression test for parallel CREATE INDEX (amcanbuildparallel = true,
 -- pg_tre.enable_parallel_build on by default).
 --
--- The parallelizable phase is the heap scan + trigram extraction +
--- coordinated tuplesort; the leader merges every participant's partial
--- run and serially builds the posting trees, upper tree, and range tier.
+-- Parallel builds scan, sort AND build posting trees in parallel (4.3.1:
+-- each participant claims trigram-hash ranges and writes their posting
+-- trees; the leader then builds the upper tree and SuRF in hash order).
 -- This test confirms:
 --
 --   1. A parallel build succeeds and produces a valid index.
