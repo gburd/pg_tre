@@ -1093,64 +1093,120 @@ pg_tre_posting_materialize(Relation index, BlockNumber root,
             return NULL;
         }
 
-        /* Phase 4.2: traverse right-link chain and union all leaves. */
-        BlockNumber next_blk = hdr->right_link;
-        UnlockReleaseBuffer(buf);
-
-        while (BlockNumberIsValid(next_blk))
+        /*
+         * Phase 4.2: traverse the right-link chain and union all leaves.
+         *
+         * Merge like a binary counter: slot i holds the union of 2^i
+         * leaves, and a new leaf carries up through the occupied slots.
+         * Unioning each leaf into one growing map copied the accumulated
+         * map per leaf -- O(N * L) for L leaves of N TIDs, tens of seconds
+         * for the hot trigrams of a big table, which have thousands of
+         * leaves.  This is O(N log L).
+         */
         {
-            Buffer next_buf = pg_tre_read(index, next_blk, PG_TRE_PAGE_POSTING_L,
-                                         BUFFER_LOCK_SHARE);
-            Page next_page = BufferGetPage(next_buf);
-            PgTrePostingLeafHeader *next_hdr =
-                (PgTrePostingLeafHeader *) PageGetContents(next_page);
-            uint8 *next_sm_bytes = (uint8 *) next_hdr + MAXALIGN(sizeof(*next_hdr));
-            Size next_bytes;
-            sm_t *next_sm;
+            sm_t   *slots[64];
+            int     nslots = 0;
+            int     i;
+            BlockNumber next_blk = hdr->right_link;
 
-            if (!posting_leaf_header_valid(next_hdr))
+            memset(slots, 0, sizeof(slots));
+            UnlockReleaseBuffer(buf);
+
+#define MERGE_FAIL() \
+            do { \
+                for (i = 0; i < nslots; i++) \
+                    if (slots[i] != NULL) sm_free(slots[i]); \
+                if (sm != NULL) sm_free(sm); \
+            } while (0)
+
+            for (;;)
             {
-                UnlockReleaseBuffer(next_buf);
-                sm_free(sm);
-                ereport(ERROR,
-                        (errcode(ERRCODE_DATA_CORRUPTED),
-                         errmsg("pg_tre: corrupt posting leaf at block %u",
-                                next_blk)));
+                /* carry `sm` (one leaf, or a merged run of them) upward */
+                for (i = 0; i < 64 && slots[i] != NULL; i++)
+                {
+                    sm_t   *merged = sm_union(slots[i], sm);
+
+                    sm_free(slots[i]);
+                    slots[i] = NULL;
+                    sm_free(sm);
+                    sm = merged;
+                    if (sm == NULL)
+                    {
+                        MERGE_FAIL();
+                        return NULL;
+                    }
+                }
+                if (i == 64)
+                {
+                    MERGE_FAIL();
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("pg_tre: posting chain from block %u is too long",
+                                    root)));
+                }
+                slots[i] = sm;
+                sm = NULL;
+                if (i + 1 > nslots)
+                    nslots = i + 1;
+
+                if (!BlockNumberIsValid(next_blk))
+                    break;
+
+                CHECK_FOR_INTERRUPTS();
+                {
+                    Buffer next_buf = pg_tre_read(index, next_blk,
+                                                  PG_TRE_PAGE_POSTING_L,
+                                                  BUFFER_LOCK_SHARE);
+                    Page next_page = BufferGetPage(next_buf);
+                    PgTrePostingLeafHeader *next_hdr =
+                        (PgTrePostingLeafHeader *) PageGetContents(next_page);
+                    uint8 *next_sm_bytes = (uint8 *) next_hdr +
+                        MAXALIGN(sizeof(*next_hdr));
+
+                    if (!posting_leaf_header_valid(next_hdr))
+                    {
+                        UnlockReleaseBuffer(next_buf);
+                        MERGE_FAIL();
+                        ereport(ERROR,
+                                (errcode(ERRCODE_DATA_CORRUPTED),
+                                 errmsg("pg_tre: corrupt posting leaf at block %u",
+                                        next_blk)));
+                    }
+                    sm = sm_open_copy(next_sm_bytes, next_hdr->sparsemap_bytes, 64);
+                    next_blk = next_hdr->right_link;
+                    UnlockReleaseBuffer(next_buf);
+                    if (sm == NULL)
+                    {
+                        MERGE_FAIL();
+                        return NULL;
+                    }
+                }
             }
 
-            next_bytes = next_hdr->sparsemap_bytes;
-
-            /* Materialize this leaf's sparsemap. */
-            next_sm = sm_open_copy(next_sm_bytes, next_bytes, 64);
-            if (next_sm == NULL)
+            /* fold the occupied slots, smallest first */
+            for (i = 0; i < nslots; i++)
             {
-                UnlockReleaseBuffer(next_buf);
-                sm_free(sm);
-                return NULL;
-            }
+                if (slots[i] == NULL)
+                    continue;
+                if (sm == NULL)
+                    sm = slots[i];
+                else
+                {
+                    sm_t   *merged = sm_union(slots[i], sm);
 
-            /*
-             * Union next_sm into sm.  sm_union() returns a freshly
-             * allocated result map and does NOT modify either input;
-             * NULL means allocation failure.  Earlier code here
-             * inverted the success/failure check (treating non-NULL
-             * as failure), which silently dropped every leaf past
-             * the first and made multi-leaf posting trees return
-             * zero rows on lookup.
-             */
-            sm_t *merged = sm_union(sm, next_sm);
-            sm_free(next_sm);
-            if (merged == NULL)
-            {
-                UnlockReleaseBuffer(next_buf);
-                sm_free(sm);
-                return NULL;
+                    sm_free(slots[i]);
+                    sm_free(sm);
+                    sm = merged;
+                    if (sm == NULL)
+                    {
+                        slots[i] = NULL;
+                        MERGE_FAIL();
+                        return NULL;
+                    }
+                }
+                slots[i] = NULL;
             }
-            sm_free(sm);
-            sm = merged;
-
-            next_blk = next_hdr->right_link;
-            UnlockReleaseBuffer(next_buf);
+#undef MERGE_FAIL
         }
 
         return sm;
