@@ -12,7 +12,10 @@
  *
  * Propagation rules, simplified:
  *   LITERAL c           : exact string = [c]
- *   CLASS / ANY         : exact string unknown (special "opaque" byte);
+ *   CLASS (<= 8 chars)  : one run position holding any of them; a
+ *                         trigram window over it requires one of its
+ *                         combinations (an OR-group, <= 64 alternatives)
+ *   ANY / larger CLASS  : exact string unknown (special "opaque" byte);
  *                         contribution: break the surrounding literal run
  *   ANCHOR              : no-op
  *   CONCAT(l, r)        : concat exact strings, extract trigrams from the
@@ -72,7 +75,24 @@ typedef struct TrigramAccum
     int       n;
     int       alloced;
     bool      overflowed;   /* true if we gave up (fanout cap) */
+
+    /*
+     * Required OR-groups: at least one trigram of each group occurs in
+     * every match (a trigram window over a small character class, e.g.
+     * "a[bc]d" -> abd | acd).  Dropping a group only weakens the filter,
+     * so the caps below just stop adding them.
+     */
+    int32   (**or_tris)[3];
+    int      *or_n;
+    int       n_ors;
+    int       ors_alloced;
 } TrigramAccum;
+
+/* Members of one character class expanded per pattern position. */
+#define CLASS_EXPAND_MAX  8
+/* Alternatives per trigram window, and OR-groups per pattern. */
+#define OR_ALTS_MAX       64
+#define OR_GROUPS_MAX     64
 
 static void
 accum_init(TrigramAccum *a, MemoryContext cxt)
@@ -82,6 +102,35 @@ accum_init(TrigramAccum *a, MemoryContext cxt)
     a->tris = palloc(a->alloced * sizeof(*a->tris));
     a->n = 0;
     a->overflowed = false;
+    a->or_tris = NULL;
+    a->or_n = NULL;
+    a->n_ors = 0;
+    a->ors_alloced = 0;
+    MemoryContextSwitchTo(old);
+}
+
+static void
+accum_add_or(TrigramAccum *a, int32 (*tris)[3], int n, MemoryContext cxt)
+{
+    MemoryContext old;
+
+    if (a->overflowed || a->n_ors >= OR_GROUPS_MAX)
+        return;
+    old = MemoryContextSwitchTo(cxt);
+    if (a->n_ors >= a->ors_alloced)
+    {
+        a->ors_alloced = a->ors_alloced ? a->ors_alloced * 2 : 8;
+        a->or_tris = a->or_tris
+            ? repalloc(a->or_tris, a->ors_alloced * sizeof(*a->or_tris))
+            : palloc(a->ors_alloced * sizeof(*a->or_tris));
+        a->or_n = a->or_n
+            ? repalloc(a->or_n, a->ors_alloced * sizeof(int))
+            : palloc(a->ors_alloced * sizeof(int));
+    }
+    a->or_tris[a->n_ors] = palloc(n * sizeof(int32[3]));
+    memcpy(a->or_tris[a->n_ors], tris, n * sizeof(int32[3]));
+    a->or_n[a->n_ors] = n;
+    a->n_ors++;
     MemoryContextSwitchTo(old);
 }
 
@@ -146,9 +195,16 @@ accum_add(TrigramAccum *a, const int32 t[3], MemoryContext cxt)
  *
  * Phase 3.5: run buffer contains int32 codepoints, not bytes.
  */
+/* One position of a literal run: the codepoints it may hold. */
+typedef struct RunPos
+{
+    int32       n;
+    int32       cp[CLASS_EXPAND_MAX];
+} RunPos;
+
 typedef struct LinCtx
 {
-    int32      *run;    /* array of codepoints */
+    RunPos     *run;    /* positions of the current literal run */
     int         run_n;
     int         run_cap;
     TrigramAccum *acc;
@@ -163,8 +219,8 @@ run_grow(LinCtx *lc)
 {
     MemoryContext old = MemoryContextSwitchTo(lc->cxt);
     lc->run_cap = lc->run_cap == 0 ? 64 : lc->run_cap * 2;
-    lc->run = lc->run ? repalloc(lc->run, lc->run_cap * sizeof(int32))
-                      : palloc(lc->run_cap * sizeof(int32));
+    lc->run = lc->run ? repalloc(lc->run, lc->run_cap * sizeof(RunPos))
+                      : palloc(lc->run_cap * sizeof(RunPos));
     MemoryContextSwitchTo(old);
 }
 
@@ -173,7 +229,89 @@ run_append_cp(LinCtx *lc, int32 cp)
 {
     if (lc->run_n >= lc->run_cap)
         run_grow(lc);
-    lc->run[lc->run_n++] = cp;
+    lc->run[lc->run_n].n = 1;
+    lc->run[lc->run_n].cp[0] = cp;
+    lc->run_n++;
+}
+
+/*
+ * A non-negated class of at most CLASS_EXPAND_MAX characters is one run
+ * position holding any of them; returns false (caller ends the run) for
+ * anything larger.
+ */
+static bool
+run_append_class(LinCtx *lc, const RegexAst *ast)
+{
+    const RegexClass *cs = ast->u.charclass.cs;
+    int32       total = 0;
+    RunPos     *p;
+    int         i;
+
+    if (ast->u.charclass.negated)
+        return false;
+    for (i = 0; i < cs->n_ranges; i++)
+    {
+        total += cs->hi[i] - cs->lo[i] + 1;
+        if (total > CLASS_EXPAND_MAX)
+            return false;
+    }
+    if (total < 1)
+        return false;
+    if (lc->run_n >= lc->run_cap)
+        run_grow(lc);
+    p = &lc->run[lc->run_n++];
+    p->n = 0;
+    for (i = 0; i < cs->n_ranges; i++)
+    {
+        int32       c;
+
+        for (c = cs->lo[i]; c <= cs->hi[i]; c++)
+            p->cp[p->n++] = c;
+    }
+    return true;
+}
+
+/*
+ * Every trigram window of the run: a window of single characters is one
+ * required trigram; one over class positions is an OR-group of all their
+ * combinations, if there are at most OR_ALTS_MAX (else it is skipped).
+ */
+static void
+run_emit(LinCtx *lc, TrigramAccum *acc)
+{
+    int         i;
+
+    for (i = 0; i + 3 <= lc->run_n; i++)
+    {
+        const RunPos *a = &lc->run[i],
+                   *b = &lc->run[i + 1],
+                   *c = &lc->run[i + 2];
+        int         prod = a->n * b->n * c->n;
+
+        if (prod == 1)
+        {
+            int32       t[3] = {a->cp[0], b->cp[0], c->cp[0]};
+
+            accum_add(acc, t, lc->cxt);
+        }
+        else if (prod <= OR_ALTS_MAX)
+        {
+            int32       alts[OR_ALTS_MAX][3];
+            int         n = 0,
+                        x, y, z;
+
+            for (x = 0; x < a->n; x++)
+                for (y = 0; y < b->n; y++)
+                    for (z = 0; z < c->n; z++)
+                    {
+                        alts[n][0] = a->cp[x];
+                        alts[n][1] = b->cp[y];
+                        alts[n][2] = c->cp[z];
+                        n++;
+                    }
+            accum_add_or(acc, alts, n, lc->cxt);
+        }
+    }
 }
 
 /*
@@ -184,11 +322,7 @@ run_append_cp(LinCtx *lc, int32 cp)
 static void
 run_flush(LinCtx *lc)
 {
-    int i;
-
-    for (i = 0; i + 3 <= lc->run_n; i++)
-        accum_add(lc->acc, &lc->run[i], lc->cxt);
-
+    run_emit(lc, lc->acc);
     lc->run_n = 0;
     lc->flushes++;
 }
@@ -217,8 +351,12 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
             run_append_cp(lc, ast->u.literal.codepoint);
             break;
 
-        case REGEX_AST_ANY:
         case REGEX_AST_CLASS:
+            /* A small class is a position of alternatives (see run_emit). */
+            if (run_append_class(lc, ast))
+                break;
+            /* FALLTHROUGH */
+        case REGEX_AST_ANY:
             /* Break the run: opaque byte. */
             run_flush(lc);
             break;
@@ -258,22 +396,14 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
             lca.acc = &a;
             lca.run = NULL; lca.run_n = 0; lca.run_cap = 0;
             lin_append_node(&lca, ast->u.alt.left);
-            /* final flush for the branch */
-            {
-                int k;
-                for (k = 0; k + 3 <= lca.run_n; k++)
-                    accum_add(&a, &lca.run[k], lc->cxt);
-            }
+            run_emit(&lca, &a);     /* final flush for the branch */
 
             accum_init(&b, lc->cxt);
             lcb.acc = &b;
             lcb.run = NULL; lcb.run_n = 0; lcb.run_cap = 0;
             lin_append_node(&lcb, ast->u.alt.right);
-            {
-                int k;
-                for (k = 0; k + 3 <= lcb.run_n; k++)
-                    accum_add(&b, &lcb.run[k], lc->cxt);
-            }
+            run_emit(&lcb, &b);
+            /* (The branches' OR-groups are dropped: weaker, still sound.) */
 
             /* Intersection of a and b. */
             for (i = 0; i < a.n; i++)
@@ -355,7 +485,7 @@ accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
     out->min_match_len   = 3;   /* conservative lower bound */
     out->mode            = TRIGRAM_QUERY_CNF;  /* default CNF mode */
 
-    if (a->overflowed || a->n == 0)
+    if (a->overflowed || a->n + a->n_ors == 0)
     {
         out->always_true = true;
         out->n = 0;
@@ -365,8 +495,8 @@ accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
     }
 
     out->always_true = false;
-    out->n = a->n;
-    out->conjuncts = palloc(a->n * sizeof(TrigramConjunct));
+    out->n = a->n + a->n_ors;
+    out->conjuncts = palloc(out->n * sizeof(TrigramConjunct));
 
     for (i = 0; i < a->n; i++)
     {
@@ -376,6 +506,20 @@ accum_to_query(const TrigramAccum *a, int32 max_cost, TrigramQuery *out,
         c->alts[0].trigram_hash = pg_tre_hash_trigram_cp(a->tris[i]);
         c->alts[0].min_offset = 0;
         c->alts[0].max_offset = INT32_MAX;
+    }
+    for (i = 0; i < a->n_ors; i++)
+    {
+        TrigramConjunct *c = &out->conjuncts[a->n + i];
+        int         j;
+
+        c->n = a->or_n[i];
+        c->alts = palloc(c->n * sizeof(TrigramDisjunct));
+        for (j = 0; j < c->n; j++)
+        {
+            c->alts[j].trigram_hash = pg_tre_hash_trigram_cp(a->or_tris[i][j]);
+            c->alts[j].min_offset = 0;
+            c->alts[j].max_offset = INT32_MAX;
+        }
     }
 
     MemoryContextSwitchTo(old);
@@ -476,7 +620,6 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
 {
     TrigramAccum acc;
     LinCtx       lc;
-    int          i;
 
     memset(out, 0, sizeof(*out));
 
@@ -514,8 +657,7 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
     lin_append_node(&lc, ctx->root);
 
     /* Flush any residual literal run. */
-    for (i = 0; i + 3 <= lc.run_n; i++)
-        accum_add(&acc, &lc.run[i], ctx->mcxt);
+    run_emit(&lc, &acc);
 
     accum_to_query(&acc, max_cost, out, ctx->mcxt);
     out->mode = TRIGRAM_QUERY_CNF;  /* k=0 uses CNF */
