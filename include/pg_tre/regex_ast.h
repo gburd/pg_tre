@@ -124,7 +124,9 @@ typedef struct TrigramConjunct
 typedef enum TrigramQueryMode
 {
     TRIGRAM_QUERY_CNF = 0,   /* conjunctive normal form: AND of ORs (default) */
-    TRIGRAM_QUERY_DNF = 1    /* disjunctive normal form: OR of ANDs (tiled k>0) */
+    TRIGRAM_QUERY_DNF = 1,   /* k>0 neighbourhood tiles: union of every alternative */
+    TRIGRAM_QUERY_PIECES = 2 /* k>0 exact pieces: OR across pieces of the AND
+                              * of each piece's trigrams */
 } TrigramQueryMode;
 
 typedef struct TrigramQuery

@@ -205,6 +205,34 @@ pg_tre_estimate_trigram_selectivity(Relation index, TrigramQuery *q,
                 sel = prod;
         }
     }
+    else if (q->mode == TRIGRAM_QUERY_PIECES)
+    {
+        /*
+         * OR of pieces, each the AND of its trigrams.  A piece's trigrams
+         * come from one literal, so they co-occur: the piece is about as
+         * selective as its rarest trigram.  The pieces are independent
+         * substrings: union them.
+         */
+        double none = 1.0;
+
+        for (i = 0; i < q->n; i++)
+        {
+            const TrigramConjunct *c = &q->conjuncts[i];
+            double  piece = 1.0;
+            int     j;
+
+            for (j = 0; j < c->n; j++)
+            {
+                double t = trigram_selectivity(index, c->alts[j].trigram_hash,
+                                               mean_density, n_tuples);
+
+                if (t < piece)
+                    piece = t;
+            }
+            none *= 1.0 - piece;
+        }
+        sel = 1.0 - none;
+    }
     else
     {
         /*

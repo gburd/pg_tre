@@ -98,7 +98,8 @@ tre_extract_debug_impl(text *pattern_text, int32 max_cost)
 	initStringInfo(&buf);
 
 	appendStringInfo(&buf, "k=%d mode=%s\n", max_cost,
-					 query.mode == TRIGRAM_QUERY_DNF ? "DNF" : "CNF");
+					 query.mode == TRIGRAM_QUERY_DNF ? "DNF" :
+					 query.mode == TRIGRAM_QUERY_PIECES ? "PIECES" : "CNF");
 
 	if (query.always_true)
 	{
@@ -110,15 +111,20 @@ tre_extract_debug_impl(text *pattern_text, int32 max_cost)
 	}
 	else
 	{
+		bool	pieces = (query.mode == TRIGRAM_QUERY_PIECES);
+
 		appendStringInfo(&buf, "%s of %d %s:\n",
-						 query.mode == TRIGRAM_QUERY_DNF ? "OR" : "AND",
+						 query.mode == TRIGRAM_QUERY_CNF ? "AND" : "OR",
 						 query.n,
+						 pieces ? "pieces" :
 						 query.mode == TRIGRAM_QUERY_DNF ? "tiles" : "conjuncts");
 		for (i = 0; i < query.n; i++)
 		{
-			appendStringInfo(&buf, "  %s %d: %d alternatives:\n",
+			appendStringInfo(&buf, "  %s %d: %d %s:\n",
+							 pieces ? "Piece" :
 							 query.mode == TRIGRAM_QUERY_DNF ? "Tile" : "Conjunct",
-							 i, query.conjuncts[i].n);
+							 i, query.conjuncts[i].n,
+							 pieces ? "trigrams, all required" : "alternatives");
 			for (j = 0; j < query.conjuncts[i].n; j++)
 			{
 				appendStringInfo(&buf, "    trigram_hash=%lu [%d,%d]\n",

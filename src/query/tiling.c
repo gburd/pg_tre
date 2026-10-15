@@ -318,8 +318,126 @@ pg_tre_tile_spine(const SpineEntry *spine, int spine_n, int32 k,
 }
 
 /*
- * Public entry point: given an AST and edit budget k, extract the spine
- * and tile it into k+1 groups.  Returns a DNF TrigramQuery.
+ * Exact-piece tiling (Navarro's pigeonhole on pieces, not trigrams).
+ *
+ * Cut the pattern's literal runs into k+1 disjoint pieces of >= 3
+ * characters.  A text within k edits of a pattern match is that match
+ * with at most k edits applied, and each edit touches at most one piece
+ * (an insertion between two pieces touches none), so at least one piece
+ * survives intact -- contiguous, in the text.  The filter is therefore
+ * the OR, over pieces, of the AND of each piece's trigrams: exact
+ * trigrams only, sound in every encoding and for any edit costs (the
+ * matcher caps the number of edits at max_cost), and far more selective
+ * than unioning every trigram's edit neighbourhood -- which in a
+ * multibyte database had to cover nothing short of the whole table.
+ *
+ * Returns false (caller falls back) when the runs cannot give k+1
+ * pieces of three characters.
+ */
+static bool
+tile_pieces(const RegexAst *ast, int32 k, TrigramQuery *out, MemoryContext cxt)
+{
+    int32       buf[1024];
+    int32       pos = 0;
+    int         n;
+    int         run_start[512], run_len[512];
+    int         n_runs = 0;
+    int         pieces[512];        /* pieces per run */
+    int         want = k + 1;
+    int         have = 0;
+    int         i, r, t;
+    MemoryContext old;
+
+    if (k < 1 || k > 64)
+        return false;
+    n = linearize_literals(ast, buf, 1024, &pos);
+    if (n < 0)
+        return false;
+
+    /* Literal runs (>= 3 characters) between separators. */
+    for (i = 0; i < n;)
+    {
+        int         j = i;
+
+        while (j < n && buf[j] >= 0)
+            j++;
+        if (j - i >= 3)
+        {
+            if (n_runs >= 512)
+                return false;
+            run_start[n_runs] = i;
+            run_len[n_runs] = j - i;
+            pieces[n_runs] = 0;
+            n_runs++;
+        }
+        i = j + 1;
+    }
+
+    /*
+     * Hand out k+1 pieces, each time to the run whose pieces would stay
+     * longest (largest len / (pieces+1)), so the shortest piece -- the
+     * one that bounds selectivity -- is as long as possible.
+     */
+    for (t = 0; t < want; t++)
+    {
+        int         best = -1;
+        double      best_len = 0;
+
+        for (r = 0; r < n_runs; r++)
+        {
+            double      l = (double) run_len[r] / (pieces[r] + 1);
+
+            if (l >= 3.0 && l > best_len)
+            {
+                best = r;
+                best_len = l;
+            }
+        }
+        if (best < 0)
+            return false;
+        pieces[best]++;
+        have++;
+    }
+
+    old = MemoryContextSwitchTo(cxt);
+    out->n = 0;
+    out->conjuncts = palloc0(want * sizeof(TrigramConjunct));
+    out->mode = TRIGRAM_QUERY_PIECES;
+    out->always_true = false;
+    out->global_max_cost = k;
+    out->min_match_len = 3;
+
+    for (r = 0; r < n_runs; r++)
+    {
+        int         p;
+
+        for (p = 0; p < pieces[r]; p++)
+        {
+            /* Even split of the run; every piece >= 3 by construction. */
+            int         a = run_start[r] + (run_len[r] * p) / pieces[r];
+            int         b = run_start[r] + (run_len[r] * (p + 1)) / pieces[r];
+            TrigramConjunct *c = &out->conjuncts[out->n++];
+            int         j;
+
+            c->n = b - a - 2;
+            c->alts = palloc(c->n * sizeof(TrigramDisjunct));
+            for (j = 0; j < c->n; j++)
+            {
+                c->alts[j].trigram_hash = pg_tre_hash_trigram_cp(&buf[a + j]);
+                c->alts[j].min_offset = 0;
+                c->alts[j].max_offset = INT32_MAX;
+            }
+        }
+    }
+    Assert(out->n == have);
+    MemoryContextSwitchTo(old);
+    return true;
+}
+
+/*
+ * Public entry point: given an AST and edit budget k, build the k>0
+ * filter: exact pieces when the pattern is long enough, else the
+ * trigram-neighbourhood tiling below.
  */
 bool
 pg_tre_tile_query(const RegexAst *ast, int32 k, TrigramQuery *out,
@@ -327,6 +445,9 @@ pg_tre_tile_query(const RegexAst *ast, int32 k, TrigramQuery *out,
 {
     SpineEntry spine[1024];
     int spine_n;
+
+    if (tile_pieces(ast, k, out, cxt))
+        return true;
 
     spine_n = extract_spine_from_ast(ast, spine, 1024, cxt);
     if (spine_n < 0)

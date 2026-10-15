@@ -851,6 +851,7 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
      * maps leak (H3).
      */
     sm_t *volatile inflight = NULL;   /* transient sm being merged */
+    sm_t *volatile piece_acc = NULL;  /* PIECES: the current piece's AND */
     PendingOverlay *ov;               /* set once, before PG_TRY */
     CrackCache    *crack;             /* set once, before PG_TRY */
     volatile bool  overlay_built = false;
@@ -937,6 +938,70 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
                 }
             }
         }
+        else if (st->q.mode == TRIGRAM_QUERY_PIECES)
+        {
+            /*
+             * Exact pieces: a candidate holds every trigram of at least
+             * one piece.  OR across pieces of the AND within each.
+             */
+            for (i = 0; i < st->q.n; i++)
+            {
+                const TrigramConjunct *piece = &st->q.conjuncts[i];
+                int     j;
+
+                CHECK_FOR_INTERRUPTS();
+                piece_acc = NULL;
+                for (j = 0; j < piece->n; j++)
+                {
+                    TrigramConjunct one;
+                    sm_t   *m;
+
+                    one.n = 1;
+                    one.alts = &piece->alts[j];
+                    inflight = resolve_conjunct_with_overlay(scan->indexRelation,
+                                                             &one, st->scan_cxt,
+                                                             ov, crack);
+                    if (inflight == NULL)
+                    {
+                        /* a trigram absent: this piece matches nothing */
+                        if (piece_acc != NULL) { free(piece_acc); piece_acc = NULL; }
+                        break;
+                    }
+                    if (piece_acc == NULL)
+                    {
+                        piece_acc = inflight;
+                        inflight = NULL;
+                        continue;
+                    }
+                    m = sm_intersection(piece_acc, inflight);
+                    free(piece_acc);
+                    piece_acc = NULL;
+                    free(inflight);
+                    inflight = NULL;
+                    if (m == NULL)
+                        break;
+                    piece_acc = m;
+                }
+                if (piece_acc == NULL)
+                    continue;
+                if (result == NULL)
+                    result = piece_acc;
+                else
+                {
+                    /* both non-empty, so NULL can only mean out of memory */
+                    sm_t   *u = sm_union(result, piece_acc);
+
+                    if (u == NULL)
+                        ereport(ERROR,
+                                (errcode(ERRCODE_OUT_OF_MEMORY),
+                                 errmsg("out of memory")));
+                    free(result);
+                    result = u;
+                    free(piece_acc);
+                }
+                piece_acc = NULL;
+            }
+        }
         else  /* TRIGRAM_QUERY_DNF */
         {
             for (i = 0; i < st->q.n; i++)
@@ -1020,6 +1085,8 @@ tre_compute_candidate_sm(IndexScanDesc scan, TreScanState *st,
          */
         if (inflight != NULL)
             free(inflight);
+        if (piece_acc != NULL)
+            free(piece_acc);
         if (result != NULL)
             free(result);
         if (overlay_built)
