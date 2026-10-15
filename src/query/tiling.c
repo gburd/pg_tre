@@ -344,7 +344,6 @@ tile_pieces(const RegexAst *ast, int32 k, TrigramQuery *out, MemoryContext cxt)
     int         n_runs = 0;
     int         pieces[512];        /* pieces per run */
     int         want = k + 1;
-    int         have = 0;
     int         i, r, t;
     MemoryContext old;
 
@@ -396,7 +395,6 @@ tile_pieces(const RegexAst *ast, int32 k, TrigramQuery *out, MemoryContext cxt)
         if (best < 0)
             return false;
         pieces[best]++;
-        have++;
     }
 
     old = MemoryContextSwitchTo(cxt);
@@ -429,7 +427,7 @@ tile_pieces(const RegexAst *ast, int32 k, TrigramQuery *out, MemoryContext cxt)
             }
         }
     }
-    Assert(out->n == have);
+    Assert(out->n == want);
     MemoryContextSwitchTo(old);
     return true;
 }
