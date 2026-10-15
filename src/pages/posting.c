@@ -467,6 +467,45 @@ write_single_leaf(Relation index, uint64 trigram_hash,
     return blkno;
 }
 
+/*
+ * How many of the ascending TIDs tids[0..avail) fit one serialized
+ * sparsemap of at most `budget` bytes (at least 1).  Appends through a
+ * cursor -- O(1) each at the tail -- into a map whose buffer is exactly
+ * `budget`; the first TID that makes it grow does not fit.  The test is
+ * conservative (it keeps slack for the chunk-count header), so the count
+ * may fall a few TIDs short of the exact maximum, never over it.
+ */
+static int
+leaf_fill_count(const uint64 *tids, int avail, Size budget)
+{
+    sm_t       *fill = sm_create(budget);
+    sm_cursor_t cur = SM_CURSOR_INIT;
+    size_t      cap0;
+    int         n = 0;
+    bool        oom = false;
+
+    if (fill == NULL)
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+            errmsg("pg_tre: failed to allocate leaf sparsemap")));
+    cap0 = sm_get_capacity(fill);
+    while (n < avail)
+    {
+        if (sm_add_grow_cursor(&fill, (uint64_t) tids[n], &cur) == SM_IDX_MAX)
+        {
+            oom = true;
+            break;
+        }
+        if (sm_get_capacity(fill) > cap0)
+            break;              /* this TID overflowed the page */
+        n++;
+    }
+    sm_free(fill);
+    if (oom)
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
+            errmsg("pg_tre: failed to grow leaf sparsemap")));
+    return n > 0 ? n : 1;
+}
+
 BlockNumber
 pg_tre_posting_build_finish(PgTrePostingBuilder *b,
                             const uint8 **inline_data_out,
@@ -489,9 +528,10 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                                BlockNumber *cblk_out,
                                uint16 *cslot_out)
 {
-    const uint8 *bytes;
+    const uint8 *bytes = NULL;
     uint8      *copy;
     Size        sz = 0;
+    bool        multi;
 
     /*
      * 3.0.0: new builds emit posting leaves with NO payload region.
@@ -502,6 +542,19 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
     *coalesced_out = false;
     *cblk_out = InvalidBlockNumber;
     *cslot_out = 0;
+
+    /*
+     * A posting that cannot fit one page goes straight to the multi-leaf
+     * split, which encodes each leaf itself.  Encoding the whole posting
+     * first only to measure it -- millions of TIDs for a hot trigram of
+     * a big table -- was most of the remaining posting-phase time.  One
+     * page-sized fill answers "does it fit" in O(page).
+     */
+    multi = (b->n_tids > 0 &&
+             leaf_fill_count(b->tids, b->n_tids,
+                             posting_leaf_budget()) < b->n_tids);
+
+    copy = NULL;
 
     /*
      * Phase 4.1: convert the collected uint64 array of TIDs to a canonical
@@ -519,6 +572,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
      * geometric grow eliminates this class of failure.  The serialized
      * on-disk bytes are unchanged — only the in-memory cap differs.
      */
+    if (!multi)
     {
         size_t cap = (size_t) b->n_tids * 16 + 1024;
         sm_t *fresh = sm_create(cap);
@@ -566,7 +620,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
     }
 
     /* Inline case: sparsemap fits in PG_TRE_INLINE_POSTING_MAX. */
-    if (sz <= PG_TRE_INLINE_POSTING_MAX)
+    if (!multi && sz <= PG_TRE_INLINE_POSTING_MAX)
     {
         *inline_data_out  = bytes;      /* palloc'd; outlives builder */
         *inline_bytes_out = sz;
@@ -583,7 +637,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
          * Only the sparsemap (sz) gates eligibility, since that is what
          * a coalesced slot stores.
          */
-        if (cw != NULL
+        if (!multi && cw != NULL
             && sz > PG_TRE_INLINE_POSTING_MAX
             && sz <= PG_TRE_COALESCE_MAX)
         {
@@ -602,7 +656,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
         }
 
         /* Single-leaf case: everything fits in one page */
-        if (sz <= budget)
+        if (!multi && sz <= budget)
         {
             BlockNumber blk = write_single_leaf(b->index, b->trigram_hash,
                                                 bytes, sz,
@@ -651,36 +705,7 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
                 Size slice_sz = 0;
 
                 CHECK_FOR_INTERRUPTS();
-                {
-                    sm_t       *fill = sm_create(budget);
-                    sm_cursor_t cur = SM_CURSOR_INIT;
-                    size_t      cap0;
-                    bool        oom = false;
-
-                    if (fill == NULL)
-                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
-                            errmsg("pg_tre: failed to allocate leaf sparsemap")));
-                    cap0 = sm_get_capacity(fill);
-                    while (tids_in_leaf < avail)
-                    {
-                        if (sm_add_grow_cursor(&fill,
-                                               (uint64_t) b->tids[tid_idx + tids_in_leaf],
-                                               &cur) == SM_IDX_MAX)
-                        {
-                            oom = true;
-                            break;
-                        }
-                        if (sm_get_capacity(fill) > cap0)
-                            break;      /* this TID overflowed the page */
-                        tids_in_leaf++;
-                    }
-                    sm_free(fill);
-                    if (oom)
-                        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY),
-                            errmsg("pg_tre: failed to grow leaf sparsemap")));
-                }
-                if (tids_in_leaf < 1)
-                    tids_in_leaf = 1;
+                tids_in_leaf = leaf_fill_count(b->tids + tid_idx, avail, budget);
 
                 /*
                  * Encode the leaf exactly as before.  The capacity test is
@@ -745,7 +770,8 @@ pg_tre_posting_build_finish_ex(PgTrePostingBuilder *b,
             }
 
             /* Cleanup original buffers */
-            pfree(copy);
+            if (copy != NULL)
+                pfree(copy);
             *inline_data_out  = NULL;
             *inline_bytes_out = 0;
             return leftmost_blk;
