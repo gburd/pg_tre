@@ -1,0 +1,110 @@
+-- test/sql/class_pieces.sql
+--
+-- Two trigram filters added in 4.3.1, both checked against a seq scan:
+--
+-- 1. A small character class in a literal run is a position of
+--    alternatives: 'aa[bc]c' requires (aab | aac) AND (abc | acc) instead
+--    of giving up on the whole pattern.  depesz's blog post compared
+--    '(?<=e.)aa[bc]c[b-d]': pg_trgm narrowed it to 5177 rows, pg_tre read
+--    every row.  A backslash inside a bracket is opaque: core reads an
+--    escape there, TRE a literal backslash ('[\é]' matches 'caf\').
+--
+-- 2. Fuzzy patterns (k >= 1) long enough to cut into k+1 pieces of three
+--    characters use the pigeonhole on pieces: a match within k edits
+--    keeps at least one piece intact, so the filter is OR over pieces of
+--    the AND of each piece's trigrams -- exact trigrams only.  Before,
+--    every trigram's edit neighbourhood was unioned, which in a UTF-8
+--    database left 'postgresql' at k=1 reading the whole table.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/class_pieces.sql:19: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+SET client_min_messages = warning;
+SET
+DROP TABLE IF EXISTS cp;
+DROP TABLE
+CREATE TABLE cp (id int, s text);
+CREATE TABLE
+INSERT INTO cp VALUES
+  (1, 'xe.aacbz'), (2, 'yy aabcc'), (3, 'zz aaccd'), (4, 'aadcb'),
+  (5, 'postgresql'), (6, 'postgressql'), (7, 'postgrexql'), (8, 'pstgresql'),
+  (9, 'postgres ql'), (10, 'mysql'), (11, 'quick brown fox'),
+  (12, 'quack brown fox'), (13, 'quick brawn fix'), (14, 'café'),
+  (15, 'caf\'), (16, 'cafè'), (17, 'développement'), (18, 'developpement'),
+  (19, 'dévelopement'), (20, 'aa-c'), (21, 'AACB');
+INSERT 0 21
+INSERT INTO cp SELECT g, 'filler ' || md5(g::text) FROM generate_series(100, 2100) g;
+INSERT 0 2001
+CREATE INDEX cp_tre ON cp USING tre (s);
+CREATE INDEX
+ANALYZE cp;
+ANALYZE
+CREATE FUNCTION cp_rows(q text, ix bool) RETURNS int[]
+LANGUAGE plpgsql AS $$
+DECLARE r int[];
+BEGIN
+  PERFORM set_config('enable_seqscan',    (NOT ix)::text, true);
+  PERFORM set_config('enable_indexscan',  'off',          true);
+  PERFORM set_config('enable_bitmapscan', ix::text,       true);
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM cp WHERE ' || q INTO r;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+CREATE TEMP TABLE qs (q text);
+CREATE TABLE
+INSERT INTO qs VALUES
+  ($$s ~ 'aa[bc]c'$$), ($$s ~ 'aa[bc]c[b-d]'$$), ($$s ~ '(?<=e.)aa[bc]c[b-d]'$$),
+  ($$s ~ 'a[a-d][bc]c'$$), ($$s ~ '[xyz][ye ][ .]aa'$$), ($$s ~ 'aa[^b]c'$$),
+  ($$s ~ 'caf[\é]'$$), ($$s %~~ tre_pattern('caf[\é]', 0)$$),
+  ($$s ~ 'caf[éè]'$$), ($$s ~ 'aa[-x]c'$$), ($$s ~* 'aa[bc]c'$$),
+  ($$s %~~ tre_pattern('postgresql', 1)$$), ($$s %~~ tre_pattern('postgresql', 2)$$),
+  ($$s %~~ tre_pattern('quick brown', 2)$$), ($$s %~~ tre_pattern('quick brown fox', 3)$$),
+  ($$s %~~ tre_pattern('développement', 1)$$), ($$s %~~ tre_pattern('développement', 2)$$),
+  ($$s %~~ tre_pattern('postgres(ql|QL)', 1)$$), ($$s %~~ tre_pattern('post.resql', 1)$$),
+  ($$s %~~ tre_pattern('mysql', 1)$$), ($$s %~~ tre_pattern('postgresql', 1, 1, 1, 0)$$);
+INSERT 0 21
+SELECT q, cp_rows(q, false) AS via_seq,
+       cp_rows(q, true) IS NOT DISTINCT FROM cp_rows(q, false) AS agree
+  FROM qs ORDER BY q;
+                      q                      |                                      via_seq                                       | agree 
+---------------------------------------------+------------------------------------------------------------------------------------+-------
+ s %~~ tre_pattern('caf[\é]', 0)             | {14,15}                                                                            | t
+ s %~~ tre_pattern('développement', 1)       | {17,18,19}                                                                         | t
+ s %~~ tre_pattern('développement', 2)       | {17,18,19}                                                                         | t
+ s %~~ tre_pattern('mysql', 1)               | {10}                                                                               | t
+ s %~~ tre_pattern('post.resql', 1)          | {5,6,7,8,9}                                                                        | t
+ s %~~ tre_pattern('postgres(ql|QL)', 1)     | {5,6,7,8,9}                                                                        | t
+ s %~~ tre_pattern('postgresql', 1)          | {5,6,7,8,9}                                                                        | t
+ s %~~ tre_pattern('postgresql', 1, 1, 1, 0) | {5,6,7,8,9}                                                                        | t
+ s %~~ tre_pattern('postgresql', 2)          | {5,6,7,8,9}                                                                        | t
+ s %~~ tre_pattern('quick brown fox', 3)     | {11,12,13}                                                                         | t
+ s %~~ tre_pattern('quick brown', 2)         | {11,12,13}                                                                         | t
+ s ~ '(?<=e.)aa[bc]c[b-d]'                   |                                                                                    | t
+ s ~ '[xyz][ye ][ .]aa'                      | {1,2}                                                                              | t
+ s ~ 'a[a-d][bc]c'                           | {2,3,1233,1595,1816}                                                               | t
+ s ~ 'aa[-x]c'                               | {20}                                                                               | t
+ s ~ 'aa[^b]c'                               | {3,4,20,106,128,440,486,747,771,1165,1227,1233,1272,1716,1722,1893,1931,1935,1987} | t
+ s ~ 'aa[bc]c'                               | {2,3,1233}                                                                         | t
+ s ~ 'aa[bc]c[b-d]'                          | {2,3}                                                                              | t
+ s ~ 'caf[\é]'                               | {14}                                                                               | t
+ s ~ 'caf[éè]'                               | {14,16}                                                                            | t
+ s ~* 'aa[bc]c'                              | {2,3,1233}                                                                         | t
+(21 rows)
+
+-- The filters engage (no lossy whole-table scan).
+SELECT p, k, split_part(tre_extract_debug(p, k), E'\n', 1) AS mode,
+       tre_extract_debug(p, k) NOT LIKE '%ALWAYS_TRUE%' AS filtered
+  FROM (VALUES ('aa[bc]c[b-d]', 0), ('(?<=e.)aa[bc]c[b-d]', 0),
+               ('postgresql', 1), ('quick brown fox', 3),
+               ('développement', 2), ('mysql', 1)) v(p, k);
+          p          | k |      mode       | filtered 
+---------------------+---+-----------------+----------
+ aa[bc]c[b-d]        | 0 | k=0 mode=CNF    | t
+ (?<=e.)aa[bc]c[b-d] | 0 | k=0 mode=CNF    | t
+ postgresql          | 1 | k=1 mode=PIECES | t
+ quick brown fox     | 3 | k=3 mode=PIECES | t
+ développement       | 2 | k=2 mode=PIECES | t
+ mysql               | 1 | k=1 mode=CNF    | f
+(6 rows)
+
+DROP TABLE cp;
+DROP TABLE

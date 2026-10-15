@@ -458,16 +458,19 @@ tre_tokenize_next(TreParseCtx *ctx, TreToken *out)
 		}
 		else if (c == '\\')
 		{
+			/*
+			 * A backslash in a bracket means different things to the two
+			 * recheck engines: core's ~ (ARE) reads an escape, TRE (%~~)
+			 * follows POSIX, where it is a literal member -- '[\é]' holds
+			 * both '\\' and 'é' there.  The bracket is one opaque
+			 * character either way.  (Its exact members started to matter
+			 * once small classes were expanded into trigrams.)
+			 */
 			int esc = parse_escape(ts, ctx);
-			if (esc == PG_TRE_ESC_CLASS || esc == PG_TRE_ESC_OPAQUE)
-			{
-				ts->bracket_opaque = true;
-				out->cp = 0;
-				return TOK_LITERAL;
-			}
-			if (esc < 0)
+			if (esc == -1 && ctx->syntax_error)
 				return -1;
-			out->cp = esc;
+			ts->bracket_opaque = true;
+			out->cp = 0;
 			return TOK_LITERAL;
 		}
 		else
