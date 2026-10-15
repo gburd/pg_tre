@@ -6,6 +6,102 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.1] - 2026-10-15 - CREATE INDEX on large tables: bounded memory, parallel posting build, far faster; regex and fuzzy queries the index could not serve
+
+**No on-disk format change; no REINDEX** to upgrade or to downgrade to
+4.3.0.  Rebuilding an index built by 4.3.0 gives the same index faster;
+nothing in an existing index is wrong.  Field report: Codeberg issue #1
+and the depesz.com review of pg_tre (2026-08-25) -- a 30 GB text column
+whose build ran 7 hours (and in a later attempt grew to 33 GB RSS), plus
+regex syntax the index rejected.
+
+### Fixed
+
+- **`CREATE INDEX` leaked every compressed row's text for the whole heap
+  scan.**  The build detoasted each value in the statement's memory
+  context and never freed it, so the backend grew by the size of the
+  toasted text: 33 GB RSS and climbing on a 30 GB column (issue #1), and
+  on a 30 GB / 10.5 M-row corpus with about half its rows compressed,
+  +5 MB/s to 5.8 GB at 41% of the scan.  Each heap tuple now runs in a
+  per-row memory context, as nbtree and GIN do; the same build stays at
+  ~200-600 MB.  `tap/build_memory.pl` pins it.  Present since 3d45b8d
+  (2026-05).
+- **A posting that spans many leaf pages cost O(N^2 / page) to build.**
+  Every leaf re-encoded the whole remainder of the posting to size
+  itself, so the hot trigrams of a large table kept the build in one loop
+  for hours.  Leaves are now cut with one cursor pass, and a posting that
+  cannot fit a page is no longer encoded whole just to find that out.
+  Leaves fill slightly better (index ~4% smaller).
+- **Looking up a hot trigram copied its posting once per leaf page.**  A
+  posting chain was unioned leaf by leaf into one growing map, O(N * L);
+  on a 30 GB table one lookup spent 37 s before reading the heap.  It is
+  merged like a binary counter now, O(N log L): 0.66 s.
+- **`'ab+c'` dropped rows from the index** (index != seq scan, for `~` and
+  `%~~`): a repetition with a minimum of one (`b+`, `b{1,3}`) carried the
+  literal run through a single copy, so the index required the trigram
+  `abc` and lost rows holding only `abbc`.
+- **Patterns core regex accepts failed on the index path** with
+  `pg_tre: invalid regex pattern:` and an empty message: lazy quantifiers
+  (`x*?`), empty alternatives (`(|a)`, `a||b`), director prefixes
+  (`***=`), `a{,3}`.  pg_tre's pattern parser only finds trigrams; when it
+  cannot read a pattern the scan is now lossy and the recheck's engine
+  matches it or raises its own error.  depesz hit this with a lookbehind.
+- **EXPLAIN showed `Index Searches: 0`** and `pg_stat_user_indexes.idx_scan`
+  stayed at zero: pg_tre never counted an index search.
+- A backslash inside a bracket (`[\é]`) means an escape to core regex and a
+  literal backslash to TRE; the index now treats such a bracket as one
+  unknown character for both.
+
+### Changed
+
+- **The posting-tree phase of a parallel build runs on every
+  participant.**  It used to merge the sorted stream and write every
+  posting tree on the leader alone, while the workers sat idle.  Trigrams
+  now go to one of several hash-range sorts; each participant claims
+  ranges, merges them and writes their posting trees; the leader builds
+  the upper tree and the SuRF filter from the ranges' results in hash
+  order.  The index content is the same as a serial build's.  See
+  `doc/design/parallel-posting-build.md`.
+- **Lookarounds and `(?:...)` no longer make a pattern unindexed.**
+  `(?:X)` is a group; `(?=..)`, `(?!..)`, `(?<=..)`, `(?<!..)` stand for an
+  optional character, so the literals around them still give trigrams.
+  Embedded options (`(?i)`) remain lossy.
+- **Small character classes are indexed.**  `aa[bc]c` requires
+  `(aab | aac) AND (abc | acc)` instead of giving up on the pattern (a
+  class of at most 8 characters, at most 64 combinations per trigram).
+- **Fuzzy matches (`k >= 1`) filter on exact pieces of the pattern.**  The
+  pattern's literals are cut into k+1 pieces of at least three characters;
+  a match within k edits keeps one piece intact, so the filter is the OR
+  of each piece's trigrams ANDed.  The old filter unioned every trigram's
+  edit neighbourhood, which in a UTF-8 database could not narrow
+  `'postgresql'` at k=1 at all.
+
+Measured on PostgreSQL 18.6, i4i.8xlarge (32 vCPU, NVMe), synthetic prose:
+
+| | 4.3.0 | 4.3.1 |
+|---|---|---|
+| 30 GB / 10.5 M rows, depesz's settings (`maintenance_work_mem` 64 MB, 2 participants) | cancelled at 18 min: 5.8 GB RSS, +5 MB/s, scan 41% done; with only the leak fixed, still building postings at 1 h 52 min | 1 h 33 min, peak RSS 300 MB |
+| 30 GB / 10.5 M rows, `maintenance_work_mem` 4 GB, 8 participants | -- | 30 min (pg_trgm GIN at 64 MB: 52 min) |
+| 30 GB table: `~ 'aa[bc]c[b-d]'` | every row rechecked | 0.78 s (pg_trgm 0.28 s) |
+| 30 GB table: `~ '(su){3}'` / `~ 'quick brown'` | -- | 12.4 s / 6.7 s (pg_trgm 36 s / 26 s) |
+| 2 GB / 702 k rows, serial, 1 GB | leak fixed only: posting phase cancelled after 90 min | 216 s |
+| 2 GB / 702 k rows, 1 GB, 5 participants | -- | 154 s (posting phase 53 s) |
+| 2 GB subset: `%~~ tre_pattern('postgresql', 1)` | 190 s (every row rechecked) | 5.4 s (4.7 k candidates) |
+| 2 GB subset: `~ 'aa[bc]c[b-d]'` | every row rechecked | 229 candidates, 0.2 s |
+| `~ '(?<=e.)aa[bc]c[b-d]'` | `ERROR: pg_tre: invalid regex pattern:` | 229 candidates, 0.4 s |
+
+### Added
+
+- Tests: `rep_extract`, `regex_groups_index`, `class_pieces`, and
+  `tap/build_memory.pl`.  `regex_class_index`'s pattern helper set only
+  one side of the planner settings with `SET LOCAL`, which lasts across
+  calls in one `SELECT`, so its sequential side could compare the index
+  with itself; it now sets all three every call (results unchanged).
+- `doc/design/dense-tid-packing.md`: why a `tre` index over long
+  documents is several times larger than pg_trgm's (each heap block a
+  posting touches costs a whole sparsemap chunk) and the proposed 4.4.0
+  format change.
+
 ## [4.3.0] - 2026-10-07 - every server encoding; character classes and case folding follow core regex; PostgreSQL 17; index false negatives fixed
 
 **No on-disk format change.  UTF-8 databases: no REINDEX** (trigram hashes

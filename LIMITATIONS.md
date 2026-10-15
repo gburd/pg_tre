@@ -60,21 +60,24 @@ RAM for fewer merge passes and faster builds.
 What *does* still scale with corpus size:
 
 ```
-temp_disk    ≈ emitted_trigrams × ~64 B    (tuplesort spill, real cost)
-index_size   ≈ distinct_trigrams × ~16 B   (after sparsemap TID-list compression)
+temp_disk    ≈ emitted_trigrams × ~32 B    (tuplesort spill, measured 4.3.1)
+index_size   ≈ emitted_trigrams × ~9-16 B  (sparsemap TID lists; see "size at scale")
 tid_bloom    ≈ N_rows × ~56 B              (resident; O(distinct TIDs))
 ```
 
-**The temp-disk figure is the one that bites.** Each trigram
-*occurrence* in the text becomes one `tuplesort` entry; the encoded
-key is 24 bytes but tuplesort wraps every datum in a
-`SortTuple`+`MinimalTuple`, so the real on-disk cost is **~64 bytes
-per emitted tuple**. Natural text emits roughly one trigram per
-character, so:
+**The temp-disk figure is the one that bites.** Each distinct trigram
+of each row becomes one `tuplesort` entry (since 2.0, repeats within a
+row are emitted once): a 24-byte key in a by-reference datum, about
+**32 bytes per entry on tape** (4.3.1, measured on 165 M entries).
+Natural text has roughly one distinct trigram per character for short
+rows and fewer for long ones, so:
 
 ```
-temp_disk ≈ (bytes_of_text) × ~64 B/char     (worst case, no repetition)
+temp_disk ≈ (bytes_of_text) × up to ~32 B/char
 ```
+
+`tre_estimate_index_build` and `pg_tre.build_max_entries_mb` still
+charge ~64 B per entry, so both are about 2x conservative.
 
 **Field data point (production, v1.8.2):** a user indexing message
 bodies measured **~21 GB of build temp at 2.1 % of their body
@@ -205,26 +208,35 @@ with **zero mismatches**, crash recovery after SIGKILL-mid-build was clean
 pathological patterns, and parallel builds showed no deadlocks. Two
 non-correctness findings that affect **sizing and maintenance**:
 
-### Build throughput is low and super-linear
+### Build throughput and size at scale
 
-Medium-text (~400 B rows) `CREATE INDEX USING tre` build times, 8 workers,
-1 GB `maintenance_work_mem`:
+Measured in 4.3.1 on PostgreSQL 18.6, i4i.8xlarge (32 vCPU, NVMe):
 
-| rows | heap | build |
-|------|------|-------|
-| 50k  | 8 MB   | ~3.4 s |
-| 250k | 49 MB  | ~15–40 s |
-| 2M   | 385 MB | >7 min |
-| 10M  | 1.9 GB | >20 min |
+| corpus | settings | build | index | pg_trgm GIN |
+|---|---|---|---|---|
+| 2 GB prose, 702 k rows | 1 GB `maintenance_work_mem`, 5 participants | 154 s | 7.3 GB | 97 s, 1.0 GB |
+| 2.7 GB synthetic EXPLAIN plans, 160 k rows | 1 GB, 4 participants | 67 s | 1.35 GB | 66 s, 0.36 GB |
+| 30 GB prose, 10.5 M rows | 64 MB, 2 participants | 1 h 33 min | 109 GB | 52 min, 14 GB |
+| 30 GB prose, 10.5 M rows | 4 GB, 8 participants | 30 min | 109 GB | |
 
-Only the scan + trigram-extraction + sort phase parallelizes; the
-posting-tree / upper-tree / SuRF construction runs serially in the leader
-and dominates once emissions are large. Constraining `maintenance_work_mem`
-makes it far worse (merge-pass count explodes) though RSS stays bounded
-(~100 MB). **Budget build time generously at scale, prefer the CONCURRENTLY
-variants, keep `maintenance_work_mem` generous, and treat pg_tre as
-small/medium-corpus territory for long-text columns** (consistent with the
-sizing table at the top of this file).
+- **Memory is bounded** (a few hundred MB, with `maintenance_work_mem` on
+  top) since 4.3.1. 4.3.0 and earlier leaked every compressed row's text
+  for the whole scan.
+- **Temp disk is the big cost**: 32 bytes per emitted trigram (measured),
+  and a row emits one trigram per distinct trigram it contains. The 30 GB
+  corpus needed 366 GB of `pgsql_tmp`. Check with `tre_estimate_index_build`
+  first: its trigram count is close (818 M estimated vs 826 M on the 2 GB
+  corpus), and its `est_temp_mb` assumes 64 bytes per trigram, so it is
+  about 2x high.
+- **Give the build memory and workers.** Every phase (scan, sort and,
+  since 4.3.1, the posting trees) runs on all participants. The planner
+  assigns at most `maintenance_work_mem / 32 MB - 1` workers, so 64 MB
+  allows a single worker. 1–4 GB with `max_parallel_maintenance_workers` 4–8
+  is a good start.
+- **The index is several times larger than pg_trgm's on long-document
+  columns**, because each heap block a posting touches costs a whole
+  sparsemap chunk and long documents leave few rows per block. The fix is a
+  format change planned for 4.4.0 (`doc/design/dense-tid-packing.md`).
 
 ### Posting-leaf bloat under sustained churn — REINDEX to reclaim
 
