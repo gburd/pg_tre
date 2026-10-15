@@ -1,8 +1,20 @@
 # pg_tre status
 
-Released: **4.3.0** (2026-10).  See `CHANGELOG.md` for full
+Released: **4.3.1** (2026-10).  See `CHANGELOG.md` for full
 release notes and `doc/design.md` for the architecture this
 file tracks against.
+
+4.3.1 makes CREATE INDEX on large tables practical.  The build
+no longer leaks every compressed row's text (33 GB RSS on a 30 GB
+column, issue #1), the posting-tree phase of a parallel build runs
+on every participant instead of the leader alone, multi-page
+postings are cut and read in near-linear time, and a 30 GB /
+10.5 M-row corpus builds in 30 min (4 GB maintenance_work_mem,
+8 participants) or 1 h 33 min at 64 MB with 300 MB peak RSS.
+Patterns core regex accepts no longer fail on the index path,
+lookarounds and small character classes give trigrams, fuzzy
+matches filter on exact pieces of the pattern, and `'ab+c'` no
+longer drops rows from the index.  No on-disk change, no REINDEX.
 
 4.3.0 makes pg_tre work in every server encoding (it decodes text
 in the database encoding, in the tokenizer and inside TRE) and

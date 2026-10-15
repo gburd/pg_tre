@@ -206,6 +206,7 @@ restart:
 | 4.2.1   | 4.2.2   | ✅ Yes       | No on-disk change, no REINDEX either way. UTF-8 databases with a C ctype: fuzzy queries over non-ASCII text now count characters and may return more (correct) rows |
 | 4.2.2   | 4.2.3   | ✅ Yes       | No on-disk change, no REINDEX either way. Fixes a backend crash on an ERROR during a pending-list scan (clang/flake builds) |
 | 4.2.3   | 4.3.0   | ⚠️ Yes, but  | No on-disk change. UTF-8 databases: no REINDEX. **Non-UTF-8 databases: REINDEX every `tre` index holding non-ASCII text** (its trigrams were decoded as UTF-8). Class / `(?i)` answers over non-ASCII text now follow core regex for the call's collation; index scans no longer drop rows (see CHANGELOG); nondeterministic collations refused at index build |
+| 4.3.0   | 4.3.1   | ✅ Yes       | No on-disk change, no REINDEX either way. CREATE INDEX no longer leaks memory and builds posting trees in parallel; `'ab+c'` no longer drops rows from the index; patterns core regex accepts no longer fail on the index path |
 
 When releasing a version with breaking changes:
 
