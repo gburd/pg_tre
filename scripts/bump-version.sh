@@ -196,12 +196,14 @@ perl -i -pe "s/\Q$OLD\E/$NEW/g" "$DST_MAIN"
 # inner version of legacy chain entries like
 # `pg_tre--1.1.0--1.1.1.sql` -> `pg_tre--1.1.0--1.2.0-dev.sql`,
 # which corrupts the upgrade chain.
+# (scripts/release-check.sh used to be listed too.  It holds no version
+# to bump, only a historical "v3.2.3 shipped that way" note, which the
+# blanket rewrite advanced every release.)
 common_files=(
     pg_tre.control
     META.json
     debian/changelog
     packaging/pg_tre.spec
-    scripts/release-check.sh
 )
 
 for f in "${common_files[@]}"; do
