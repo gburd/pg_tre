@@ -2414,10 +2414,22 @@ __sm_small_nwords(const sm_t *map)
 	return ((size_t)(__sm_load_u64(&map->m_data[0]) & SM_SMALL_WMASK));
 }
 
-static inline uint64_t *
+/*
+ * The small-set word array starts 8 bytes into m_data.  m_data is
+ * 8-aligned for library-owned maps, but sm_wrap/sm_init/sm_open accept
+ * a caller buffer that may be arbitrarily aligned (sm.h documents that
+ * this works, with a speed cost on some cpus).  So the words are typed
+ * __sm_bitvec_unaligned_t -- like every chunk descriptor -- and the
+ * compiler emits alignment-safe loads/stores instead of trapping on a
+ * strict-alignment cpu or tripping UBSan.  Same codegen on x86_64 and
+ * aarch64; a plain `uint64_t *` here was undefined behaviour on a
+ * misaligned buffer.
+ */
+static inline __sm_bitvec_unaligned_t *
 __sm_small_words(const sm_t *map)
 {
-	return ((uint64_t *)&map->m_data[SM_SIZEOF_OVERHEAD]);
+	return ((__sm_bitvec_unaligned_t *)(void *)&map->m_data[
+	    SM_SIZEOF_OVERHEAD]);
 }
 
 static inline void
@@ -2427,12 +2439,6 @@ __sm_small_set_header(sm_t *map, size_t nwords)
 	    SM_SMALL_FLAG | (uint64_t)nwords);
 }
 
-/* Byte footprint of the small form holding indices up to maxbit. */
-static inline size_t
-__sm_small_bytes_for(uint64_t maxbit)
-{
-	return (SM_SIZEOF_OVERHEAD + (size_t)(maxbit / 64 + 1) * sizeof(uint64_t));
-}
 
 /* True if idx is set in a small-mode map. */
 static bool
@@ -2449,7 +2455,7 @@ __sm_small_contains(const sm_t *map, uint64_t idx)
 static uint64_t
 __sm_small_cardinality(const sm_t *map)
 {
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	uint64_t c = 0;
 	size_t i;
@@ -2462,7 +2468,7 @@ __sm_small_cardinality(const sm_t *map)
 static bool
 __sm_small_is_empty(const sm_t *map)
 {
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	size_t i;
 	for (i = 0; i < n; i++) {
@@ -2476,7 +2482,7 @@ __sm_small_is_empty(const sm_t *map)
 static uint64_t
 __sm_small_minimum(const sm_t *map)
 {
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	size_t i;
 	for (i = 0; i < n; i++) {
@@ -2490,7 +2496,7 @@ __sm_small_minimum(const sm_t *map)
 static uint64_t
 __sm_small_maximum(const sm_t *map)
 {
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	size_t i;
 	for (i = n; i-- > 0;) {
@@ -4289,7 +4295,7 @@ static void __sm_expand_sparse_chunk(const __sm_chunk_t *chunk,
 static bool
 __sm_small_is_run_from_zero(const sm_t *map, uint64_t *run_len_out)
 {
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	uint64_t len = 0;
 	bool ended = false;
@@ -4348,7 +4354,7 @@ __sm_small_is_run_from_zero(const sm_t *map, uint64_t *run_len_out)
 static size_t
 __sm_small_chunk_bytes(const sm_t *map)
 {
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	size_t mixed = 0;
 	uint64_t run_len = 0;
@@ -4622,7 +4628,7 @@ __sm_try_demote(sm_t *map)
 static sm_t *
 __sm_materialize(const sm_t *small)
 {
-	const uint64_t *w = __sm_small_words(small);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(small);
 	const size_t n = __sm_small_nwords(small);
 	sm_t *m = sm_create(256);
 	size_t i;
@@ -5011,7 +5017,7 @@ sm_remove(sm_t *map, const uint64_t idx)
 		const size_t w = (size_t)(idx / 64);
 		if (w < __sm_small_nwords(map)) {
 			size_t n;
-			uint64_t *words;
+			__sm_bitvec_unaligned_t *words;
 			__sm_small_words(map)[w] &=
 			    ~((uint64_t)1 << (idx % 64));
 			/* Shrink the trailing all-zero words so the footprint
@@ -5395,7 +5401,7 @@ __sm_small_add(sm_t *map, uint64_t idx)
 	if (w >= n) {
 		const size_t need = SM_SIZEOF_OVERHEAD +
 		    (w + 1) * sizeof(uint64_t);
-		uint64_t *words;
+		__sm_bitvec_unaligned_t *words;
 		size_t i;
 		if (need > __sm_cap(map)) {
 			errno = ENOSPC;
@@ -6168,9 +6174,11 @@ __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 {
 	int i;
 	for (i = 0; i < 32; i += 4) {
-		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
-		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
-		_mm256_storeu_si256((__m256i *)&dst[i],
+		__m256i va = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&a[i]);
+		__m256i vb = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&b[i]);
+		_mm256_storeu_si256((__m256i *)(void *)&dst[i],
 		    _mm256_or_si256(va, vb));
 	}
 }
@@ -6181,9 +6189,11 @@ __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 {
 	int i;
 	for (i = 0; i < 32; i += 4) {
-		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
-		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
-		_mm256_storeu_si256((__m256i *)&dst[i],
+		__m256i va = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&a[i]);
+		__m256i vb = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&b[i]);
+		_mm256_storeu_si256((__m256i *)(void *)&dst[i],
 		    _mm256_and_si256(va, vb));
 	}
 }
@@ -6195,9 +6205,11 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 	/* dst = a & ~b */
 	int i;
 	for (i = 0; i < 32; i += 4) {
-		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
-		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
-		_mm256_storeu_si256((__m256i *)&dst[i],
+		__m256i va = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&a[i]);
+		__m256i vb = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&b[i]);
+		_mm256_storeu_si256((__m256i *)(void *)&dst[i],
 		    _mm256_andnot_si256(vb, va));
 	}
 }
@@ -6211,9 +6223,12 @@ __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 {
 	int i;
 	for (i = 0; i < 32; i += 2) {
-		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
-		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
-		_mm_storeu_si128((__m128i *)&dst[i], _mm_or_si128(va, vb));
+		__m128i va = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&a[i]);
+		__m128i vb = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&b[i]);
+		_mm_storeu_si128((__m128i *)(void *)&dst[i],
+		    _mm_or_si128(va, vb));
 	}
 }
 
@@ -6223,9 +6238,12 @@ __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 {
 	int i;
 	for (i = 0; i < 32; i += 2) {
-		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
-		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
-		_mm_storeu_si128((__m128i *)&dst[i], _mm_and_si128(va, vb));
+		__m128i va = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&a[i]);
+		__m128i vb = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&b[i]);
+		_mm_storeu_si128((__m128i *)(void *)&dst[i],
+		    _mm_and_si128(va, vb));
 	}
 }
 
@@ -6236,9 +6254,12 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 	/* dst = a & ~b */
 	int i;
 	for (i = 0; i < 32; i += 2) {
-		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
-		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
-		_mm_storeu_si128((__m128i *)&dst[i], _mm_andnot_si128(vb, va));
+		__m128i va = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&a[i]);
+		__m128i vb = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&b[i]);
+		_mm_storeu_si128((__m128i *)(void *)&dst[i],
+		    _mm_andnot_si128(vb, va));
 	}
 }
 
@@ -7564,7 +7585,7 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	if (__sm_is_small(map)) {
 		/* First set bit strictly greater than prev_idx (SM_IDX_MAX
 		 * means "from the start"). */
-		const uint64_t *words = __sm_small_words(map);
+		const __sm_bitvec_unaligned_t *words = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
 		const uint64_t from = (prev_idx == SM_IDX_MAX) ? 0
 		                                               : prev_idx + 1;
@@ -7654,7 +7675,7 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	if (__sm_is_small(map)) {
 		/* Highest set bit strictly less than prev_idx (SM_IDX_MAX
 		 * means "from the end"). */
-		const uint64_t *words = __sm_small_words(map);
+		const __sm_bitvec_unaligned_t *words = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
 		uint64_t upper_excl;
 		uint64_t last;
@@ -7887,7 +7908,7 @@ __sm_run_iter_init(__sm_run_iter_t *it, const sm_t *map)
 		 * map spans < SM_SMALL_MAX_BITS (<= 1024) bits, whose worst
 		 * case (alternating) is <= 512 runs -- well within the buffer.
 		 * run_hi is exclusive here, matching __sm_run_decode_chunk. */
-		const uint64_t *w = __sm_small_words(map);
+		const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
 		bool open = false;
 		uint64_t cur_lo = 0, cur_hi = 0;
@@ -9368,7 +9389,7 @@ sm_validate(const sm_t *map)
 		 * the hi != 0 guard. */
 		if (!__sm_chunk_is_rle(&chunk)) {
 			const __sm_bitvec_t hi = chunk.m_data[0] &
-			    (__sm_bitvec_t)0xAAAAAAAAAAAAAAAAULL;
+			    (__sm_bitvec_t)UINT64_C(0xAAAAAAAAAAAAAAAA);
 			if (hi != 0) {
 				const size_t highest_data =
 				    (size_t)(63 - SM_CLZ64(hi)) / 2;
@@ -9894,7 +9915,35 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 		const size_t set_end = set_start + len;
 		const size_t emit_start = from > set_start ? from : set_start;
 		const size_t emit_end = to < set_end ? to : set_end;
-		return (__sm_append_run(resultp, emit_start, emit_end));
+		if (emit_start < emit_end) {
+			/*
+			 * The clipped run [emit_start, emit_end) must be laid
+			 * down as proper, chunk-aligned output chunk(s): a chunk
+			 * start has to be a multiple of SM_CHUNK_MAX_CAPACITY.
+			 * Appending the raw emit_start as an RLE chunk start was
+			 * the 5.8.1 misalignment bug -- it produced a map whose
+			 * membership was correct but which failed sm_validate,
+			 * and for a long clip it emitted one over-length RLE
+			 * chunk spanning many 2048 windows.  Route the run
+			 * through the same ordered emitter the other set ops use
+			 * (__sm_emit_run), which splits the run at chunk
+			 * boundaries, anchors each output chunk at its aligned
+			 * floor, and forwards the sub-chunk head/tail to the
+			 * words path.  A fresh emitter per call is correct: the
+			 * difference sweep appends output chunks in ascending,
+			 * non-overlapping order, so flushing here before
+			 * returning never collides with a later append.
+			 */
+			__sm_emitter_t em;
+			memset(&em, 0, sizeof(em));
+			em.resultp = resultp;
+			if (!__sm_emit_run(&em, (uint64_t)emit_start,
+			        (uint64_t)emit_end)) {
+				return (false);
+			}
+			return (__sm_emit_flush(&em));
+		}
+		return (true);
 	}
 
 	/* Sparse: expand, mask to [from, to) range, encode and append */
