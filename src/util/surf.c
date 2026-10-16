@@ -86,12 +86,6 @@ bv_init(SurfBitvec *bv, uint32 nbits)
 	bv->rank = NULL;
 }
 
-static inline void
-bv_set(SurfBitvec *bv, uint32 i)
-{
-	bv->words[i >> 6] |= (UINT64CONST(1) << (i & 63));
-}
-
 static inline bool
 bv_get(const SurfBitvec *bv, uint32 i)
 {
@@ -361,7 +355,7 @@ surf_successor(const PgTreSurf *s, uint64 lo, uint64 *out)
 
 backtrack:
 	/* Walk up: at each recorded depth, try the next label after st_pos[d]. */
-	for (d = d; d >= 0; d--)
+	for (; d >= 0; d--)
 	{
 		uint32		node = st_node[d];
 		uint32		nhi = surf_node_end(s, node);
