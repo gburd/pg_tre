@@ -101,6 +101,8 @@ grep -q 'tre_ctype("alpha")' vendor/tre/lib/tre-parse.c \
 grep -q 'item.pos_add_next' vendor/tre/lib/tre-match-backtrack.c \
     && grep -q 'num_slots' vendor/tre/lib/tre-match-approx.c \
     || die "TRE upstream-fixes patch not applied (patches/tre-upstream-fixes.patch)"
+grep -q 'whether or not c is classified' vendor/tre/lib/tre-parse.c \
+    || die "TRE icase-allcases patch not applied (patches/tre-icase-allcases.patch)"
 make -s PG_CONFIG=$PGB/pg_config install >/dev/null 2>&1 || die "pg_tre install failed"
 # Capture first: under pipefail, `nm | grep -q` fails with SIGPIPE on a match.
 syms=$(nm -D "$($PGB/pg_config --pkglibdir)/pg_tre.so")

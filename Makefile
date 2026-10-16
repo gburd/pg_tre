@@ -89,7 +89,8 @@ TRE_CONFIG_H   = $(TRE_DIR)/config.h
 # them.  Keep this list in step with flake.nix (postPatch),
 # bench/stress/stress-suite.sh and scripts/asan-check.sh.
 TRE_PATCH      = patches/tre-progress-hook.patch patches/tre-mbdecoder.patch \
-                 patches/tre-icase-class.patch patches/tre-upstream-fixes.patch
+                 patches/tre-icase-class.patch patches/tre-upstream-fixes.patch \
+                 patches/tre-icase-allcases.patch
 TRE_PATCH_STAMP = $(TRE_DIR)/.pg_tre-patched
 LIME_BIN       = $(LIME_DIR)/lime
 

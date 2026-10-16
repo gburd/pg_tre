@@ -40,8 +40,7 @@
 -- no ctype entry point to call.  ICU class membership therefore follows
 -- PostgreSQL's Unicode tables, not libicu: Arabic-Indic digits, letter-like
 -- numbers and symbols (U+216B, U+24B6), soft hyphen and symbols as punct
--- differ.  Case folding is the same (Unicode simple case mappings), except
--- for titlecase letters (see :fold).
+-- differ.  Case folding is the same (Unicode simple case mappings).
 -- Then,
 -- through a tre index, that every class / shorthand / (?i) query returns
 -- the same rows as a sequential scan.
@@ -103,13 +102,12 @@ $probe$ AS probe,
 -- as a literal ('(?i)^b$') and as a bracket ('(?i)^[b]$'); core_equal
 -- counts the pairs core folds together, so a change in core's folding
 -- shows up too.  Not only letters: Ⅻ and Ⓐ fold although they are not
--- letters.  Patterns b that core's ~* does not match
--- against b itself are left out.  Those are the titlecase letters (U+01C5
--- ǅ) under a Unicode or libc ctype, the one known folding difference,
--- shown by :title below: core folds ǅ to its upper and lower forms only,
--- [Ǆǆ], so neither (?i)ǅ nor (?i)[ǅ] matches ǅ itself; TRE picks the
--- other case by isupper()/islower(), so under the Unicode strategies (ǅ
--- is neither) it matches only ǅ, and under libc (?i)[ǅ] is [ǅǄ].
+-- letters, and a titlecase letter (U+01C5 ǅ) folds to its upper and lower
+-- forms; TRE takes a character's case images from toupper()/tolower(), as
+-- core does, whether or not the ctype calls it upper or lower
+-- (patches/tre-icase-allcases.patch).  Which pairs core folds depends on
+-- the ctype's case tables (FreeBSD's libc C.UTF-8 maps ǅ to itself and
+-- glibc's to ǆ), so under libc core_equal is checked, not printed.
 $fold$
 SELECT count(*) AS pairs,
        count(*) FILTER (WHERE a.c ~* ('^' || b.c || '$')) AS core_equal,
@@ -122,13 +120,13 @@ SELECT count(*) AS pairs,
                          IS DISTINCT FROM (a.c ~* ('^[' || b.c || ']$'))), 'none')
          AS disagree
   FROM ch a, ch b
- WHERE CASE WHEN b.c ~ '[][\\^$.|?*+(){}-]' THEN false
-            ELSE b.c ~* ('^' || b.c || '$') END
+ WHERE b.c !~ '[][\\^$.|?*+(){}-]'
 $fold$ AS fold,
--- The titlecase difference, spelled out (UTF-8 databases; LIMITATIONS.md).
+-- Titlecase, spelled out (UTF-8 databases): TRE agrees with core on each
+-- of Ǆ ǅ ǆ against (?i)ǅ and (?i)[ǅ] (what core answers is the ctype's).
 $title$
-SELECT c, c ~* '^ǅ$' AS core_lit, tre_amatch(c, '(?i)^ǅ$', 0) AS tre_lit,
-       c ~* '^[ǅ]$' AS core_brk, tre_amatch(c, '(?i)^[ǅ]$', 0) AS tre_brk
+SELECT c, (c ~* '^ǅ$') = tre_amatch(c, '(?i)^ǅ$', 0) AS lit_same,
+       (c ~* '^[ǅ]$') = tre_amatch(c, '(?i)^[ǅ]$', 0) AS brk_same
   FROM (VALUES ('Ǆ'), ('ǅ'), ('ǆ')) v(c)
 $title$ AS title,
 -- Through the index: every character inside a word, one row each, plus
@@ -249,7 +247,12 @@ SET client_min_messages = warning;
 CREATE EXTENSION pg_tre;
 :u8chars
 :probe;
-:fold;
+:fold \gset
+SELECT :pairs AS pairs, :'disagree' AS disagree;
+SELECT :core_equal < 60 AS bad \gset
+\if :bad
+\echo libc C.UTF-8 core folds only :core_equal pairs
+\endif
 :title;
 :idxsetup
 :idxprobe;
@@ -296,7 +299,7 @@ SELECT :'disagree' <> 'none' OR :checks <> 1590 OR :classes_with_members <> 30 A
 \echo PG_UNICODE_FAST classes: :checks :classes_with_members disagree: :disagree
 \endif
 :fold \gset
-SELECT :'disagree' <> 'none' OR :pairs <> 2650 OR :core_equal <> 60 AS bad \gset
+SELECT :'disagree' <> 'none' OR :pairs <> 2703 OR :core_equal <> 60 AS bad \gset
 \if :bad
 \echo PG_UNICODE_FAST fold: :pairs :core_equal disagree: :disagree
 \endif

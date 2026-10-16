@@ -33,11 +33,17 @@ INSERT INTO tcc_ch (c, letter) VALUES
   ('Ａ', true), (chr(160), false), (chr(8195), false), ('!', false);
 
 -- Collations under test: one per strategy.  The libc one needs the OS
--- C.UTF-8 locale; it prints nothing different when missing.
+-- C.UTF-8 locale -- "C.utf8" on glibc, "C.UTF-8" on FreeBSD; whichever
+-- exists is checked, and it prints nothing different when missing.
 CREATE TABLE tcc_coll (coll text);
-INSERT INTO tcc_coll SELECT c FROM unnest(ARRAY['C', 'POSIX', 'und-x-icu',
-                                                'pg_c_utf8', 'C.utf8']) c
- WHERE EXISTS (SELECT FROM pg_collation WHERE collname = c);
+DO $$
+BEGIN
+  INSERT INTO tcc_coll SELECT c FROM unnest(ARRAY['C', 'POSIX', 'und-x-icu',
+                                                  'pg_c_utf8']) c
+   WHERE EXISTS (SELECT FROM pg_collation WHERE collname = c);
+  INSERT INTO tcc_coll SELECT collname FROM pg_collation
+   WHERE collname IN ('C.utf8', 'C.UTF-8') ORDER BY collname LIMIT 1;
+END $$;
 
 CREATE FUNCTION tcc_check(coll text, OUT checks int, OUT members int,
                           OUT disagree text)
@@ -85,9 +91,11 @@ END $f$;
 -- (1) Classes and folding follow the call's collation.  The members
 --     column differs per strategy (C/POSIX classify ASCII only), so a
 --     collation silently falling back to the database default shows up.
-SELECT coll, (tcc_check(coll)).* FROM tcc_coll WHERE coll <> 'C.utf8' ORDER BY coll;
+SELECT coll, (tcc_check(coll)).* FROM tcc_coll
+ WHERE coll NOT IN ('C.utf8', 'C.UTF-8') ORDER BY coll;
 SELECT coll, (tcc_check(coll)).disagree AS libc_disagree
-  FROM tcc_coll WHERE coll = 'C.utf8' AND (tcc_check(coll)).disagree <> 'none';
+  FROM tcc_coll WHERE coll IN ('C.utf8', 'C.UTF-8')
+   AND (tcc_check(coll)).disagree <> 'none';
 
 -- (2) COLLATE "C" forces ASCII; the same expression, the same answer as ~.
 SELECT tre_amatch('é' COLLATE "C", '^[[:alpha:]]$', 0) AS tre_c,

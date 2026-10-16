@@ -35,13 +35,19 @@ INSERT INTO tcc_ch (c, letter) VALUES
   ('Ａ', true), (chr(160), false), (chr(8195), false), ('!', false);
 INSERT 0 19
 -- Collations under test: one per strategy.  The libc one needs the OS
--- C.UTF-8 locale; it prints nothing different when missing.
+-- C.UTF-8 locale -- "C.utf8" on glibc, "C.UTF-8" on FreeBSD; whichever
+-- exists is checked, and it prints nothing different when missing.
 CREATE TABLE tcc_coll (coll text);
 CREATE TABLE
-INSERT INTO tcc_coll SELECT c FROM unnest(ARRAY['C', 'POSIX', 'und-x-icu',
-                                                'pg_c_utf8', 'C.utf8']) c
- WHERE EXISTS (SELECT FROM pg_collation WHERE collname = c);
-INSERT 0 5
+DO $$
+BEGIN
+  INSERT INTO tcc_coll SELECT c FROM unnest(ARRAY['C', 'POSIX', 'und-x-icu',
+                                                  'pg_c_utf8']) c
+   WHERE EXISTS (SELECT FROM pg_collation WHERE collname = c);
+  INSERT INTO tcc_coll SELECT collname FROM pg_collation
+   WHERE collname IN ('C.utf8', 'C.UTF-8') ORDER BY collname LIMIT 1;
+END $$;
+DO
 CREATE FUNCTION tcc_check(coll text, OUT checks int, OUT members int,
                           OUT disagree text)
 LANGUAGE plpgsql AS $f$
@@ -88,7 +94,8 @@ CREATE FUNCTION
 -- (1) Classes and folding follow the call's collation.  The members
 --     column differs per strategy (C/POSIX classify ASCII only), so a
 --     collation silently falling back to the database default shows up.
-SELECT coll, (tcc_check(coll)).* FROM tcc_coll WHERE coll <> 'C.utf8' ORDER BY coll;
+SELECT coll, (tcc_check(coll)).* FROM tcc_coll
+ WHERE coll NOT IN ('C.utf8', 'C.UTF-8') ORDER BY coll;
    coll    | checks | members | disagree 
 -----------+--------+---------+----------
  C         |    397 |      62 | none
@@ -98,7 +105,8 @@ SELECT coll, (tcc_check(coll)).* FROM tcc_coll WHERE coll <> 'C.utf8' ORDER BY c
 (4 rows)
 
 SELECT coll, (tcc_check(coll)).disagree AS libc_disagree
-  FROM tcc_coll WHERE coll = 'C.utf8' AND (tcc_check(coll)).disagree <> 'none';
+  FROM tcc_coll WHERE coll IN ('C.utf8', 'C.UTF-8')
+   AND (tcc_check(coll)).disagree <> 'none';
  coll | libc_disagree 
 ------+---------------
 (0 rows)
@@ -220,17 +228,17 @@ CREATE COLLATION tcc_nd (provider = icu, locale = 'und-u-ks-level2',
                          deterministic = false);
 CREATE COLLATION
 SELECT 'a' COLLATE tcc_nd ~ 'a';
-psql:test/sql/tre_collation_classes.sql:174: ERROR:  nondeterministic collations are not supported for regular expressions
+psql:test/sql/tre_collation_classes.sql:182: ERROR:  nondeterministic collations are not supported for regular expressions
 SELECT tre_amatch('a' COLLATE tcc_nd, 'a', 0);
-psql:test/sql/tre_collation_classes.sql:175: ERROR:  nondeterministic collations are not supported for regular expressions
+psql:test/sql/tre_collation_classes.sql:183: ERROR:  nondeterministic collations are not supported for regular expressions
 SELECT tre_distance('a' COLLATE tcc_nd, 'a', 0);
-psql:test/sql/tre_collation_classes.sql:176: ERROR:  nondeterministic collations are not supported for regular expressions
+psql:test/sql/tre_collation_classes.sql:184: ERROR:  nondeterministic collations are not supported for regular expressions
 SELECT 'a' COLLATE tcc_nd %~~ tre_pattern('a', 0);
-psql:test/sql/tre_collation_classes.sql:177: ERROR:  nondeterministic collations are not supported for regular expressions
+psql:test/sql/tre_collation_classes.sql:185: ERROR:  nondeterministic collations are not supported for regular expressions
 SELECT count(*) FROM tcc WHERE s_icu ~ s_c;
-psql:test/sql/tre_collation_classes.sql:178: ERROR:  could not determine which collation to use for regular expression
+psql:test/sql/tre_collation_classes.sql:186: ERROR:  could not determine which collation to use for regular expression
 SELECT count(*) FROM tcc WHERE tre_amatch(s_icu, s_c, 0);
-psql:test/sql/tre_collation_classes.sql:179: ERROR:  could not determine which collation to use for regular expression
+psql:test/sql/tre_collation_classes.sql:187: ERROR:  could not determine which collation to use for regular expression
 -- ... and an error leaves nothing behind: after a refused collation, an
 --     invalid pattern and a match timeout, each under another collation,
 --     the next calls classify by their own collation.
@@ -241,7 +249,7 @@ SELECT tre_amatch('é' COLLATE "und-x-icu", '^[[:alpha:]]$', 0) AS icu;
 (1 row)
 
 SELECT tre_amatch('é' COLLATE tcc_nd, '^[[:alpha:]]$', 0);
-psql:test/sql/tre_collation_classes.sql:184: ERROR:  nondeterministic collations are not supported for regular expressions
+psql:test/sql/tre_collation_classes.sql:192: ERROR:  nondeterministic collations are not supported for regular expressions
 SELECT tre_amatch('é' COLLATE "C", '^[[:alpha:]]$', 0) AS c,
        tre_amatch('é' COLLATE "und-x-icu", '^[[:alpha:]]$', 0) AS icu;
  c | icu 
@@ -250,7 +258,7 @@ SELECT tre_amatch('é' COLLATE "C", '^[[:alpha:]]$', 0) AS c,
 (1 row)
 
 SELECT tre_amatch('é' COLLATE "C", '[[:nosuch:]]', 0);
-psql:test/sql/tre_collation_classes.sql:187: ERROR:  invalid regular expression: Unknown character class name
+psql:test/sql/tre_collation_classes.sql:195: ERROR:  invalid regular expression: Unknown character class name
 SELECT tre_amatch('é' COLLATE "und-x-icu", '^[[:alpha:]]$', 0) AS icu;
  icu 
 -----
@@ -260,7 +268,7 @@ SELECT tre_amatch('é' COLLATE "und-x-icu", '^[[:alpha:]]$', 0) AS icu;
 SET pg_tre.match_timeout_ms = 1;
 SET
 SELECT tre_amatch(repeat('é', 200000) COLLATE "C", '(\w|é)*x', 3);
-psql:test/sql/tre_collation_classes.sql:190: ERROR:  pg_tre: regex match exceeded pg_tre.match_timeout_ms = 1 ms
+psql:test/sql/tre_collation_classes.sql:198: ERROR:  pg_tre: regex match exceeded pg_tre.match_timeout_ms = 1 ms
 RESET pg_tre.match_timeout_ms;
 RESET
 SELECT tre_amatch('é' COLLATE "und-x-icu", '^[[:alpha:]]$', 0) AS icu,

@@ -1,0 +1,131 @@
+From 27ee700dbe5f816a29c2280c167211e942c3915e Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Fri, 16 Oct 2026 10:15:05 -0400
+Subject: [PATCH] REG_ICASE: case images follow toupper/tolower, as PostgreSQL
+ does
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Under REG_ICASE a literal matched its other case only when tre_isupper()
+or tre_islower() said it had one, and a bracket member got counterpoints
+on the same condition.  PostgreSQL's regex adds toupper(c) and
+tolower(c) unconditionally (allcases() in regc_locale.c; range() for a
+bracket range).  They differ for characters that have case mappings but
+are not classified upper or lower by the platform: letter numbers
+(U+216B ROMAN NUMERAL TWELVE), circled letters (U+24B6), titlecase
+letters (U+01C5).  Which characters those are depends on the ctype:
+FreeBSD's libc C.UTF-8 classifies U+216B as neither, glibc's as upper;
+the Unicode tables classify U+01C5 as neither.  So (?i)Ⅻ did not match ⅻ
+on FreeBSD while core's ~* did, and (?i)ǅ matched only ǅ under ICU while
+core's matched Ǆ and ǆ.
+
+Now, as core does:
+  - a literal c is the union of toupper(c) and tolower(c) (allcases);
+  - a single bracket member c is the same set: when both images differ
+    from c (titlecase), c itself is not added;
+  - a bracket range keeps every member and adds each member's images,
+    merging consecutive runs as before.
+---
+ lib/tre-parse.c | 62 +++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 42 insertions(+), 20 deletions(-)
+
+diff --git a/lib/tre-parse.c b/lib/tre-parse.c
+index cb2b464..fb76ed3 100644
+--- a/lib/tre-parse.c
++++ b/lib/tre-parse.c
+@@ -377,7 +377,12 @@ tre_parse_bracket_items(tre_parse_ctx_t *ctx, int negate,
+ 	  return REG_ESPACE;
+ 	else
+ 	  neg_classes[(*num_neg_classes)++] = class;
+-      else if (!skip)
++      else if (!skip
++	       /* (?i) single titlecase member: only its case images, as
++		  PostgreSQL's allcases() (the loop below adds them). */
++	       && !((ctx->cflags & REG_ICASE) && !class && min == max
++		    && tre_toupper(min) != min && tre_tolower(min) != min
++		    && tre_toupper(min) != tre_tolower(min)))
+ 	{
+ 	  status = tre_new_item(ctx->mem, min, max, &i, &max_i, items);
+ 	  if (status != REG_OK)
+@@ -392,32 +397,44 @@ tre_parse_bracket_items(tre_parse_ctx_t *ctx, int negate,
+ 	  tre_cint_t cmin, ccurr;
+ 
+ 	  DPRINT(("adding opposite-case counterpoints\n"));
++	  /* Add each character's case images, whether or not it is
++	     classified upper or lower (as PostgreSQL's regex does: a
++	     letter number such as U+216B, a circled letter or a titlecase
++	     letter has case mappings but may be neither).  Runs of
++	     consecutive images become one item, as before. */
+ 	  while (min <= max)
+ 	    {
+-	      if (tre_islower(min))
++	      tre_cint_t up = tre_toupper(min), lo = tre_tolower(min);
++	      tre_cint_t img = (up != min) ? up : lo;
++
++	      if (img == min)
+ 		{
+-		  cmin = ccurr = tre_toupper(min++);
+-		  while (tre_islower(min) && tre_toupper(min) == ccurr + 1
+-			 && min <= max)
+-		    ccurr = tre_toupper(min++);
+-		  status = tre_new_item(ctx->mem, cmin, ccurr,
+-					&i, &max_i, items);
+-		  if (status != REG_OK)
+-		    return status;
++		  min++;
++		  continue;
+ 		}
+-	      else if (tre_isupper(min))
++	      if (up != min && lo != min && up != lo)
+ 		{
+-		  cmin = ccurr = tre_tolower(min++);
+-		  while (tre_isupper(min) && tre_tolower(min) == ccurr + 1
+-			 && min <= max)
+-		    ccurr = tre_tolower(min++);
+-		  status = tre_new_item(ctx->mem, cmin, ccurr,
+-					&i, &max_i, items);
++		  /* Titlecase: both other cases differ from it. */
++		  status = tre_new_item(ctx->mem, lo, lo, &i, &max_i, items);
+ 		  if (status != REG_OK)
+ 		    return status;
+ 		}
+-	      else
+-		min++;
++	      cmin = ccurr = img;
++	      min++;
++	      while (min <= max)
++		{
++		  tre_cint_t u2 = tre_toupper(min), l2 = tre_tolower(min);
++		  tre_cint_t i2 = (u2 != min) ? u2 : l2;
++		  if (i2 == min || i2 != ccurr + 1
++		      || (u2 != min && l2 != min && u2 != l2))
++		    break;
++		  ccurr = i2;
++		  min++;
++		}
++	      status = tre_new_item(ctx->mem, cmin, ccurr,
++				    &i, &max_i, items);
++	      if (status != REG_OK)
++		return status;
+ 	    }
+ 	}
+     }
+@@ -1667,8 +1684,13 @@ tre_parse(tre_parse_ctx_t *ctx)
+ 	      /* Note that we can't use an tre_isalpha() test here, since there
+ 		 may be characters which are alphabetic but neither upper or
+ 		 lower case. */
++	      /* The case images, as PostgreSQL's regex does: toupper(c)
++		 and tolower(c), whether or not c is classified upper or
++		 lower (a letter number such as U+216B, a circled letter or
++		 a titlecase letter has case mappings but may be neither). */
+ 	      if (ctx->cflags & REG_ICASE
+-		  && (tre_isupper(*ctx->re) || tre_islower(*ctx->re)))
++		  && (tre_toupper(*ctx->re) != *ctx->re
++		      || tre_tolower(*ctx->re) != *ctx->re))
+ 		{
+ 		  tre_ast_node_t *tmp1;
+ 		  tre_ast_node_t *tmp2;
+-- 
+2.54.0
+
