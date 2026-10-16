@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.4.0] - unreleased - Smaller indexes (dense TID packing); UNLOGGED indexes survive a crash; FreeBSD
+## [4.4.0] - 2026-10-16 - Smaller indexes (dense TID packing); UNLOGGED indexes survive a crash; FreeBSD
 
 **On-disk format v11.**  Upgrading needs no REINDEX: an index built by
 4.3.x or earlier keeps working as it is.  `REINDEX` (or `REINDEX
