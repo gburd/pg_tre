@@ -219,6 +219,10 @@ Measured in 4.3.1 on PostgreSQL 18.6, i4i.8xlarge (32 vCPU, NVMe):
 | 30 GB prose, 10.5 M rows | 64 MB, 2 participants | 1 h 33 min | 109 GB | 52 min, 14 GB |
 | 30 GB prose, 10.5 M rows | 4 GB, 8 participants | 30 min | 109 GB | |
 
+The index sizes above are 4.3.1's (legacy TID packing). 4.4.0 builds
+1.5-1.8x smaller indexes in the same time; see the size item below. The
+30 GB corpus has not been re-measured.
+
 - **Memory is bounded** (a few hundred MB, with `maintenance_work_mem` on
   top) since 4.3.1. 4.3.0 and earlier leaked every compressed row's text
   for the whole scan.
@@ -234,9 +238,13 @@ Measured in 4.3.1 on PostgreSQL 18.6, i4i.8xlarge (32 vCPU, NVMe):
   allows a single worker. 1–4 GB with `max_parallel_maintenance_workers` 4–8
   is a good start.
 - **The index is several times larger than pg_trgm's on long-document
-  columns**, because each heap block a posting touches costs a whole
-  sparsemap chunk and long documents leave few rows per block. The fix is a
-  format change planned for 4.4.0 (`doc/design/dense-tid-packing.md`).
+  columns**: each heap block a posting touches costs at least part of a
+  sparsemap chunk, and long documents leave few rows per block. 4.4.0's
+  dense TID packing (format v11) shrinks a new or REINDEXed index
+  1.5-1.8x (14.2 GB -> 8.0 GB on 4.1 GB of prose, where pg_trgm's GIN is
+  2.0 GB; `doc/design/dense-tid-packing.md`). An index built before 4.4.0
+  keeps the old packing until REINDEX: check with
+  `pg_tre_index_tid_packing()`.
 
 ### Posting-leaf bloat under sustained churn — REINDEX to reclaim
 
@@ -332,7 +340,7 @@ TRE's classes (`[[:alpha:]]`, `\w`, `\s`, `\d`, ...) and case folding
 (`(?i)`) mirror PostgreSQL's regex engine (`regc_pg_locale.c`) for the C,
 builtin and libc strategies, on PostgreSQL 17 and 18:
 `test/sql/tre_ctype_strategies.sql` checks every class and every case pair
-against `~` / `~*`. Two differences remain:
+against `~` / `~*`. One difference remains:
 
 - **ICU class membership follows PostgreSQL's Unicode tables, not
   libicu.** Under an ICU collation core calls ICU's `u_isalpha()` and
@@ -347,12 +355,11 @@ against `~` / `~*`. Two differences remain:
   the soft hyphen (`[[:graph:]]`), and symbols such as `$ + ~ © €` which
   ICU does not count as `[[:punct:]]`. Case folding is the same in both
   (the Unicode simple case mappings).
-- **Titlecase letters under `(?i)`.** Core folds a titlecase letter such
-  as `ǅ` (U+01C5) to its upper- and lower-case forms only: `(?i)ǅ` and
-  `(?i)[ǅ]` match `Ǆ` and `ǆ`, not `ǅ`. TRE picks the other case by
-  asking whether the letter is upper or lower case, so under the ICU and
-  builtin providers (where `ǅ` is neither) `(?i)ǅ` and `(?i)[ǅ]` match
-  only `ǅ`, and under libc `(?i)[ǅ]` matches `ǅ` and `Ǆ`. Only the
-  titlecase letters (Unicode category Lt: `ǅ ǈ ǋ ǲ` and the Greek
-  capitals with prosgegrammeni such as `ᾈ`) are affected;
-  `test/sql/tre_ctype_strategies.sql` shows each case.
+
+`(?i)` takes a character's other cases from `toupper()`/`tolower()`, as
+core does, so titlecase letters (`ǅ`), letter numbers (`Ⅻ`) and circled
+letters (`Ⓐ`) fold the same way under `~*` and pg_tre on every provider
+(4.3.x differed on titlecase letters, and on FreeBSD's libc also on `Ⅻ`
+and `Ⓐ`). What a character folds to is the ctype's: FreeBSD's libc maps
+`ǅ` to itself where glibc maps it to `ǆ`, and pg_tre follows whichever
+the database uses.

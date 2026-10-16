@@ -33,7 +33,7 @@ jobs:
         # index read needs a rebuild).  1.12.0 is v6/v7 -> reads as v8
         # with no REINDEX, exercising the current additive-format path.
         # 2.0.0 -> 2.0.1 is a no-op-SQL bug-fix upgrade (same format v8).
-        old_version: ['1.6.0', '1.12.0', '2.0.4', '2.1.0', '3.0.0', '3.0.1', '3.2.1', '3.2.2', '3.2.3', '3.2.4', '3.2.5', '3.2.6', '4.0.0', '4.0.1', '4.0.2', '4.1.0', '4.2.0', '4.2.1', '4.2.2', '4.2.3', '4.3.0']
+        old_version: ['1.6.0', '1.12.0', '2.0.4', '2.1.0', '3.0.0', '3.0.1', '3.2.1', '3.2.2', '3.2.3', '3.2.4', '3.2.5', '3.2.6', '4.0.0', '4.0.1', '4.0.2', '4.1.0', '4.2.0', '4.2.1', '4.2.2', '4.2.3', '4.3.0', '4.3.1']
         # When a release breaks on-disk format compatibility, list
         # the (old_version, pg_version) pairs to skip here.
         exclude: []
@@ -136,7 +136,8 @@ jobs:
           NEW_VERSION=$(awk -F"'" '/default_version/ {print $2}' \
               pg_tre.control)
           echo "Upgrading to: $NEW_VERSION"
-          psql -h /tmp -d upgrade_test -X <<SQL
+          set -o pipefail
+          psql -h /tmp -d upgrade_test -X -v ON_ERROR_STOP=1 <<SQL | tee /tmp/upgrade_check.out
           ALTER EXTENSION pg_tre UPDATE TO '$NEW_VERSION';
           SELECT extversion FROM pg_extension WHERE extname = 'pg_tre';
           SELECT tre_version();
@@ -156,12 +157,32 @@ jobs:
           SELECT
               (SELECT count(*) FROM idx_ids) =
                   (SELECT count(*) FROM seq_ids) AS counts_agree,
-              NOT EXISTS (SELECT 1 FROM idx_ids
-                          EXCEPT SELECT 1 FROM seq_ids)
-              AND NOT EXISTS (SELECT 1 FROM seq_ids
-                              EXCEPT SELECT 1 FROM idx_ids)
+              NOT EXISTS (SELECT id FROM idx_ids
+                          EXCEPT SELECT id FROM seq_ids)
+              AND NOT EXISTS (SELECT id FROM seq_ids
+                              EXCEPT SELECT id FROM idx_ids)
                   AS row_sets_agree;
+          -- 4.4.0+: an index built before 4.4.0 keeps the legacy TID
+          -- packing; REINDEX rebuilds it dense, with the same answers.
+          SELECT pg_tre_index_tid_packing('t_idx') AS packing_before;
+          SET client_min_messages = warning;
+          REINDEX INDEX t_idx;
+          RESET client_min_messages;
+          SELECT pg_tre_index_tid_packing('t_idx') AS packing_after;
+          SET enable_seqscan = off;
+          SET enable_indexscan = on;
+          SET enable_bitmapscan = on;
+          CREATE TEMP TABLE idx2_ids AS
+              SELECT id FROM t WHERE body %~~ tre_pattern('the', 0);
+          SELECT NOT EXISTS (SELECT id FROM idx2_ids EXCEPT SELECT id FROM seq_ids)
+             AND NOT EXISTS (SELECT id FROM seq_ids EXCEPT SELECT id FROM idx2_ids)
+                 AS reindexed_agrees;
           SQL
+          # Every boolean check above must print t.
+          if grep -qE '(^|\| *| )f *(\||$)' /tmp/upgrade_check.out; then
+              echo "::error::index and sequential scan disagree after the upgrade"
+              exit 1
+          fi
           pg_ctl -D "$PGDATA" stop -w -m fast
 
       - name: Diagnostics on failure

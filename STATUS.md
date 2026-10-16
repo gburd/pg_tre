@@ -1,8 +1,18 @@
 # pg_tre status
 
-Released: **4.3.1** (2026-10).  See `CHANGELOG.md` for full
-release notes and `doc/design.md` for the architecture this
-file tracks against.
+Released: **4.3.1** (2026-10); in development: **4.4.0**.  See
+`CHANGELOG.md` for full release notes and `doc/design.md` for the
+architecture this file tracks against.
+
+4.4.0 changes the on-disk format (v11): new indexes pack heap TIDs
+densely and are 1.5-1.8x smaller on heap tables (14.2 GB -> 8.0 GB
+on 4.1 GB of prose).  Old indexes keep working without a REINDEX;
+REINDEX makes them smaller, and downgrading to 4.3.x needs one.
+It fixes UNLOGGED `tre` indexes, which failed every query after a
+crash (since 4.0.0), and makes `(?i)` fold exactly as `~*` does on
+every ctype.  It vendors sparsemap v5.8.3 and builds and passes the
+full test suite on FreeBSD 15.1.  CI: the ASan and nightly stress
+jobs, which had never run to completion, run and gate.
 
 4.3.1 makes CREATE INDEX on large tables practical.  The build
 no longer leaks every compressed row's text (33 GB RSS on a 30 GB
@@ -24,7 +34,8 @@ It also fixes index scans that silently dropped matching rows
 (bracket classes, class escapes, embedded options, and fuzzy
 edits of non-ASCII characters), carries upstream TRE matcher
 fixes (multibyte back-references, insertions before `$`), refuses
-nondeterministic collations, and vendors sparsemap v5.8.2.  No
+nondeterministic collations, and vendors sparsemap 5.8.2 (the
+untagged `release/5.8.2` branch, not the v5.8.2 tag).  No
 on-disk change; no REINDEX on UTF-8 databases.  On non-UTF-8
 databases, REINDEX every `tre` index that holds non-ASCII text.
 

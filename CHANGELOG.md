@@ -6,6 +6,93 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.4.0] - unreleased - Smaller indexes (dense TID packing); UNLOGGED indexes survive a crash; FreeBSD
+
+**On-disk format v11.**  Upgrading needs no REINDEX: an index built by
+4.3.x or earlier keeps working as it is.  `REINDEX` (or `REINDEX
+CONCURRENTLY`) rebuilds it in the new, smaller layout, and
+`pg_tre_index_tid_packing()` says which layout an index has.  Downgrading
+to 4.3.x needs a REINDEX of every `tre` index 4.4.0 has written to: 4.3.x
+refuses those pages ("format version 11, supported range is [6, 10]")
+rather than misread them.
+
+### Changed
+
+- **Indexes are 1.5-1.8x smaller** on heap tables.  A posting packed each
+  heap TID as `block << 16 | offset`, so every heap block a posting
+  touched cost a whole sparsemap chunk, however few of its rows matched.
+  New indexes pack `block * 292 + offset` (`MaxHeapTuplesPerPage + 1`),
+  so several blocks share a chunk.  Measured on PostgreSQL 18.6, FreeBSD
+  15.1, i4i.8xlarge (index, 4.3.1 -> 4.4.0, pg_trgm GIN for scale):
+
+  | corpus | rows per heap block | 4.3.1 | 4.4.0 | pg_trgm |
+  |---|---|---|---|---|
+  | 4.1 GB prose, 1.4 M rows | 8.9 | 14.2 GB | 8.0 GB (1.77x) | 2.0 GB |
+  | 2.5 GB EXPLAIN plans, 160 k rows | 13.6 | 1.32 GB | 0.87 GB (1.52x) | 0.35 GB |
+  | 1.3 GB prose kept in the heap, 300 k rows | 1.4 | 9.4 GB | 5.5 GB (1.71x) | 0.84 GB |
+
+  Build time is unchanged (within 5%); query times are the same or
+  slightly better.  The gap to pg_trgm remains: the next step is a
+  sparsemap chunk encoding for one or two rows per block
+  (`doc/design/dense-tid-packing.md`).  An index on a table access method
+  other than heap keeps the old packing.
+- **Vendored sparsemap v5.8.3** (tag 5b7860c, verbatim): decoding is
+  1.8-1.9x faster than v5.8.2, small-set and SIMD kernels are
+  alignment-safe, and the unused `__sm_small_bytes_for()` that failed
+  `-Werror` builds with clang (the macOS CI jobs) is gone.  4.3.0 and 4.3.1 vendored the untagged
+  `release/5.8.2` branch (89a9aa9), not the v5.8.2 tag their notes named.
+  The wire format is unchanged.
+
+### Fixed
+
+- **An UNLOGGED `tre` index failed every query after a crash.**  Crash
+  recovery resets an UNLOGGED relation from its init fork, which must be
+  WAL-logged; pg_tre wrote it through generic WAL, which logs nothing for
+  an UNLOGGED relation.  A crash before the next checkpoint left a zeroed
+  template: every scan of the reset index failed "meta page magic
+  mismatch (got 0x00000000)" and an INSERT hung on its own meta-page
+  lock.  Since 4.0.0.  The init fork's meta page is now logged as GIN's
+  is (`tap/unlogged_crash.pl`).  An affected index is repaired by
+  `REINDEX`.
+- **`(?i)` folds the way `~*` does on every ctype.**  TRE folded a
+  character only when `isupper()`/`islower()` classified it; core takes
+  the case images from `toupper()`/`tolower()`.  Titlecase letters (`ǅ`)
+  under ICU and builtin collations folded differently (a documented
+  limitation, now gone), and on FreeBSD's libc so did letter numbers and
+  circled letters (`(?i)Ⅻ` did not match `ⅻ`).  New TRE patch
+  `patches/tre-icase-allcases.patch`.
+- **Two clang warnings** in `src/util/surf.c` (an unused function, a
+  self-assignment) that FreeBSD's clang reports.
+
+### Added
+
+- **FreeBSD**: builds with gmake and clang, and passes the regression
+  suite (PostgreSQL 17 and 18, C and C.UTF-8) and the TAP and stress
+  suites on FreeBSD 15.1.  `tap/build_memory.pl` is skipped there (it
+  reads `/proc`).
+- `pg_tre_index_tid_packing(regclass)` returns `'dense'` or `'legacy'`;
+  `pg_tre_upgrade_index()` points a legacy index at `REINDEX`.
+- `test/sql/tid_packing.sql` (legacy and dense on the same rows: build,
+  pending list, VACUUM, slot reuse, offsets up to 290, REINDEX) and
+  `tap/unlogged_crash.pl`.
+
+### CI
+
+- **The Sanitizer job ran nothing since it was added**: `initdb` died
+  "stack depth limit exceeded" under ASan's fake stack (on by default in
+  the runner's libasan).  `scripts/asan-check.sh` sets
+  `detect_stack_use_after_return=0`.
+- **The nightly stress job never passed.**  `test/scripts/wal_audit.sh`
+  looked for the `pg_tre` resource manager removed in 4.0.0; it now
+  attributes generic WAL records to the index by relfilenode (and its
+  init-fork check found the UNLOGGED bug above).  The asan leg loaded an
+  instrumented `pg_tre.so` into the stock server, which the runner's
+  kernel cannot do; it now runs inside the ASan-built PostgreSQL
+  (`ASAN_STRESS=1 scripts/asan-check.sh`) and gates.
+- The Makefile no longer re-applies a TRE patch that is already in (it
+  checked each patch on its own, and later patches touch the same
+  files).
+
 ## [4.3.1] - 2026-10-15 - CREATE INDEX on large tables: bounded memory, parallel posting build, far faster; regex and fuzzy queries the index could not serve
 
 **No on-disk format change; no REINDEX** to upgrade or to downgrade to
@@ -160,7 +247,8 @@ of them are corrections.
   collation makes `=`/`LIKE` match strings that share no trigrams, so the
   index silently under-returned).  Regex functions raise core's errors for
   an indeterminate or nondeterministic collation.
-- **Vendored sparsemap v5.8.0 -> v5.8.2** (verbatim): O(1) `sm_validate`
+- **Vendored sparsemap v5.8.0 -> 5.8.2** (the untagged `release/5.8.2`
+  branch, 89a9aa9, not the v5.8.2 tag; corrected in 4.4.0): O(1) `sm_validate`
   check (f) (5.8.1's version cost every posting read about 75%), short
   buffers in `sm_open`/`sm_init`, and set-operation fixes pg_tre does not
   reach.  The wire format is byte-identical.

@@ -207,6 +207,7 @@ restart:
 | 4.2.2   | 4.2.3   | ✅ Yes       | No on-disk change, no REINDEX either way. Fixes a backend crash on an ERROR during a pending-list scan (clang/flake builds) |
 | 4.2.3   | 4.3.0   | ⚠️ Yes, but  | No on-disk change. UTF-8 databases: no REINDEX. **Non-UTF-8 databases: REINDEX every `tre` index holding non-ASCII text** (its trigrams were decoded as UTF-8). Class / `(?i)` answers over non-ASCII text now follow core regex for the call's collation; index scans no longer drop rows (see CHANGELOG); nondeterministic collations refused at index build |
 | 4.3.0   | 4.3.1   | ✅ Yes       | No on-disk change, no REINDEX either way. CREATE INDEX no longer leaks memory and builds posting trees in parallel; `'ab+c'` no longer drops rows from the index; patterns core regex accepts no longer fail on the index path |
+| 4.3.1   | 4.4.0   | ⚠️ Yes, but  | On-disk format v11 (dense TID packing). No REINDEX to upgrade: old indexes keep working; `REINDEX` makes them 1.5-1.8x smaller (`pg_tre_index_tid_packing()` tells which). **Downgrade to 4.3.x needs REINDEX** of every `tre` index 4.4.0 wrote to. REINDEX any UNLOGGED `tre` index that fails "meta page magic mismatch" after a crash |
 
 When releasing a version with breaking changes:
 
