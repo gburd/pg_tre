@@ -229,15 +229,22 @@ endif
 # submodule is pinned to pristine upstream, so the patch must be
 # (re)applied after any `git submodule update`.  Guarded by a stamp and
 # an idempotent reverse-check so re-running make never double-applies.
+# The patches go on in order and later ones touch files earlier ones do,
+# so "patch N reverses cleanly" only means applied for the last patch:
+# if it reverses, the whole series is in.
 $(TRE_PATCH_STAMP): $(TRE_PATCH)
-	@for p in $(abspath $(TRE_PATCH)); do \
-	    echo "==> patch TRE ($$(basename $$p))"; \
-	    if git -C $(TRE_DIR) apply --reverse --check -p1 $$p >/dev/null 2>&1; then \
-	        echo "    already applied"; \
-	    else \
-	        git -C $(TRE_DIR) apply -p1 $$p || exit 1; \
-	    fi; \
-	done
+	@if git -C $(TRE_DIR) apply --reverse --check -p1 $(abspath $(lastword $(TRE_PATCH))) >/dev/null 2>&1; then \
+	    echo "==> patch TRE: all $(words $(TRE_PATCH)) patches already applied"; \
+	else \
+	    for p in $(abspath $(TRE_PATCH)); do \
+	        echo "==> patch TRE ($$(basename $$p))"; \
+	        if git -C $(TRE_DIR) apply --reverse --check -p1 $$p >/dev/null 2>&1; then \
+	            echo "    already applied"; \
+	        else \
+	            git -C $(TRE_DIR) apply -p1 $$p || exit 1; \
+	        fi; \
+	    done; \
+	fi
 	@touch $@
 
 $(TRE_CONFIGURE): $(TRE_DIR)/configure.ac $(TRE_PATCH_STAMP)

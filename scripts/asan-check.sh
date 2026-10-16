@@ -11,6 +11,8 @@
 # Usage:
 #   scripts/asan-check.sh                 # build (cached) + run full suite
 #   scripts/asan-check.sh test1 test2     # run a subset
+#   ASAN_STRESS=1 scripts/asan-check.sh   # instead: test/scripts/{stress,wal_audit,
+#                                         # replication}.sh (the nightly asan leg)
 # Env:
 #   PG_VERSION   PostgreSQL release to build          (default 18.0)
 #   ASAN_PREFIX  where the ASan PG is installed/cached (default ~/pg-asan-$PG_VERSION)
@@ -59,7 +61,7 @@ if [ ! -x "$ASAN_PREFIX/bin/postgres" ]; then
           CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" >"$b/configure.log" 2>&1 &&
       make -j"$JOBS" >"$b/make.log" 2>&1 &&
       make install >/dev/null 2>&1 &&
-      for c in pg_trgm pageinspect amcheck pgstattuple pg_freespacemap; do
+      for c in pg_trgm pageinspect amcheck pgstattuple pg_freespacemap pg_walinspect; do
           make -C contrib/$c install >/dev/null 2>&1 || exit 1
       done ) || { tail -20 "$b"/make.log "$b"/configure.log 2>/dev/null; die "PostgreSQL ASan build failed"; }
 fi
@@ -114,9 +116,25 @@ syms=$(nm -D "$($PGB/pg_config --pkglibdir)/pg_tre.so")
 [[ $syms == *" U __asan_init"* ]] || die "installed pg_tre.so is not ASan-instrumented"
 
 # ---------------------------------------------------------------------------
+# 3s. ASAN_STRESS: the nightly stress scripts (they make their own clusters
+#     from this PATH's instrumented binaries) instead of the regression suite.
+# ---------------------------------------------------------------------------
+if [ -n "${ASAN_STRESS:-}" ]; then
+    find "$ASAN_WORK/reports" -type f -delete
+    [ -f "$($PGB/pg_config --pkglibdir)/pg_walinspect.so" ] \
+        || die "$ASAN_PREFIX lacks pg_walinspect; remove it to rebuild"
+    rrc=0
+    for s in stress wal_audit replication; do
+        log "running test/scripts/$s.sh under ASan"
+        PG_CONFIG=$PGB/pg_config TMPDIR="$ASAN_WORK" bash "test/scripts/$s.sh" || rrc=1
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Cluster.  Reports go to files so a crashed backend still leaves one.
 #    detect_leaks=0: PostgreSQL leaks into long-lived contexts by design.
 # ---------------------------------------------------------------------------
+if [ -z "${ASAN_STRESS:-}" ]; then
 [ -d "$ASAN_WORK/data" ] && find "$ASAN_WORK/data" -delete
 find "$ASAN_WORK/reports" -type f -delete
 initdb -D "$ASAN_WORK/data" -E UTF8 --no-locale -U postgres --auth=trust >"$ASAN_WORK/initdb.log" 2>&1 \
@@ -138,6 +156,7 @@ export PGHOST=$ASAN_WORK PGPORT=$PORT PGUSER=postgres
 log "running regression suite under ASan"
 PG_CONFIG=$PGB/pg_config bash scripts/run-regress.sh "$@" 2>&1 | tee "$ASAN_WORK/regress.log"
 rrc=${PIPESTATUS[0]}
+fi
 sleep 2   # let a dying backend finish writing its report
 
 # ---------------------------------------------------------------------------
