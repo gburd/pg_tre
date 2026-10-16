@@ -28,6 +28,7 @@
 #define PG_TRE_PAGE_H
 
 #include "postgres.h"
+#include "access/htup_details.h"        /* MaxHeapTuplesPerPage */
 #include "storage/bufpage.h"
 #include "storage/block.h"
 #include "storage/itemptr.h"
@@ -169,8 +170,16 @@ typedef struct PgTreMetaPageData
     BlockNumber root_surf;
     uint32      surf_n_keys;
 
+    /*
+     * 4.4.0 (format v11): how this index packs heap TIDs (PgTreTidPacking).
+     * Carved from the former reserved[] tail, so a pre-v11 index reads
+     * zero = PG_TRE_TID_LEGACY and keeps working unchanged.  Fixed for the
+     * life of the relfilenode; REINDEX builds the new packing.
+     */
+    uint32      tid_packing;
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[18];
+    uint32      reserved[17];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;
@@ -202,7 +211,7 @@ typedef PgTreMetaPageData *PgTreMetaPage;
 typedef struct PgTrePostingLeafHeader
 {
     BlockNumber right_link;             /* Lehman-Yao right sibling */
-    uint64      min_tid;                /* packed (blk<<16 | offset) */
+    uint64      min_tid;                /* packed per meta.tid_packing */
     uint64      max_tid;
     uint32      sparsemap_bytes;        /* size of the sparsemap blob */
     uint32      payload_bytes;          /* size of the payload region */
@@ -447,27 +456,67 @@ typedef struct PgTrePendingHeader
 typedef struct PgTrePendingEntry
 {
     uint64      trigram_hash;
-    uint64      tid;                    /* packed (blk<<16 | offset) */
+    uint64      tid;                    /* packed per meta.tid_packing */
     uint32      position;               /* byte offset in original value */
     uint32      _pad;
 } PgTrePendingEntry;
 
-/* ---- TID packing ---- */
+/* ---- TID packing ----
+ *
+ * Every TID an index stores -- posting sparsemaps (leaf, inline,
+ * coalesced), posting-leaf min_tid/max_tid, pending-list entries -- is a
+ * single uint64 bit index, packed one of two ways, chosen per index at
+ * build time and recorded in the meta page (tid_packing):
+ *
+ *   PG_TRE_TID_LEGACY  (block << 16) | offset          format <= 10
+ *   PG_TRE_TID_DENSE   block * PG_TRE_DENSE_STRIDE + offset   format 11
+ *
+ * A sparsemap chunk spans 2048 bits.  Under LEGACY a heap block owns
+ * 65536 bits, so every block a posting touches pays a whole chunk's
+ * overhead however few of its rows match (~24 B per TID for long
+ * documents, 1-2 rows per block).  DENSE gives a block only the offsets
+ * it can hold, so ~7 blocks share a chunk: postings 2-2.5x smaller
+ * (doc/design/dense-tid-packing.md).  Both orders are (block, offset)
+ * lexicographic, so sort order, merges and scans are unchanged.
+ *
+ * DENSE needs offset <= MaxHeapTuplesPerPage, which holds for the heap
+ * access method; an index on any other table AM is built LEGACY.
+ * pg_tre_tid_packing() (meta.c) returns an index's packing.
+ */
+typedef enum PgTreTidPacking
+{
+    PG_TRE_TID_LEGACY = 0,
+    PG_TRE_TID_DENSE = 1
+} PgTreTidPacking;
+
+#define PG_TRE_DENSE_STRIDE ((uint64) MaxHeapTuplesPerPage + 1)
 
 static inline uint64
-pg_tre_pack_tid(ItemPointer tid)
+pg_tre_pack_tid(PgTreTidPacking pk, ItemPointer tid)
 {
     uint64 blk = BlockIdGetBlockNumber(&tid->ip_blkid);
     uint64 off = tid->ip_posid;
+
+    if (pk == PG_TRE_TID_DENSE)
+    {
+        /* An offset past the stride would alias the next block's TIDs. */
+        if (unlikely(off >= PG_TRE_DENSE_STRIDE))
+            elog(ERROR, "pg_tre: heap TID offset %u exceeds MaxHeapTuplesPerPage",
+                 (unsigned) off);
+        return blk * PG_TRE_DENSE_STRIDE + off;
+    }
     return (blk << 16) | off;
 }
 
 static inline void
-pg_tre_unpack_tid(uint64 packed, ItemPointer out)
+pg_tre_unpack_tid(PgTreTidPacking pk, uint64 packed, ItemPointer out)
 {
-    BlockNumber blk = (BlockNumber) (packed >> 16);
-    OffsetNumber off = (OffsetNumber) (packed & 0xFFFF);
-    ItemPointerSet(out, blk, off);
+    if (pk == PG_TRE_TID_DENSE)
+        ItemPointerSet(out, (BlockNumber) (packed / PG_TRE_DENSE_STRIDE),
+                       (OffsetNumber) (packed % PG_TRE_DENSE_STRIDE));
+    else
+        ItemPointerSet(out, (BlockNumber) (packed >> 16),
+                       (OffsetNumber) (packed & 0xFFFF));
 }
 
 #endif /* PG_TRE_PAGE_H */

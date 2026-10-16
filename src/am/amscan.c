@@ -351,6 +351,7 @@ typedef struct PendingOverlay
     int                  n;
     int                  alloced;
     MemoryContext        mcxt;
+    PgTreTidPacking      packing;   /* the index's; TIDs are packed so */
     /* Fast look-up bloom: which trigram_hashes appeared in the query? */
     const TrigramQuery  *q;
 } PendingOverlay;
@@ -412,7 +413,7 @@ overlay_collect_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
         return;
 
     e = overlay_find_or_create(ov, hash);
-    packed = pg_tre_pack_tid(tid);
+    packed = pg_tre_pack_tid(ov->packing, tid);
 
     if (e->tids_n >= e->tids_cap)
     {
@@ -431,6 +432,7 @@ overlay_build(PendingOverlay *ov, Relation index, const TrigramQuery *q,
 {
     memset(ov, 0, sizeof(*ov));
     ov->mcxt = mcxt;
+    ov->packing = pg_tre_tid_packing(index);
     ov->q    = q;
     pg_tre_pending_scan(index, overlay_collect_cb, ov);
 }
@@ -1199,6 +1201,7 @@ int64
 pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
     TreScanState *st = (TreScanState *) scan->opaque;
+    const PgTreTidPacking pk = pg_tre_tid_packing(scan->indexRelation);
     MemoryContext old;
     sm_t  *result;
     bool          always_true = false;
@@ -1285,7 +1288,7 @@ pg_tre_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
             {
                 if ((n & 0x3FFF) == 0)
                     CHECK_FOR_INTERRUPTS();
-                pg_tre_unpack_tid(i, &tids[n++]);
+                pg_tre_unpack_tid(pk, i, &tids[n++]);
             }
 
             tbm_add_tuples(tbm, tids, n, true /* recheck */);
@@ -1380,6 +1383,7 @@ resolve_body_attno(Relation indexRel)
 static void
 knn_build(IndexScanDesc scan, TreScanState *st)
 {
+    const PgTreTidPacking pk = pg_tre_tid_packing(scan->indexRelation);
     MemoryContext old;
     /* Read in PG_FINALLY: must be a volatile pointer (sm_t *volatile), not
      * a pointer to volatile -- see tre_compute_candidate_sm. */
@@ -1602,7 +1606,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     cap *= 2;
                     entries = repalloc(entries, sizeof(*entries) * cap);
                 }
-                entries[n_entries].packed_tid = pg_tre_pack_tid(&tid);
+                entries[n_entries].packed_tid = pg_tre_pack_tid(pk, &tid);
                 entries[n_entries].dist = dist;
                 n_entries++;
             }
@@ -1624,7 +1628,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
 
                 CHECK_FOR_INTERRUPTS();
 
-                pg_tre_unpack_tid(idx, &tid);
+                pg_tre_unpack_tid(pk, idx, &tid);
 
                 if (have_orderby)
                 {
@@ -1769,7 +1773,8 @@ pg_tre_amgettuple(IndexScanDesc scan, ScanDirection dir)
         return false;
 
     e = &st->knn_entries[st->knn_pos++];
-    pg_tre_unpack_tid(e->packed_tid, &scan->xs_heaptid);
+    pg_tre_unpack_tid(pg_tre_tid_packing(scan->indexRelation), e->packed_tid,
+                      &scan->xs_heaptid);
 
     /*
      * Tell the executor to recheck the WHERE clause: our trigram

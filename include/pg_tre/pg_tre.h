@@ -54,6 +54,18 @@
  *            COALESCED page kind) rather than mis-resolving a slot.  See
  *            doc/specs/posting-page-coalescing.md.
  *
+ *   v11    - introduced in 4.4.0.  Dense heap-TID packing
+ *            (block * (MaxHeapTuplesPerPage + 1) + offset instead of
+ *            block << 16 | offset), recorded per index in
+ *            meta.tid_packing; postings over long documents are 2-2.5x
+ *            smaller.  Additive for readers: a v6..v10 index has
+ *            tid_packing == 0 (legacy) and is read and written exactly as
+ *            before; only CREATE INDEX / REINDEX produce dense indexes.
+ *            The LATEST bump makes a 4.3.x binary refuse a v11 index
+ *            (it would misread dense TIDs) -- and, since every page 4.4.0
+ *            writes is stamped v11, refuse a legacy index 4.4.0 has
+ *            modified: downgrading to 4.3.x needs REINDEX.
+ *
  * BREAKING CHANGE: indexes built with v2 or earlier must be REINDEXed.
  * BREAKING CHANGE: indexes built with v5 or earlier (pg_tre < 1.6)
  *   must be REINDEXed -- the sparsemap 4.0.0 wire format is not
@@ -81,7 +93,7 @@
  * release can fold this into a v9 LATEST bump once the format-version
  * regression assertions are reconciled.
  */
-#define PG_TRE_FORMAT_VERSION_LATEST 10
+#define PG_TRE_FORMAT_VERSION_LATEST 11
 #define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the
@@ -108,6 +120,7 @@ extern bool pg_tre_flush_to_run;
 extern bool pg_tre_crack_on_read;
 extern bool pg_tre_coalesce_enable;
 extern bool pg_tre_enable_parallel_build;
+extern bool pg_tre_build_legacy_tids;
 extern int  pg_tre_build_max_entries_mb;
 
 /*

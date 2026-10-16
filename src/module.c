@@ -49,6 +49,7 @@ bool pg_tre_flush_to_run           = false; /* Phase B1.3: gated (see bench) */
 bool pg_tre_crack_on_read          = false; /* Phase B1.5: gated (see bench) */
 bool pg_tre_coalesce_enable        = false; /* v2.0 coalescing: gated (see bench) */
 bool pg_tre_enable_parallel_build  = false; /* experimental: gated (see GUC) */
+bool pg_tre_build_legacy_tids      = false; /* testing: build format <=10 TIDs */
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
 
@@ -171,6 +172,16 @@ pg_tre_init_guc(void)
         " max_parallel_maintenance_workers and the planner's heuristics.",
         &pg_tre_enable_parallel_build,
         true, PGC_USERSET, 0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("pg_tre.build_legacy_tid_packing",
+        "Developer option: build new indexes with the pre-4.4 TID packing.",
+        "Off (the default) packs heap TIDs densely (block * 292 + offset)"
+        " in every index built on a heap table.  On builds the legacy"
+        " (block << 16 | offset) packing an index from pg_tre 4.3 or"
+        " earlier has, so tests can exercise that read path.",
+        &pg_tre_build_legacy_tids,
+        false, PGC_USERSET, GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+        NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.build_max_entries_mb",
         "Optional temp-disk safety valve for index builds (0 = unlimited,"

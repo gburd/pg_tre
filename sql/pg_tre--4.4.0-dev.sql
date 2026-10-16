@@ -299,6 +299,18 @@ COMMENT ON FUNCTION pg_tre_index_min_format_version(regclass) IS
     'Cheap O(1); for the authoritative full-walk view use '
     'pg_tre_index_format_status().';
 
+CREATE FUNCTION pg_tre_index_tid_packing(regclass)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'pg_tre_index_tid_packing'
+    LANGUAGE C STRICT STABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION pg_tre_index_tid_packing(regclass) IS
+    'How the index packs heap TIDs: ''dense'' (built by pg_tre 4.4.0 or '
+    'later on a heap table) or ''legacy'' (built by an earlier version, '
+    'or on another table access method).  A legacy index works '
+    'unchanged; REINDEX rebuilds it dense, typically 2-2.5x smaller on '
+    'long-text columns.';
+
 CREATE FUNCTION tre_run_catalog_status(regclass)
     RETURNS TABLE(run_id bigint, level int4, n_tuples bigint,
                   n_trigrams bigint, min_hash numeric, max_hash numeric)

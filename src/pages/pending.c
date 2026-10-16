@@ -201,6 +201,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
                             const ItemPointerData *tids,
                             const uint32 *positions, int n)
 {
+    const PgTreTidPacking pk = pg_tre_tid_packing(index);
     Buffer  metabuf, tailbuf, prev_tailbuf;
     bool    tail_is_new;
     bool    head_is_new;
@@ -288,7 +289,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
         {
             PgTrePendingEntry *e = &entries[hdr->n_entries + i];
             e->trigram_hash = *hashes++;
-            e->tid          = pg_tre_pack_tid((ItemPointer) tids);
+            e->tid          = pg_tre_pack_tid(pk, (ItemPointer) tids);
             e->position     = *positions++;
             e->_pad         = 0;
             tids++;
@@ -336,6 +337,7 @@ pg_tre_pending_append(Relation index, uint64 trigram_hash,
 void
 pg_tre_pending_scan(Relation index, PgTrePendingCallback callback, void *ctx)
 {
+    const PgTreTidPacking pk = pg_tre_tid_packing(index);
     PgTreMetaPageData meta;
     BlockNumber blk;
 
@@ -356,7 +358,7 @@ pg_tre_pending_scan(Relation index, PgTrePendingCallback callback, void *ctx)
         for (i = 0; i < n; i++)
         {
             ItemPointerData tid;
-            pg_tre_unpack_tid(ent[i].tid, &tid);
+            pg_tre_unpack_tid(pk, ent[i].tid, &tid);
             callback(ent[i].trigram_hash, &tid, ent[i].position, ctx);
         }
 
@@ -404,6 +406,7 @@ pg_tre_pending_scan_watermark(Relation index, PgTrePendingCallback callback,
                               BlockNumber **consumed_pages_out,
                               int *n_consumed_out, int *consumed_cap_io)
 {
+    const PgTreTidPacking pk = pg_tre_tid_packing(index);
     PgTreMetaPageData meta;
     BlockNumber blk;
     BlockNumber wm_tail;
@@ -453,7 +456,7 @@ pg_tre_pending_scan_watermark(Relation index, PgTrePendingCallback callback,
         for (i = 0; i < n; i++)
         {
             ItemPointerData tid;
-            pg_tre_unpack_tid(ent[i].tid, &tid);
+            pg_tre_unpack_tid(pk, ent[i].tid, &tid);
             callback(ent[i].trigram_hash, &tid, ent[i].position, ctx);
         }
 
@@ -528,6 +531,7 @@ typedef struct MergeCtx
     int          bucket_cap;
     int          n_entries;
     MemoryContext mcxt;
+    PgTreTidPacking packing;     /* the index's; TIDs below are packed so */
     bool         pending_only;   /* B1.3 flush-to-run: do NOT union with
                                   * the existing posting -- the new run
                                   * holds only the pending TIDs */
@@ -612,7 +616,7 @@ collect_pending_cb(uint64 hash, ItemPointer tid, uint32 position, void *ctx)
 
     (void) position;     /* Phase 4 ignores positions; Phase 5 uses them */
     e = merge_find(mc, hash, true);
-    packed = pg_tre_pack_tid(tid);
+    packed = pg_tre_pack_tid(mc->packing, tid);
 
     if (e->n_tids >= e->tids_alloced)
     {
@@ -784,7 +788,7 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             {
                 ItemPointerData tid;
                 CHECK_FOR_INTERRUPTS();
-                pg_tre_unpack_tid(j, &tid);
+                pg_tre_unpack_tid(mc->packing, j, &tid);
                 pg_tre_posting_build_add(b, &tid, NULL, 0, NULL);
             }
             {
@@ -1322,6 +1326,7 @@ pg_tre_pending_merge(Relation index)
     mc.bucket_tab = MemoryContextAllocZero(merge_cxt,
                        mc.bucket_cap * sizeof(MergeEntry *));
     mc.mcxt       = merge_cxt;
+    mc.packing    = pg_tre_tid_packing(index);
 
     /*
      * Consume only the prefix that existed when the merge began,
@@ -1714,6 +1719,7 @@ pg_tre_collapse_runs(Relation index)
     mc.bucket_tab = MemoryContextAllocZero(cxt,
                        mc.bucket_cap * sizeof(MergeEntry *));
     mc.mcxt       = cxt;
+    mc.packing    = pg_tre_tid_packing(index);
     mc.pending_only = true;   /* postings come from the runs themselves */
 
     /* Fold every live run's contents into the merge accumulator, and
@@ -1915,6 +1921,7 @@ pg_tre_hanoi_merge(Relation index)
             mc.bucket_tab = MemoryContextAllocZero(cxt,
                                mc.bucket_cap * sizeof(MergeEntry *));
             mc.mcxt = cxt;
+            mc.packing = pg_tre_tid_packing(index);
             mc.pending_only = true;
 
             for (i = 0; i < n_runs; i++)

@@ -302,6 +302,7 @@ struct PgTrePostingBuilder
      * when we know the final cardinality.
      */
     uint64         *tids;           /* palloc'd uint64 array */
+    PgTreTidPacking packing;        /* the index's (meta.tid_packing) */
     int             n_tids;
     int             tids_alloced;
     uint64          min_tid;
@@ -335,6 +336,7 @@ pg_tre_posting_build_begin_sized(Relation index, uint64 trigram_hash,
 
     b = (PgTrePostingBuilder *) palloc0(sizeof(*b));
     b->index        = index;
+    b->packing      = pg_tre_tid_packing(index);
     b->trigram_hash = trigram_hash;
     b->with_payload = with_payload;   /* accepted for ABI; never produces payload */
     b->min_tid      = UINT64_MAX;
@@ -352,7 +354,7 @@ pg_tre_posting_build_add(PgTrePostingBuilder *b, ItemPointer tid,
                          const uint32 *positions, int n_positions,
                          const uint8 *tuple_bloom_bits)
 {
-    uint64 packed = pg_tre_pack_tid(tid);
+    uint64 packed = pg_tre_pack_tid(b->packing, tid);
 
     /*
      * 3.0.0: the per-tuple positional bloom/payload path is removed.
@@ -804,6 +806,7 @@ pg_tre_posting_build_n_tids(const PgTrePostingBuilder *b)
 struct PgTrePostingScan
 {
     Relation    index;
+    PgTreTidPacking packing;   /* the index's TID packing */
     BlockNumber cur_blk;       /* InvalidBlockNumber when done */
     const uint8 *inline_data;
     Size        inline_bytes;
@@ -818,6 +821,7 @@ pg_tre_posting_scan_begin(Relation index, BlockNumber root,
 {
     PgTrePostingScan *s = (PgTrePostingScan *) palloc0(sizeof(*s));
     s->index       = index;
+    s->packing     = pg_tre_tid_packing(index);
     s->cur_blk     = root;
     s->inline_data = inline_data;
     s->inline_bytes= inline_bytes;
@@ -959,10 +963,17 @@ pg_tre_posting_scan_next(PgTrePostingScan *s, sm_t **out,
         s->pinned_buf = InvalidBuffer;   /* already copied; release */
         UnlockReleaseBuffer(buf);
 
-        if (min_tid_blk)
-            *min_tid_blk = (BlockNumber) (hdr->min_tid >> 16);
-        if (max_tid_blk)
-            *max_tid_blk = (BlockNumber) (hdr->max_tid >> 16);
+        if (min_tid_blk || max_tid_blk)
+        {
+            ItemPointerData lo, hi;
+
+            pg_tre_unpack_tid(s->packing, hdr->min_tid, &lo);
+            pg_tre_unpack_tid(s->packing, hdr->max_tid, &hi);
+            if (min_tid_blk)
+                *min_tid_blk = ItemPointerGetBlockNumberNoCheck(&lo);
+            if (max_tid_blk)
+                *max_tid_blk = ItemPointerGetBlockNumberNoCheck(&hi);
+        }
 
         s->cur_blk = hdr->right_link;
         *out = s->smap;
@@ -1280,7 +1291,7 @@ typedef struct PgTreVacUpperInternalEntry
  * receives the surviving count.
  */
 static uint64
-repack_inline_posting(const uint8 *in, Size in_bytes,
+repack_inline_posting(PgTreTidPacking pk, const uint8 *in, Size in_bytes,
                       uint8 *out_buf, Size out_cap, Size *out_len,
                       IndexBulkDeleteCallback callback, void *callback_state,
                       uint64 *out_remaining,
@@ -1361,7 +1372,7 @@ repack_inline_posting(const uint8 *in, Size in_bytes,
             entry_ptr += step;
         }
 
-        pg_tre_unpack_tid(member, &iptr);
+        pg_tre_unpack_tid(pk, member, &iptr);
         dead = callback(&iptr, callback_state);
 
         if (dead)
@@ -1618,7 +1629,8 @@ posting_leaf_inline_delete(Relation index, Buffer buf, BlockNumber blkno,
             if (blob_in == 0)
                 continue;
 
-            removed += repack_inline_posting(inline_region + in_off, blob_in,
+            removed += repack_inline_posting(pg_tre_tid_packing(index),
+                                             inline_region + in_off, blob_in,
                                              scratch, leaf_budget,
                                              &blob_out, callback,
                                              callback_state, &blob_remaining,
@@ -1708,6 +1720,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
                     IndexBulkDeleteCallback callback, void *callback_state,
                     uint64 *out_remaining)
 {
+    const PgTreTidPacking pk = pg_tre_tid_packing(index);
     Page    page;
     PgTrePostingLeafHeader *hdr;
     uint8  *sm_bytes;
@@ -1814,7 +1827,7 @@ posting_leaf_delete(Relation index, Buffer buf, BlockNumber blkno,
             entry_ptr += step;
         }
 
-        pg_tre_unpack_tid(member, &iptr);
+        pg_tre_unpack_tid(pk, member, &iptr);
         dead = callback(&iptr, callback_state);
 
         if (dead)

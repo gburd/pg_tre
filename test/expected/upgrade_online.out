@@ -42,14 +42,14 @@ FROM pg_tre_index_format_status('up_idx')
 ORDER BY format_version;
  format_version | has_pages 
 ----------------+-----------
-             10 | t
+             11 | t
 (1 row)
 
 -- The min format version is the latest (nothing older present).
 SELECT pg_tre_index_min_format_version('up_idx') AS min_fmt;
  min_fmt 
 ---------
-      10
+      11
 (1 row)
 
 -- Run the in-place upgrade walk: must succeed with no error even though

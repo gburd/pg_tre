@@ -227,7 +227,7 @@ typedef struct UpperIterState
  *                  breaks ties between identical (hash,tid) pairs, which
  *                  never occur, so grouping by hash is unchanged.)
  *
- * pg_tre_pack_tid() is (block << 16) | offset, so the numeric order
+ * The key's TID is packed LEGACY, (block << 16) | offset, so the numeric order
  * of the packed value equals ItemPointerCompare order, and big-endian
  * bytes preserve that under memcmp.
  */
@@ -511,7 +511,11 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
              * the stack buffer is safe to reuse for the next emission
              * (no per-emission palloc).
              */
-            encode_entry(key, trigram_hash, pg_tre_pack_tid(tid),
+            /* The sort key's TID is transient: LEGACY packing is lossless
+             * for any offset and orders TIDs exactly like the index's own
+             * packing, so the posting builder can repack it. */
+            encode_entry(key, trigram_hash,
+                         pg_tre_pack_tid(PG_TRE_TID_LEGACY, tid),
                          pg_tre_trigram_key_cp(ring));
             SET_VARSIZE(&wrap, VARHDRSZ + PG_TRE_SORTKEY_LEN);
             memcpy(wrap.data, key, PG_TRE_SORTKEY_LEN);
@@ -740,7 +744,7 @@ build_postings(Tuplesortstate *sortstate, Relation index, PostingOut *out)
         {
             ItemPointerData itid;
 
-            pg_tre_unpack_tid(tid, &itid);
+            pg_tre_unpack_tid(PG_TRE_TID_LEGACY, tid, &itid);
             pg_tre_posting_build_add(builder, &itid, NULL, 0, NULL);
             last_tid = tid;
         }

@@ -27,6 +27,13 @@ extern void pg_tre_meta_init(Page page);
 extern void pg_tre_meta_read(Relation index, PgTreMetaPageData *out);
 
 /*
+ * How this index packs heap TIDs (meta.tid_packing), cached per relation.
+ * pg_tre_tid_packing_set primes the cache; only the meta-page writer calls it.
+ */
+extern PgTreTidPacking pg_tre_tid_packing(Relation index);
+extern void pg_tre_tid_packing_set(Relation index, PgTreTidPacking packing);
+
+/*
  * Build an empty index: meta page (block 0) only.  Invoked by
  * ambuildempty.  Emits WAL record a generic WAL record if the index
  * is WAL-logged (standard nbtree pattern).

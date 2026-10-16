@@ -1,0 +1,234 @@
+-- test/sql/tid_packing.sql
+-- 4.4.0 (format v11): dense TID packing (block * 292 + offset) versus the
+-- legacy packing (block << 16 | offset) of every index built by 4.3 or
+-- earlier.  pg_tre.build_legacy_tid_packing builds a legacy index; two
+-- tables hold the same rows, one index each, so both read paths run on
+-- the same data: bitmap scan, ordered scan (<@>, matched inside the AM),
+-- the pending list, VACUUM, multi-leaf postings, heap blocks past 224
+-- (65536 / 292), offsets up to 291, and REINDEX turning legacy into
+-- dense.  Every check compares the index with a sequential scan.
+SET client_min_messages = warning;
+SET
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+CREATE EXTENSION
+DROP TABLE IF EXISTS tp_l, tp_d CASCADE;
+DROP TABLE
+RESET client_min_messages;
+RESET
+-- 'row' is a multi-leaf posting, 'zq' a rare trigram.  The tail (ids
+-- 80001-83000) is mostly NULL: 290 such tuples fit on a page, so offsets
+-- reach the top of the dense stride (MaxHeapTuplesPerPage = 291).
+CREATE TABLE tp_l (id int, s text) WITH (fillfactor = 100);
+CREATE TABLE
+CREATE TABLE tp_d (id int, s text) WITH (fillfactor = 100);
+CREATE TABLE
+INSERT INTO tp_l SELECT i, 'row' || (i % 997) || CASE WHEN i % 5000 = 7 THEN 'zq' ELSE '' END
+  FROM generate_series(1, 60000) i;
+INSERT 0 60000
+INSERT INTO tp_l SELECT NULL, CASE WHEN i % 41 = 0 THEN 'tail' || (i % 7) END
+  FROM generate_series(80001, 83000) i;
+INSERT 0 3000
+INSERT INTO tp_d SELECT * FROM tp_l;
+INSERT 0 63000
+SELECT max((ctid::text::point)[0]) > 224 AS past_block_224,
+       max((ctid::text::point)[1]) >= 289 AS offsets_near_291,
+       max((ctid::text::point)[1]) FILTER (WHERE s LIKE 'tail%') >= 280 AS tail_high
+  FROM tp_d;
+ past_block_224 | offsets_near_291 | tail_high 
+----------------+------------------+-----------
+ t              | t                | t
+(1 row)
+
+SET client_min_messages = warning;
+SET
+SET pg_tre.build_legacy_tid_packing = on;
+SET
+CREATE INDEX tp_l_idx ON tp_l USING tre (s);
+CREATE INDEX
+RESET pg_tre.build_legacy_tid_packing;
+RESET
+CREATE INDEX tp_d_idx ON tp_d USING tre (s);
+CREATE INDEX
+RESET client_min_messages;
+RESET
+SELECT pg_tre_index_tid_packing('tp_l_idx') AS legacy,
+       pg_tre_index_tid_packing('tp_d_idx') AS dense;
+ legacy | dense 
+--------+-------
+ legacy | dense
+(1 row)
+
+-- seq scan vs bitmap scan vs ordered index scan on one table.
+CREATE FUNCTION tp_check(tbl text, pat text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE seq_ids tid[]; bm_ids tid[]; ord_ids tid[];
+BEGIN
+  PERFORM set_config('enable_seqscan', 'on', true);
+  PERFORM set_config('enable_indexscan', 'off', true);
+  PERFORM set_config('enable_bitmapscan', 'off', true);
+  EXECUTE format('SELECT coalesce(array_agg(ctid ORDER BY ctid), ''{}'') FROM %I
+                   WHERE s %%~~ tre_pattern(%L, 0)', tbl, pat) INTO seq_ids;
+  PERFORM set_config('enable_seqscan', 'off', true);
+  PERFORM set_config('enable_bitmapscan', 'on', true);
+  EXECUTE format('SELECT coalesce(array_agg(ctid ORDER BY ctid), ''{}'') FROM %I
+                   WHERE s %%~~ tre_pattern(%L, 0)', tbl, pat) INTO bm_ids;
+  PERFORM set_config('enable_bitmapscan', 'off', true);
+  PERFORM set_config('enable_indexscan', 'on', true);
+  EXECUTE format('SELECT coalesce(array_agg(ctid ORDER BY ctid), ''{}'') FROM
+                   (SELECT ctid FROM %I WHERE s %%~~ tre_pattern(%L, 0)
+                     ORDER BY s <@> tre_pattern(%L, 0) LIMIT 100000) q',
+                 tbl, pat, pat) INTO ord_ids;
+  RETURN CASE WHEN seq_ids = bm_ids AND seq_ids = ord_ids
+              THEN 'ok ' || cardinality(seq_ids)
+              ELSE format('BAD seq=%s bitmap=%s ordered=%s', cardinality(seq_ids),
+                          cardinality(bm_ids), cardinality(ord_ids)) END;
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION tp_all(tag text) RETURNS TABLE(tag text, pat text, legacy text, dense text)
+LANGUAGE sql AS $$
+  SELECT tag, p, tp_check('tp_l', p), tp_check('tp_d', p)
+    FROM unnest(ARRAY['row', 'zq', 'row99[0-6]zq', 'w4', 'row123$', 'tail[36]', 'nomatch']) p
+$$;
+CREATE FUNCTION
+-- (1) Freshly built.
+SELECT * FROM tp_all('built');
+  tag  |     pat      |  legacy  |  dense   
+-------+--------------+----------+----------
+ built | row          | ok 60000 | ok 60000
+ built | zq           | ok 12    | ok 12
+ built | row99[0-6]zq | ok 0     | ok 0
+ built | w4           | ok 6671  | ok 6671
+ built | row123$      | ok 61    | ok 61
+ built | tail[36]     | ok 21    | ok 21
+ built | nomatch      | ok 0     | ok 0
+(7 rows)
+
+-- (2) Pending list: inserts land in each index's pending list, packed by
+-- that index's packing, and are merged at scan time.
+INSERT INTO tp_l SELECT i, 'row' || (i % 997) || 'zq' FROM generate_series(60001, 61000) i;
+INSERT 0 1000
+INSERT INTO tp_d SELECT i, 'row' || (i % 997) || 'zq' FROM generate_series(60001, 61000) i;
+INSERT 0 1000
+SELECT * FROM tp_all('pending');
+   tag   |     pat      |  legacy  |  dense   
+---------+--------------+----------+----------
+ pending | row          | ok 61000 | ok 61000
+ pending | zq           | ok 1012  | ok 1012
+ pending | row99[0-6]zq | ok 7     | ok 7
+ pending | w4           | ok 6782  | ok 6782
+ pending | row123$      | ok 61    | ok 61
+ pending | tail[36]     | ok 21    | ok 21
+ pending | nomatch      | ok 0     | ok 0
+(7 rows)
+
+-- (3) VACUUM: delete a slice of built and pending rows, then vacuum
+-- (which also flushes the pending lists).
+DELETE FROM tp_l WHERE id % 7 = 0 OR id BETWEEN 60500 AND 60600
+                     OR (id IS NULL AND (ctid::text::point)[1]::int % 2 = 0);
+DELETE 10295
+DELETE FROM tp_d WHERE id % 7 = 0 OR id BETWEEN 60500 AND 60600
+                     OR (id IS NULL AND (ctid::text::point)[1]::int % 2 = 0);
+DELETE 10295
+VACUUM tp_l;
+VACUUM
+VACUUM tp_d;
+VACUUM
+SELECT * FROM tp_all('vacuumed');
+   tag    |     pat      |  legacy  |  dense   
+----------+--------------+----------+----------
+ vacuumed | row          | ok 52200 | ok 52200
+ vacuumed | zq           | ok 781   | ok 781
+ vacuumed | row99[0-6]zq | ok 6     | ok 6
+ vacuumed | w4           | ok 5812  | ok 5812
+ vacuumed | row123$      | ok 52    | ok 52
+ vacuumed | tail[36]     | ok 20    | ok 20
+ vacuumed | nomatch      | ok 0     | ok 0
+(7 rows)
+
+-- (4) New rows re-use the freed slots.
+INSERT INTO tp_l SELECT i, 'row' || (i % 997) || 'zq' FROM generate_series(70001, 72000) i;
+INSERT 0 2000
+INSERT INTO tp_d SELECT i, 'row' || (i % 997) || 'zq' FROM generate_series(70001, 72000) i;
+INSERT 0 2000
+SELECT * FROM tp_all('refilled');
+   tag    |     pat      |  legacy  |  dense   
+----------+--------------+----------+----------
+ refilled | row          | ok 54200 | ok 54200
+ refilled | zq           | ok 2781  | ok 2781
+ refilled | row99[0-6]zq | ok 20    | ok 20
+ refilled | w4           | ok 6034  | ok 6034
+ refilled | row123$      | ok 52    | ok 52
+ refilled | tail[36]     | ok 20    | ok 20
+ refilled | nomatch      | ok 0     | ok 0
+(7 rows)
+
+-- (5) REINDEX converts a legacy index.  Same rows, so the two indexes
+-- are then the same size; before, the dense one is smaller.
+SELECT pg_relation_size('tp_d_idx') < pg_relation_size('tp_l_idx') AS dense_smaller;
+ dense_smaller 
+---------------
+ t
+(1 row)
+
+SET client_min_messages = warning;
+SET
+REINDEX INDEX tp_l_idx;
+REINDEX
+REINDEX INDEX tp_d_idx;
+REINDEX
+RESET client_min_messages;
+RESET
+SELECT pg_tre_index_tid_packing('tp_l_idx') AS after_reindex,
+       pg_relation_size('tp_l_idx') = pg_relation_size('tp_d_idx') AS same_size;
+ after_reindex | same_size 
+---------------+-----------
+ dense         | t
+(1 row)
+
+SELECT * FROM tp_all('reindexed');
+    tag    |     pat      |  legacy  |  dense   
+-----------+--------------+----------+----------
+ reindexed | row          | ok 54200 | ok 54200
+ reindexed | zq           | ok 2781  | ok 2781
+ reindexed | row99[0-6]zq | ok 20    | ok 20
+ reindexed | w4           | ok 6034  | ok 6034
+ reindexed | row123$      | ok 52    | ok 52
+ reindexed | tail[36]     | ok 20    | ok 20
+ reindexed | nomatch      | ok 0     | ok 0
+(7 rows)
+
+-- (6) pg_tre_upgrade_index points a legacy index at REINDEX; quiet on a
+-- dense one.
+SET client_min_messages = warning;
+SET
+SET pg_tre.build_legacy_tid_packing = on;
+SET
+CREATE INDEX tp_l_idx2 ON tp_l USING tre (s);
+CREATE INDEX
+RESET pg_tre.build_legacy_tid_packing;
+RESET
+RESET client_min_messages;
+RESET
+SELECT pg_tre_upgrade_index('tp_l_idx2');
+psql:test/sql/tid_packing.sql:114: NOTICE:  pg_tre: index "tp_l_idx2" uses the pre-4.4 TID packing
+DETAIL:  It reads and updates correctly as it is; an index built by 4.4.0 or later is usually 2-2.5x smaller on long-text columns.
+HINT:  Run REINDEX INDEX CONCURRENTLY tp_l_idx2 to rebuild it with dense TID packing.
+ pg_tre_upgrade_index 
+----------------------
+ 
+(1 row)
+
+SELECT pg_tre_upgrade_index('tp_d_idx');
+ pg_tre_upgrade_index 
+----------------------
+ 
+(1 row)
+
+DROP INDEX tp_l_idx2;
+DROP INDEX
+DROP FUNCTION tp_all(text);
+DROP FUNCTION
+DROP FUNCTION tp_check(text, text);
+DROP FUNCTION
+DROP TABLE tp_l, tp_d;
+DROP TABLE

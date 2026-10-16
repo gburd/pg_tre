@@ -16,7 +16,11 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lockdefs.h"
+#include "access/heapam.h"
+#include "access/relation.h"
+#include "access/tableam.h"
 #include "utils/elog.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 #include "pg_tre/buffer.h"
@@ -79,6 +83,9 @@ pg_tre_meta_init(Page page)
      */
     meta->root_surf          = InvalidBlockNumber;
     meta->surf_n_keys        = 0;
+
+    /* pg_tre_build_empty_fork overwrites this with the index's packing. */
+    meta->tid_packing        = PG_TRE_TID_LEGACY;
 
     /*
      * Place the lower/upper pointers past the meta struct so PageAddItem
@@ -160,11 +167,88 @@ pg_tre_build_empty(Relation index)
     pg_tre_build_empty_fork(index, MAIN_FORKNUM);
 }
 
+/*
+ * Per-index cache of the meta page's tid_packing in rd_amcache.  The packing
+ * is fixed for the life of a relfilenode, and a new relfilenode means a
+ * relcache rebuild, which frees rd_amcache.
+ */
+typedef struct PgTreAmCache
+{
+    PgTreTidPacking tid_packing;
+} PgTreAmCache;
+
+void
+pg_tre_tid_packing_set(Relation index, PgTreTidPacking packing)
+{
+    if (index->rd_amcache == NULL)
+        index->rd_amcache = MemoryContextAllocZero(index->rd_indexcxt,
+                                                   sizeof(PgTreAmCache));
+    ((PgTreAmCache *) index->rd_amcache)->tid_packing = packing;
+}
+
+PgTreTidPacking
+pg_tre_tid_packing(Relation index)
+{
+    if (index->rd_amcache == NULL)
+    {
+        /*
+         * Read the field from a pinned meta page WITHOUT the content lock.
+         * A relcache invalidation can drop rd_amcache whenever this backend
+         * takes a heavyweight lock, so the miss can happen while the caller
+         * holds the meta buffer exclusively (a pending-list append, a
+         * merge); a shared LockBuffer there would wait on our own LWLock
+         * forever.  It is safe because tid_packing (like magic) is written
+         * once, when the relfilenode is created, and never changes: every
+         * later rewrite of the meta page stores the same bytes there.
+         */
+        Buffer      buf = ReadBuffer(index, PG_TRE_META_BLKNO);
+        PgTreMetaPage meta = PgTreMetaPageGet(BufferGetPage(buf));
+        uint32      magic = meta->magic;
+        uint32      packing = meta->tid_packing;
+
+        ReleaseBuffer(buf);
+        if (magic != PG_TRE_META_MAGIC)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("pg_tre: meta page magic mismatch (got 0x%08X) in index \"%s\"",
+                            magic, RelationGetRelationName(index))));
+        if (packing != PG_TRE_TID_LEGACY && packing != PG_TRE_TID_DENSE)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("pg_tre: unknown TID packing %u in index \"%s\"",
+                            packing, RelationGetRelationName(index)),
+                     errhint("REINDEX the index.")));
+        pg_tre_tid_packing_set(index, (PgTreTidPacking) packing);
+    }
+    return ((PgTreAmCache *) index->rd_amcache)->tid_packing;
+}
+
+/*
+ * The packing a new index on this table gets: dense for the heap access
+ * method, whose offsets never exceed MaxHeapTuplesPerPage; legacy for any
+ * other table AM, which may use the whole 16-bit offset range, or when
+ * pg_tre.build_legacy_tid_packing asks for it (tests).
+ */
+static PgTreTidPacking
+packing_for_new_index(Relation index)
+{
+    Relation    heap;
+    bool        is_heap;
+
+    if (pg_tre_build_legacy_tids)
+        return PG_TRE_TID_LEGACY;
+    heap = relation_open(index->rd_index->indrelid, NoLock);
+    is_heap = (heap->rd_tableam == GetHeapamTableAmRoutine());
+    relation_close(heap, NoLock);
+    return is_heap ? PG_TRE_TID_DENSE : PG_TRE_TID_LEGACY;
+}
+
 void
 pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
 {
     Buffer metabuf;
     Page   metapage;
+    PgTreTidPacking packing = packing_for_new_index(index);
 
     /* Allocate block 0 as the meta page in the requested fork. */
     metabuf = pg_tre_extend_fork(index, forknum, PG_TRE_PAGE_META);
@@ -188,6 +272,7 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
         metapage = GenericXLogRegisterBuffer(state, metabuf,
                                              GENERIC_XLOG_FULL_IMAGE);
         pg_tre_meta_init(metapage);
+        PgTreMetaPageGet(metapage)->tid_packing = packing;
         GenericXLogFinish(state);
     }
 
@@ -211,6 +296,14 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
     }
 
     UnlockReleaseBuffer(metabuf);
+
+    /*
+     * This relfilenode is new (CREATE INDEX, REINDEX, an UNLOGGED init
+     * fork), so anything cached for the relation describes the old one: a
+     * REINDEX of a legacy index runs in the same command as the lookups
+     * that cached "legacy".  Prime the cache with what was just written.
+     */
+    pg_tre_tid_packing_set(index, packing);
 }
 
 void

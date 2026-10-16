@@ -391,6 +391,16 @@ pg_tre_upgrade_index(PG_FUNCTION_ARGS)
                              "scans are correct without it, only slower for "
                              "anchored-prefix patterns.",
                              RelationGetRelationName(index))));
+        if (meta.tid_packing != PG_TRE_TID_DENSE)
+            ereport(NOTICE,
+                    (errmsg("pg_tre: index \"%s\" uses the pre-4.4 TID packing",
+                            RelationGetRelationName(index)),
+                     errdetail("It reads and updates correctly as it is; "
+                               "an index built by 4.4.0 or later is usually "
+                               "2-2.5x smaller on long-text columns."),
+                     errhint("Run REINDEX INDEX CONCURRENTLY %s to rebuild "
+                             "it with dense TID packing.",
+                             RelationGetRelationName(index))));
     }
 
     index_close(index, ShareUpdateExclusiveLock);
@@ -538,4 +548,27 @@ pg_tre_index_min_format_version(PG_FUNCTION_ARGS)
     index_close(index, AccessShareLock);
 
     PG_RETURN_INT32((int32) meta.min_page_format_version);
+}
+
+/*
+ * pg_tre_index_tid_packing(idx regclass) RETURNS text
+ *
+ * 'dense' (built by 4.4.0+) or 'legacy' (pre-4.4 packing, or a table
+ * access method other than heap).  O(1): one meta-page read.
+ */
+PG_FUNCTION_INFO_V1(pg_tre_index_tid_packing);
+
+Datum
+pg_tre_index_tid_packing(PG_FUNCTION_ARGS)
+{
+    Oid         indexoid = PG_GETARG_OID(0);
+    Relation    index;
+    PgTreTidPacking pk;
+
+    index = index_open(indexoid, AccessShareLock);
+    check_is_pg_tre_index(index);
+    pk = pg_tre_tid_packing(index);
+    index_close(index, AccessShareLock);
+
+    PG_RETURN_TEXT_P(cstring_to_text(pk == PG_TRE_TID_DENSE ? "dense" : "legacy"));
 }
