@@ -241,6 +241,14 @@ breaking change in release notes.
 | `formatting.yml`      | PR (src/**)                              | clang-format check                   |
 | `pgspot.yml`          | push to main, PR (sql/**)                | Extension SQL security scan          |
 | `upgrade-tests.yml`   | PR (sql/** or pg_tre.control), weekly    | ALTER EXTENSION UPDATE matrix        |
+| `sanitizer-build-and-test.yml` | push to main                    | Regression suite in an ASan-built PostgreSQL (`scripts/asan-check.sh`) |
+| `nightly-stress.yml`  | daily                                    | stress / wal_audit / replication, plain and under ASan |
+
+These are the GitHub workflows, which run on the GitHub mirror
+(`gburd/pg_tre`) and are the release gate.  `.forgejo/workflows/ci.yml`
+is meant for Codeberg, but no Forgejo runner is registered for the
+repository, so Codeberg cancels every run without starting it.  Check
+the GitHub mirror's runs for the pushed commit, not Codeberg's.
 
 ## Troubleshooting
 
