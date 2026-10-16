@@ -34,8 +34,13 @@ SAN_LDFLAGS="-fsanitize=address"
 # Makefile calls to detect the PG major: with LeakSanitizer on, pg_config's
 # own at-exit leaks make it exit 1 and the build aborts.  detect_leaks=0 also
 # because PostgreSQL leaks into long-lived memory contexts by design.
+# detect_stack_use_after_return=0: with it on (the default in compiler-rt
+# since LLVM 15, so GCC 13's libasan on Ubuntu 24.04 too) locals live on
+# ASan's heap-allocated fake stack, PostgreSQL's stack-depth check measures
+# the distance to them from the real stack base, and initdb's bootstrap
+# dies "stack depth limit exceeded" -- every CI run of this job until 4.4.0.
 mkdir -p "$ASAN_WORK/reports"
-export ASAN_OPTIONS="detect_leaks=0:abort_on_error=0:print_stacktrace=1:log_path=$ASAN_WORK/reports/asan"
+export ASAN_OPTIONS="detect_leaks=0:detect_stack_use_after_return=0:abort_on_error=0:print_stacktrace=1:log_path=$ASAN_WORK/reports/asan"
 
 log() { printf '[asan] %s\n' "$*" >&2; }
 die() { log "$*"; exit 3; }

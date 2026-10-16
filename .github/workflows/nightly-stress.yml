@@ -120,7 +120,7 @@ jobs:
           mkdir -p ${{ github.workspace }}/sanitizer_logs
           {
               echo "LD_PRELOAD=$ASAN_RT"
-              echo "ASAN_OPTIONS=detect_leaks=0:verify_asan_link_order=0:abort_on_error=1:exitcode=27:log_path=${{ github.workspace }}/sanitizer_logs/asan:print_stacktrace=1"
+              echo "ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0:verify_asan_link_order=0:abort_on_error=1:exitcode=27:log_path=${{ github.workspace }}/sanitizer_logs/asan:print_stacktrace=1"
               echo "UBSAN_OPTIONS=halt_on_error=1:exitcode=27:print_stacktrace=1:log_path=${{ github.workspace }}/sanitizer_logs/ubsan"
               echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/test/lsan.supp"
           } >> "$GITHUB_ENV"
