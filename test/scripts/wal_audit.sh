@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 #
-# wal_audit.sh — single-node primary check of what we put on the
-# WAL stream.  Verifies:
+# wal_audit.sh — single-node primary check of what pg_tre puts on the
+# WAL stream.  pg_tre has no resource manager of its own (since 4.0.0):
+# page changes are Generic WAL records, and an UNLOGGED index's init fork
+# is a full-page image (XLOG FPI); records are attributed to an index by
+# the relfilenode in block_ref, whatever the resource manager.
+# Verifies:
 #
-#   1. UNLOGGED bm25-style tre indexes emit zero pg_tre records.
-#      (UNLOGGED indexes skip WAL by definition; this is a
-#      regression check that our build path honors
+#   1. An UNLOGGED tre index logs only its init fork: no Generic
+#      record touches its main fork during CREATE INDEX or later
+#      INSERT/DELETE/VACUUM.  (UNLOGGED skips WAL by definition; this
+#      is a regression check that the build and write paths honor
 #      RelationNeedsWAL.)
 #
-#   2. LOGGED tre inserts and pending-list flushes emit pg_tre
-#      rmgr-149 records that pg_walinspect can decode without
-#      errors.  An earlier bug in our rmgr identify callback
-#      surfaced here as "ERROR" lines in pg_get_wal_records_info.
+#   2. A LOGGED tre index's build and pending-list inserts emit Generic
+#      records for its main fork, and pg_walinspect decodes the range.
 #
 #   3. crash + immediate-stop + restart leaves the index queryable
-#      and returning the same rows it did before the crash.
+#      and returning the same rows as a sequential scan.
 #
 # Tests use pg_walinspect (contrib in PG15+).  All work happens
 # in the test database; no replication setup needed.
@@ -46,111 +49,98 @@ psql_check "$TEST_PORT" "$TEST_DB" "
     CREATE EXTENSION pg_tre;
     CREATE EXTENSION pg_walinspect;"
 
-# ------------------------------------------------------------------
-# Test 1: UNLOGGED indexes emit only the init-fork META_UPDATE record.
-# ------------------------------------------------------------------
-# UNLOGGED indexes WAL-log their init fork (the template that gets
-# copied to the main fork on crash recovery) but NOT their main
-# fork.  So we expect exactly one pg_tre record per UNLOGGED index
-# (the META_UPDATE from ambuildempty), and zero records for any
-# subsequent INSERT/DELETE workload against the UNLOGGED index.
-log "Test 1: UNLOGGED index emits only init-fork META_UPDATE records"
+# Records in [start, end) whose block references name relation $3's
+# relfilenode, fork $4 (main or init).  block_ref reads
+# "blkref #0: rel 1663/16384/16450 fork main blk 3 ..." (pg_waldump
+# omits "fork main"; accept both).
+wal_count() {
+    psql_capture "$TEST_PORT" "$TEST_DB" "
+        SELECT count(*)::int
+          FROM pg_get_wal_records_info('$1', '$2') w,
+               (SELECT pg_relation_filenode('$3')::text AS fn) r
+         WHERE CASE '$4'
+                 WHEN 'init' THEN w.block_ref ~ ('/' || r.fn || ' fork init blk ')
+                 ELSE w.block_ref ~ ('/' || r.fn || '( fork main)? blk ')
+               END;"
+}
 
-start_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
-    "SELECT pg_current_wal_lsn()::text")
+# ------------------------------------------------------------------
+# Test 1: an UNLOGGED index logs its init fork and nothing else.
+# ------------------------------------------------------------------
+log "Test 1: UNLOGGED index logs only its init fork"
 
 psql_check "$TEST_PORT" "$TEST_DB" "
     CREATE UNLOGGED TABLE unlogged_t (id serial PRIMARY KEY, body text);
     INSERT INTO unlogged_t (body)
     SELECT 'unlogged row ' || i
-    FROM generate_series(1, 100) AS i;
-    CREATE INDEX unlogged_idx ON unlogged_t USING tre (body);"
-
-end_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
-    "SELECT pg_current_wal_lsn()::text")
-
-# Count by record type.
-pg_tre_records=$(psql_capture "$TEST_PORT" "$TEST_DB" "
-    SELECT string_agg(record_type || ':' || count, ',' ORDER BY record_type)
-    FROM (
-        SELECT record_type, count(*)::int AS count
-        FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')
-        WHERE resource_manager = 'pg_tre'
-        GROUP BY record_type
-    ) sub;")
-
-log "  pg_tre records observed: ${pg_tre_records:-(none)}"
-
-# Verify there is exactly one META_UPDATE (for the init fork) and
-# nothing else.  Anything beyond META_UPDATE in this workload
-# would mean we're WAL-logging main-fork changes for an UNLOGGED
-# index, which violates the UNLOGGED contract.
-bad=$(psql_capture "$TEST_PORT" "$TEST_DB" "
-    SELECT count(*)::int FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')
-    WHERE resource_manager = 'pg_tre'
-    AND record_type <> 'META_UPDATE';")
-
-if [ "$bad" != "0" ]; then
-    error "UNLOGGED workload emitted $bad non-META_UPDATE records (expected 0)"
-fi
-
-meta_count=$(psql_capture "$TEST_PORT" "$TEST_DB" "
-    SELECT count(*)::int FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')
-    WHERE resource_manager = 'pg_tre' AND record_type = 'META_UPDATE';")
-
-if [ "$meta_count" -lt 1 ]; then
-    error "UNLOGGED CREATE INDEX produced $meta_count META_UPDATE records" \
-          "(expected at least 1: the init-fork template)"
-fi
-log "  OK: exactly $meta_count META_UPDATE record(s), no other types"
-# ------------------------------------------------------------------
-# Test 2: LOGGED inserts emit pg_tre records that decode cleanly.
-# ------------------------------------------------------------------
-log "Test 2: LOGGED inserts emit decodable pg_tre records"
+    FROM generate_series(1, 100) AS i;"
 
 start_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
     "SELECT pg_current_wal_lsn()::text")
+psql_check "$TEST_PORT" "$TEST_DB" "
+    CREATE INDEX unlogged_idx ON unlogged_t USING tre (body);
+    INSERT INTO unlogged_t (body)
+    SELECT 'unlogged later row ' || i FROM generate_series(1, 200) AS i;
+    DELETE FROM unlogged_t WHERE id % 3 = 0;"
+psql_check "$TEST_PORT" "$TEST_DB" "VACUUM unlogged_t;"
+psql_check "$TEST_PORT" "$TEST_DB" "SELECT pg_switch_wal();" >/dev/null
+end_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
+    "SELECT pg_current_wal_lsn()::text")
+
+main_n=$(wal_count "$start_lsn" "$end_lsn" unlogged_idx main)
+init_n=$(wal_count "$start_lsn" "$end_lsn" unlogged_idx init)
+log "  unlogged_idx Generic records: main fork $main_n, init fork $init_n"
+if [ "$main_n" != "0" ]; then
+    error "UNLOGGED index wrote $main_n WAL records for its main fork (expected 0)"
+fi
+if [ "${init_n:-0}" -lt 1 ]; then
+    error "UNLOGGED CREATE INDEX logged $init_n init-fork records" \
+          "(expected at least 1: the init-fork template)"
+fi
+log "  OK: init fork logged, main fork not"
+
+# ------------------------------------------------------------------
+# Test 2: a LOGGED index logs its build and pending-list inserts, and
+# pg_walinspect decodes every record in the range.
+# ------------------------------------------------------------------
+log "Test 2: LOGGED index build + inserts emit decodable Generic records"
 
 psql_check "$TEST_PORT" "$TEST_DB" "
     CREATE TABLE logged_t (id serial PRIMARY KEY, body text);
     INSERT INTO logged_t (body)
     SELECT 'The quick brown fox jumps over the lazy dog row ' || i
-    FROM generate_series(1, 1000) AS i;
-    CREATE INDEX logged_idx ON logged_t USING tre (body);
-    -- Force a few inserts after build to exercise the pending-list
-    -- path (which emits PENDING_INSERT records via our rmgr).
+    FROM generate_series(1, 1000) AS i;"
+
+start_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
+    "SELECT pg_current_wal_lsn()::text")
+psql_check "$TEST_PORT" "$TEST_DB" "
+    CREATE INDEX logged_idx ON logged_t USING tre (body);"
+mid_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
+    "SELECT pg_current_wal_lsn()::text")
+psql_check "$TEST_PORT" "$TEST_DB" "
+    -- Inserts after the build go through the pending list.
     INSERT INTO logged_t (body) VALUES
         ('extra row alpha'),
         ('extra row beta'),
         ('extra row gamma');"
-
 end_lsn=$(psql_capture "$TEST_PORT" "$TEST_DB" \
     "SELECT pg_current_wal_lsn()::text")
 
-pg_tre_record_count=$(psql_capture "$TEST_PORT" "$TEST_DB" "
-    SELECT count(*)::int FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')
-    WHERE resource_manager = 'pg_tre';")
-
-if [ "$pg_tre_record_count" -lt 1 ]; then
-    error "LOGGED inserts emitted only $pg_tre_record_count pg_tre records (expected >= 1)"
+build_n=$(wal_count "$start_lsn" "$mid_lsn" logged_idx main)
+insert_n=$(wal_count "$mid_lsn" "$end_lsn" logged_idx main)
+log "  logged_idx Generic records: build $build_n, pending inserts $insert_n"
+if [ "${build_n:-0}" -lt 1 ]; then
+    error "LOGGED CREATE INDEX logged $build_n main-fork records (expected >= 1)"
 fi
-log "  OK: $pg_tre_record_count pg_tre records"
+if [ "${insert_n:-0}" -lt 1 ]; then
+    error "LOGGED pending-list inserts logged $insert_n records (expected >= 1)"
+fi
 
-# Check for decode errors.  pg_get_wal_records_info raises an
-# ERROR on records the rmgr's identify callback can't classify;
-# we catch that here by piping through psql_check.
+# pg_get_wal_records_info raises an ERROR on a record it cannot decode;
+# psql_check fails the test on that.
 psql_check "$TEST_PORT" "$TEST_DB" "
-    SELECT count(*) FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')
-    WHERE resource_manager = 'pg_tre';" >/dev/null
-log "  OK: pg_walinspect decoded all pg_tre records without errors"
-
-# Also verify that every record_type label is non-empty (a crude
-# but effective check for our identify callback).
-distinct_types=$(psql_capture "$TEST_PORT" "$TEST_DB" "
-    SELECT string_agg(DISTINCT record_type, ', ')
-    FROM pg_get_wal_records_info('$start_lsn', '$end_lsn')
-    WHERE resource_manager = 'pg_tre';")
-log "  pg_tre record types observed: $distinct_types"
+    SELECT count(*) FROM pg_get_wal_records_info('$start_lsn', '$end_lsn');" >/dev/null
+log "  OK: pg_walinspect decoded every record in the range"
 
 # ------------------------------------------------------------------
 # Test 3: crash + restart leaves the index queryable.

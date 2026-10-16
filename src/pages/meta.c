@@ -16,7 +16,6 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lockdefs.h"
-#include "storage/smgr.h"
 #include "utils/elog.h"
 #include "utils/rel.h"
 
@@ -166,24 +165,10 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
 {
     Buffer metabuf;
     Page   metapage;
-    bool   wal_log;
 
     /* Allocate block 0 as the meta page in the requested fork. */
     metabuf = pg_tre_extend_fork(index, forknum, PG_TRE_PAGE_META);
     Assert(BufferGetBlockNumber(metabuf) == PG_TRE_META_BLKNO);
-
-    /*
-     * WAL-log the meta-page init.  Two paths:
-     *
-     *   - For the main fork: log only if the relation needs WAL.
-     *     UNLOGGED relations don't WAL-log their main fork.
-     *
-     *   - For the init fork: log unconditionally.  The init fork is
-     *     the WAL-logged template that gets copied to the main fork
-     *     during crash recovery, so it MUST be replayable even on
-     *     UNLOGGED indexes (where RelationNeedsWAL returns false).
-     */
-    wal_log = (forknum == INIT_FORKNUM) || RelationNeedsWAL(index);
 
     {
         GenericXLogState *state;
@@ -197,29 +182,35 @@ pg_tre_build_empty_fork(Relation index, ForkNumber forknum)
          *
          * Finishing unconditionally is correct: GenericXLogFinish applies the
          * change to the buffer and marks it dirty in every case, and emits no
-         * WAL record when the relation does not need one.  The init fork
-         * still gets a record because it is the template replayed during
-         * crash recovery even for UNLOGGED indexes.
+         * WAL record when the relation does not need one.
          */
         state = GenericXLogStart(index);
         metapage = GenericXLogRegisterBuffer(state, metabuf,
                                              GENERIC_XLOG_FULL_IMAGE);
         pg_tre_meta_init(metapage);
         GenericXLogFinish(state);
-        (void) wal_log;
     }
 
-    UnlockReleaseBuffer(metabuf);
-
     /*
-     * For the init fork, smgr fsync immediately so the template is
-     * durable before the surrounding CREATE INDEX commits.  This
-     * matches what btbuildempty does for the same reason.
+     * The init fork of an UNLOGGED index is the template crash recovery
+     * copies over the main fork, so it must be WAL-logged -- and
+     * GenericXLogFinish just skipped that, because RelationNeedsWAL() is
+     * false for an UNLOGGED relation, whatever the fork.  Until 4.4.0 the
+     * init fork's meta page therefore reached disk only at the next
+     * checkpoint: a crash before it left a zeroed template, and every
+     * query on the reset index failed "meta page magic mismatch (got
+     * 0x00000000)" (an INSERT hung on its own meta-page lock).  Log the
+     * page as GIN's ginbuildempty does; the buffer manager treats
+     * init-fork buffers as permanent, so a checkpoint writes it too.
      */
     if (forknum == INIT_FORKNUM)
     {
-        smgrimmedsync(RelationGetSmgr(index), forknum);
+        START_CRIT_SECTION();
+        log_newpage_buffer(metabuf, true);
+        END_CRIT_SECTION();
     }
+
+    UnlockReleaseBuffer(metabuf);
 }
 
 void
