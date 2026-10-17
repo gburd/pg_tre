@@ -513,6 +513,9 @@ pg_tre_db_max_char_len(void)
  * under the backend's LC_CTYPE) from other libc collations (locale_t);
  * PG18 has a locale_t for the default collation too and marks it
  * is_default.  Either way the default collation forces ASCII case rules.
+ * PG19 moved all of this behind the pg_locale_t's ctype methods and
+ * exports them (pg_iswalpha() and friends); there pg_tre has two
+ * strategies, C and LOCALE, as core's regex does.
  */
 typedef enum
 {
@@ -525,6 +528,9 @@ typedef enum
     PGT_STRATEGY_1BYTE,         /* PG17 default collation, other: <ctype.h> */
 #endif
     PGT_STRATEGY_ICU            /* ICU provider */
+#if PG_VERSION_NUM >= 190000
+    , PGT_STRATEGY_LOCALE       /* PG19: the pg_locale_t's ctype methods */
+#endif
 } PgtStrategy;
 
 static PgtStrategy pgt_strategy;
@@ -560,7 +566,20 @@ pg_tre_set_collation(Oid collation)
                  errmsg("could not determine which collation to use for regular expression"),
                  errhint("Use the COLLATE clause to set the collation explicitly.")));
 
-#if PG_VERSION_NUM >= 180000
+#if PG_VERSION_NUM >= 190000
+    /*
+     * PG19 regex: no strategies -- the collation's pg_locale_t carries its
+     * ctype methods (NULL ctype for a C ctype), which pg_isw*() and
+     * pg_tow*() call, exactly as regc_pg_locale.c does.
+     */
+    locale = pg_newlocale_from_collation(collation);
+
+    if (!locale->deterministic)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("nondeterministic collations are not supported for regular expressions")));
+    strategy = locale->ctype_is_c ? PGT_STRATEGY_C : PGT_STRATEGY_LOCALE;
+#elif PG_VERSION_NUM >= 180000
     if (collation == C_COLLATION_OID)
         strategy = PGT_STRATEGY_C;
     else
@@ -661,6 +680,50 @@ pgt_c_props(pg_wchar c)
     return 0;
 }
 
+#if PG_VERSION_NUM >= 190000
+/*
+ * PG19: core's public pg_isw<name>() / pg_tow<x>() (utils/pg_locale.h) for
+ * the collation's pg_locale_t -- what regc_pg_locale.c's regc_wc_* call.
+ * The ICU provider's methods are in the server, so this follows libicu
+ * exactly, with no ICU link in pg_tre.so.  The C strategy keeps
+ * pgt_c_props(), as regc_pg_locale.c keeps pg_char_properties[].
+ */
+#define PGT_CLASS(name, cbits) \
+static int \
+pgt_is##name(wint_t wc) \
+{ \
+    pg_wchar    c = (pg_wchar) wc; \
+\
+    if (pgt_strategy == PGT_STRATEGY_C) \
+        return (c <= (pg_wchar) 127 && (pgt_c_props(c) & (cbits))); \
+    return pg_isw##name(c, pgt_locale); \
+}
+
+PGT_CLASS(digit, PG_ISDIGIT)
+PGT_CLASS(alpha, PG_ISALPHA)
+PGT_CLASS(alnum, PG_ISALNUM)
+PGT_CLASS(upper, PG_ISUPPER)
+PGT_CLASS(lower, PG_ISLOWER)
+PGT_CLASS(graph, PG_ISGRAPH)
+PGT_CLASS(print, PG_ISPRINT)
+PGT_CLASS(punct, PG_ISPUNCT)
+PGT_CLASS(space, PG_ISSPACE)
+
+#define PGT_CASEMAP(x) \
+static wint_t \
+pgt_to##x(wint_t wc) \
+{ \
+    pg_wchar    c = (pg_wchar) wc; \
+\
+    if (pgt_strategy == PGT_STRATEGY_C) \
+        return c <= (pg_wchar) 127 ? pg_ascii_to##x((unsigned char) c) : c; \
+    return pg_tow##x(c, pgt_locale); \
+}
+
+PGT_CASEMAP(upper)
+PGT_CASEMAP(lower)
+
+#else                           /* PG17, PG18 */
 /*
  * The builtin provider's "posix" flag: PG18 passes !casemap_full
  * (PG_UNICODE_FAST uses the Unicode definitions of digit / alnum / punct,
@@ -747,30 +810,6 @@ PGT_CLASS(punct, PG_ISPUNCT, pg_u_ispunct(c, PGT_POSIX), pg_u_ispunct(c, PGT_ICU
 PGT_CLASS(space, PG_ISSPACE, pg_u_isspace(c),            pg_u_isspace(c))
 
 /*
- * Classes core hard-wires for every strategy (regc_locale.c, cclasscvec):
- * blank = TAB and SPACE, cntrl = 0x00-0x1F and 0x7F-0x9F, xdigit = ASCII
- * hex digits.  (\w is TRE's [[:alnum:]_], core's pg_wc_isword.)
- */
-static int
-pgt_isblank(wint_t c)
-{
-    return c == '\t' || c == ' ';
-}
-
-static int
-pgt_iscntrl(wint_t c)
-{
-    return c <= 0x1F || (c >= 0x7F && c <= 0x9F);
-}
-
-static int
-pgt_isxdigit(wint_t c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-        (c >= 'A' && c <= 'F');
-}
-
-/*
  * pg_wc_toupper() / pg_wc_tolower() (x = upper / lower).  The default
  * collation forces ASCII case rules (Turkish I/i), as upper()/lower() do:
  * on PG18 a libc default collation is_default; on PG17 it is the
@@ -829,6 +868,32 @@ pgt_to##x(wint_t wc) \
 
 PGT_CASEMAP(upper, unicode_uppercase_simple(c), unicode_uppercase_simple(c))
 PGT_CASEMAP(lower, unicode_lowercase_simple(c), unicode_lowercase_simple(c))
+
+#endif                          /* PG_VERSION_NUM */
+
+/*
+ * Classes core hard-wires for every strategy (regc_locale.c, cclasscvec):
+ * blank = TAB and SPACE, cntrl = 0x00-0x1F and 0x7F-0x9F, xdigit = ASCII
+ * hex digits.  (\w is TRE's [[:alnum:]_], core's pg_wc_isword.)
+ */
+static int
+pgt_isblank(wint_t c)
+{
+    return c == '\t' || c == ' ';
+}
+
+static int
+pgt_iscntrl(wint_t c)
+{
+    return c <= 0x1F || (c >= 0x7F && c <= 0x9F);
+}
+
+static int
+pgt_isxdigit(wint_t c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+        (c >= 'A' && c <= 'F');
+}
 
 /*
  * Install the classifiers.  Called once per backend, from tre_match.c,
