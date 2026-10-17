@@ -3,7 +3,8 @@
  *
  * Tokenize the new value into codepoint trigrams and append one
  * (trigram_hash, TID) entry per distinct trigram to the fast-update
- * pending list.  VACUUM merges the list into the posting trees.
+ * pending list.  VACUUM merges the list into the posting trees, and so
+ * does the INSERT that pushes it past pending_list_limit (if set).
  */
 
 #include "postgres.h"
@@ -50,6 +51,7 @@ pg_tre_aminsert(Relation index, Datum *values, bool *isnull,
     ItemPointerData tids[PG_TRE_PENDING_BATCH_MAX];
     uint32  positions[PG_TRE_PENDING_BATCH_MAX];
     int     batch_n = 0, i;
+    uint64  n_pending = 0;
 
     if (isnull[0])
         return false;
@@ -122,16 +124,19 @@ pg_tre_aminsert(Relation index, Datum *values, bool *isnull,
         hashes[batch_n++] = h;
         if (batch_n == PG_TRE_PENDING_BATCH_MAX)
         {
-            pg_tre_pending_append_batch(index, hashes, tids, positions,
-                                        batch_n);
+            n_pending = pg_tre_pending_append_batch(index, hashes, tids,
+                                                    positions, batch_n);
             batch_n = 0;
         }
     }
 
     if (batch_n > 0)
-        pg_tre_pending_append_batch(index, hashes, tids, positions, batch_n);
+        n_pending = pg_tre_pending_append_batch(index, hashes, tids,
+                                                positions, batch_n);
     if (seen != seen_stack)
         pfree(seen);
+
+    pg_tre_pending_maybe_merge(index, n_pending);
 
     return true;
 }

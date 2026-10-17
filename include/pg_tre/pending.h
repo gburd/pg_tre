@@ -37,11 +37,12 @@ extern void pg_tre_pending_append(Relation index,
  * <= PG_TRE_PENDING_BATCH_MAX (defined below).
  */
 #define PG_TRE_PENDING_BATCH_MAX 256
-extern void pg_tre_pending_append_batch(Relation index,
-                                        const uint64 *hashes,
-                                        const ItemPointerData *tids,
-                                        const uint32 *positions,
-                                        int n);
+/* Returns the pending list's entry count after the append. */
+extern uint64 pg_tre_pending_append_batch(Relation index,
+                                          const uint64 *hashes,
+                                          const ItemPointerData *tids,
+                                          const uint32 *positions,
+                                          int n);
 
 /*
  * Iterate all pending-list entries.  `callback` receives each triple
@@ -59,9 +60,30 @@ extern void pg_tre_pending_scan(Relation index,
 /*
  * Merge the entire pending list into posting trees, then truncate
  * the list.  Called by VACUUM (amvacuumcleanup).  Returns the number
- * of entries merged.
+ * of entries merged.  The caller holds the merge lock (below).
  */
 extern uint64 pg_tre_pending_merge(Relation index);
+
+/*
+ * The merge lock serializes everything that rewrites the trees or the
+ * run catalog -- a pending-list merge, Hanoi merge / collapse, free-log
+ * drain -- as GIN's LockPage on its metapage does.  VACUUM holds it for
+ * its whole ambulkdelete / amvacuumcleanup pass (VACUUMs of one table are
+ * serialized anyway); an INSERT that pushed the list past
+ * pending_list_limit only tries it, and leaves the merge to whoever
+ * holds it.  It is a heavyweight page lock on the meta block, which no
+ * reader or appender takes, so it never blocks scans or inserts.
+ */
+extern void pg_tre_merge_lock(Relation index);
+extern bool pg_tre_merge_trylock(Relation index);
+extern void pg_tre_merge_unlock(Relation index);
+
+/*
+ * INSERT side of pending_list_limit: if the list holds more than the
+ * limit (pg_tre_get_pending_list_limit_kb; 0 = no limit) and no merge is
+ * running, merge it now.
+ */
+extern void pg_tre_pending_maybe_merge(Relation index, uint64 n_entries);
 
 /*
  * Phase B1.4: collapse all live runs (base + catalog) into a single

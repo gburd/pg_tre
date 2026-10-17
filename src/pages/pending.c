@@ -32,11 +32,13 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/itemptr.h"
+#include "storage/lmgr.h"
 #include "storage/lockdefs.h"
 #include "utils/elog.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
+#include "pg_tre/amapi.h"
 #include "pg_tre/buffer.h"
 #include "pg_tre/hash.h"
 #include "pg_tre/free_log.h"
@@ -196,12 +198,13 @@ acquire_tail(Relation index, Buffer *meta_buf_out, Buffer *tail_buf_out,
     *tail_buf_out = tailbuf;
 }
 
-void
+uint64
 pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
                             const ItemPointerData *tids,
                             const uint32 *positions, int n)
 {
     const PgTreTidPacking pk = pg_tre_tid_packing(index);
+    uint64  n_after = 0;
     Buffer  metabuf, tailbuf, prev_tailbuf;
     bool    tail_is_new;
     bool    head_is_new;
@@ -211,7 +214,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
     int     i, room;
 
     if (n <= 0)
-        return;
+        return 0;
     if (n > PG_TRE_PENDING_BATCH_MAX)
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -300,6 +303,7 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
             (char *) &entries[hdr->n_entries] - (char *) tailpage;
 
         PgTreMetaPageGet(metapage)->pending_n_entries += take;
+        n_after = PgTreMetaPageGet(metapage)->pending_n_entries;
 
         /*
          * One record for meta + tail (+ prev_tail when the chain grew).
@@ -320,6 +324,45 @@ pg_tre_pending_append_batch(Relation index, const uint64 *hashes,
         positions += 0;    /* positions already advanced above */
         n         -= take;
     }
+    return n_after;
+}
+
+void
+pg_tre_merge_lock(Relation index)
+{
+    LockPage(index, PG_TRE_META_BLKNO, ExclusiveLock);
+}
+
+bool
+pg_tre_merge_trylock(Relation index)
+{
+    return ConditionalLockPage(index, PG_TRE_META_BLKNO, ExclusiveLock);
+}
+
+void
+pg_tre_merge_unlock(Relation index)
+{
+    UnlockPage(index, PG_TRE_META_BLKNO, ExclusiveLock);
+}
+
+void
+pg_tre_pending_maybe_merge(Relation index, uint64 n_entries)
+{
+    int     limit_kb = pg_tre_get_pending_list_limit_kb(index);
+
+    if (limit_kb <= 0 ||
+        n_entries * sizeof(PgTrePendingEntry) <= (uint64) limit_kb * 1024)
+        return;
+
+    /*
+     * Someone else is merging (another INSERT, or VACUUM, which also strips
+     * dead TIDs): they will drain what we appended, or the next INSERT over
+     * the limit will.  Never wait -- GIN's ginInsertCleanup does the same.
+     */
+    if (!pg_tre_merge_trylock(index))
+        return;
+    (void) pg_tre_pending_merge(index);
+    pg_tre_merge_unlock(index);     /* (an ERROR releases it at abort) */
 }
 
 void

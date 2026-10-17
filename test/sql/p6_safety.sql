@@ -22,7 +22,7 @@ INSERT INTO relopts_test VALUES (1, 'hello world'), (2, 'goodbye world');
 
 -- Create index with custom reloptions
 CREATE INDEX relopts_idx ON relopts_test USING tre (body)
-    WITH (fastupdate=off, range_size_blocks=256);
+    WITH (fastupdate=on, range_size_blocks=256);
 
 -- Verify index exists
 \d+ relopts_idx
@@ -102,9 +102,9 @@ CREATE INDEX multi_opts_idx1 ON multi_opts_test USING tre (body);
 CREATE INDEX multi_opts_idx2 ON multi_opts_test USING tre (body)
     WITH (range_size_blocks=256);
 
--- Index 3: fastupdate off
+-- Index 3: pending list merged on INSERT past 128 kB
 CREATE INDEX multi_opts_idx3 ON multi_opts_test USING tre (body)
-    WITH (fastupdate=false);
+    WITH (pending_list_limit=128);
 
 -- All indexes should work; the planner can use one for a selective
 -- pattern.  Version-robust: assert plan-node category via a single

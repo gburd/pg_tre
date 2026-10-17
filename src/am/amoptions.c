@@ -21,6 +21,7 @@
 #include "catalog/pg_type.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -52,9 +53,10 @@ pg_tre_init_reloptions(void)
 {
     pg_tre_relopt_kind = add_reloption_kind();
 
+    /* -1 (the default): use pg_tre.pending_list_limit; 0: no limit. */
     add_int_reloption(pg_tre_relopt_kind, "pending_list_limit",
-                      "Maximum size of fast-update pending list in KiB",
-                      4096, 64, INT_MAX, AccessExclusiveLock);
+                      "Pending list size, in KiB, past which an INSERT merges it (0: only VACUUM merges)",
+                      -1, 0, MAX_KILOBYTES, ShareUpdateExclusiveLock);
 
     add_int_reloption(pg_tre_relopt_kind, "q",
                       "Trigram size (must be 3 until Phase 8)",
@@ -64,8 +66,9 @@ pg_tre_init_reloptions(void)
                       "Deprecated (3.2.0): range-bloom tier removed; accepted but ignored",
                       128, 1, 131072, AccessExclusiveLock);
 
+    /* Only "on": validated in pg_tre_amoptions. */
     add_bool_reloption(pg_tre_relopt_kind, "fastupdate",
-                       "Enable fast-update pending list",
+                       "Use the fast-update pending list (must be on)",
                        true, AccessExclusiveLock);
 }
 
@@ -93,10 +96,26 @@ pg_tre_amoptions(Datum reloptions, bool validate)
         return NULL;
     }
 
-    return (bytea *) build_reloptions(reloptions, validate,
-                                      pg_tre_relopt_kind,
-                                      sizeof(PgTreOptions),
-                                      tab, lengthof(tab));
+    {
+        PgTreOptions *opts = (PgTreOptions *)
+            build_reloptions(reloptions, validate, pg_tre_relopt_kind,
+                             sizeof(PgTreOptions), tab, lengthof(tab));
+
+        /*
+         * Every insert goes through the pending list; there is no direct
+         * path into the posting trees.  4.4 and earlier accepted
+         * fastupdate = off and ignored it, so an operator believed the list
+         * was bypassed.  Refuse it where it is set (CREATE INDEX, ALTER
+         * INDEX ... SET); an index that already stores it still opens.
+         */
+        if (validate && opts != NULL && !opts->fastupdate)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("pg_tre indexes do not support fastupdate = off"),
+                     errdetail("Every insert is appended to the index's pending list."),
+                     errhint("Set pending_list_limit to have an INSERT merge the list once it grows past that size.")));
+        return (bytea *) opts;
+    }
 }
 
 /*
@@ -118,7 +137,10 @@ int
 pg_tre_get_pending_list_limit_kb(Relation index)
 {
     PgTreOptions *opts = pg_tre_get_options(index);
-    return opts ? opts->pending_list_limit_kb : pg_tre_pending_list_limit_kb;
+
+    if (opts == NULL || opts->pending_list_limit_kb < 0)
+        return pg_tre_pending_list_limit_kb;
+    return opts->pending_list_limit_kb;
 }
 
 int

@@ -17,7 +17,7 @@ SELECT 'reloption probe row ' || g FROM generate_series(1, 200) g;
 -- Before the fix this emitted "WARNING: pg_tre: reloptions requested but
 -- not initialized" and dropped the options, so reloptions stayed NULL.
 CREATE INDEX reloptions_idx ON reloptions_t USING tre (body)
-    WITH (fastupdate = off, pending_list_limit = 2048);
+    WITH (fastupdate = on, pending_list_limit = 2048);
 RESET client_min_messages;
 
 -- The options must be recorded on the index relation (not NULL) and

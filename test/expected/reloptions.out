@@ -21,7 +21,7 @@ INSERT 0 200
 -- Before the fix this emitted "WARNING: pg_tre: reloptions requested but
 -- not initialized" and dropped the options, so reloptions stayed NULL.
 CREATE INDEX reloptions_idx ON reloptions_t USING tre (body)
-    WITH (fastupdate = off, pending_list_limit = 2048);
+    WITH (fastupdate = on, pending_list_limit = 2048);
 CREATE INDEX
 RESET client_min_messages;
 RESET

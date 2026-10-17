@@ -66,6 +66,12 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
      * of 8192 bytes" (field report 2026-09-29).  Merged now, those TIDs are
      * in the trees the callback is about to strip.
      */
+    /*
+     * Under the merge lock (released at abort like any heavyweight lock):
+     * an INSERT's merge rebuilding the trees during the walk below would
+     * carry dead TIDs into a tree the walk had already passed.
+     */
+    pg_tre_merge_lock(info->index);
     (void) pg_tre_pending_merge(info->index);
 
     /*
@@ -77,6 +83,7 @@ pg_tre_ambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
                                          callback_state,
                                          &remaining, &posting_pages,
                                          &pages_deleted);
+    pg_tre_merge_unlock(info->index);
 
     /*
      * Accumulate across the (possibly multiple) ambulkdelete calls VACUUM
@@ -127,6 +134,14 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
     /* Pages freed from here on cannot be reusable until XIDs move past this. */
     start_fxid = ReadNextFullTransactionId();
+
+    /*
+     * Everything from the pending merge to the free-log drain rewrites the
+     * trees, the run catalog or the free log: hold the merge lock across it
+     * so an INSERT over pending_list_limit cannot merge in the middle.
+     * Released at abort like any heavyweight lock.
+     */
+    pg_tre_merge_lock(info->index);
 
     /* Drain the pending list into the posting trees. */
     merged = pg_tre_pending_merge(info->index);
@@ -195,6 +210,7 @@ pg_tre_amvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
         recycled += freelog_recycled;
         pending += freelog_pending;
     }
+    pg_tre_merge_unlock(info->index);
 
     /*
      * Report index-size statistics.  num_pages is the physical page

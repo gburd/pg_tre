@@ -37,7 +37,7 @@ PG_MODULE_MAGIC;
 /* ---- GUCs ---- */
 
 int  pg_tre_default_max_cost       = 3;
-int  pg_tre_pending_list_limit_kb  = 4096;   /* 4 MiB */
+int  pg_tre_pending_list_limit_kb  = 0;      /* 0 = no limit: only VACUUM merges */
 int  pg_tre_min_trigram_freq       = 1;      /* 0 disables */
 int  pg_tre_range_size_blocks      = 128;
 int  pg_tre_max_extraction_fanout  = 4096;
@@ -53,6 +53,19 @@ bool pg_tre_build_legacy_tids      = false; /* testing: build format <=10 TIDs *
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
 
+/* pg_tre.fastupdate: there is no path that bypasses the pending list. */
+static bool
+pgt_check_fastupdate(bool *newval, void **extra, GucSource source)
+{
+    if (!*newval)
+    {
+        GUC_check_errdetail("pg_tre indexes always use the pending list.");
+        GUC_check_errhint("Set pg_tre.pending_list_limit to have an INSERT merge the list once it grows past that size.");
+        return false;
+    }
+    return true;
+}
+
 void
 pg_tre_init_guc(void)
 {
@@ -63,10 +76,13 @@ pg_tre_init_guc(void)
         3, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.pending_list_limit",
-        "Maximum size of the fast-update pending list, in KiB.",
-        NULL,
+        "Pending list size past which an INSERT merges it into the index.",
+        "0 (the default) leaves merging to VACUUM.  The INSERT that pushes"
+        " the list past the limit merges it, as VACUUM would, unless a merge"
+        " is already running.  Overridden per index by the pending_list_limit"
+        " storage parameter.",
         &pg_tre_pending_list_limit_kb,
-        4096, 64, INT_MAX, PGC_USERSET, GUC_UNIT_KB, NULL, NULL, NULL);
+        0, 0, MAX_KILOBYTES, PGC_USERSET, GUC_UNIT_KB, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_tre.range_size_blocks",
         "Deprecated (3.2.0): the BRIN-style range-bloom tier was removed; "
@@ -100,10 +116,10 @@ pg_tre_init_guc(void)
         1000, 1, 600000, PGC_USERSET, GUC_UNIT_MS, NULL, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.fastupdate",
-        "Enable the fast-update pending list for inserts.",
-        NULL,
+        "Use the fast-update pending list for inserts (must be on).",
+        "Every insert is appended to the pending list; off is refused.",
         &pg_tre_fastupdate,
-        true, PGC_USERSET, 0, NULL, NULL, NULL);
+        true, PGC_USERSET, 0, pgt_check_fastupdate, NULL, NULL);
 
     DefineCustomBoolVariable("pg_tre.flush_to_run",
         "Phase B1.3: flush the pending list into a new LSM run instead"
