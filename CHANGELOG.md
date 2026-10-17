@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.4.1] - unreleased - PostgreSQL 19
+## [4.4.1] - 2026-10-17 - PostgreSQL 19
 
 **No on-disk change; no REINDEX** to upgrade from 4.4.0 or to downgrade
 to it.  Nothing changes on PostgreSQL 17 or 18 except the tests.
