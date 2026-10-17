@@ -572,3 +572,27 @@ pg_tre_index_tid_packing(PG_FUNCTION_ARGS)
 
     PG_RETURN_TEXT_P(cstring_to_text(pk == PG_TRE_TID_DENSE ? "dense" : "legacy"));
 }
+
+/*
+ * pg_tre_index_pending(idx regclass) RETURNS bigint
+ *
+ * Entries in the index's pending list (meta.pending_n_entries): what every
+ * scan reads in full, and what VACUUM or an INSERT past
+ * pending_list_limit merges.  O(1): one meta-page read.
+ */
+PG_FUNCTION_INFO_V1(pg_tre_index_pending);
+
+Datum
+pg_tre_index_pending(PG_FUNCTION_ARGS)
+{
+    Oid         indexoid = PG_GETARG_OID(0);
+    Relation    index;
+    PgTreMetaPageData meta;
+
+    index = index_open(indexoid, AccessShareLock);
+    check_is_pg_tre_index(index);
+    pg_tre_meta_read(index, &meta);
+    index_close(index, AccessShareLock);
+
+    PG_RETURN_INT64((int64) meta.pending_n_entries);
+}

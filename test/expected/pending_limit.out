@@ -1,0 +1,149 @@
+-- test/sql/pending_limit.sql
+-- 4.5.0: pending_list_limit merges the pending list on INSERT; fastupdate
+-- = off is refused; pg_tre_index_check compares the index with a
+-- sequential scan and catches an index that under-returns.
+\set VERBOSITY terse
+SET client_min_messages = warning;
+SET
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+CREATE EXTENSION
+DROP TABLE IF EXISTS pl CASCADE;
+DROP TABLE
+RESET client_min_messages;
+RESET
+CREATE TABLE pl (id int, s text);
+CREATE TABLE
+INSERT INTO pl SELECT g, 'seed row ' || g || ' quick brown fox' FROM generate_series(1, 500) g;
+INSERT 0 500
+SET client_min_messages = warning;
+SET
+CREATE INDEX pl_lim ON pl USING tre (s) WITH (pending_list_limit = 64);
+CREATE INDEX
+RESET client_min_messages;
+RESET
+-- The list is drained by an INSERT once it passes 64 kB (2730 entries of
+-- 24 bytes), so it stays below that however many rows arrive (5000 rows,
+-- ~55 entries each).  With no limit it holds all of them until VACUUM.
+INSERT INTO pl SELECT g, 'row ' || g || ' quick brawn fox ' || md5(g::text)
+  FROM generate_series(501, 5500) g;
+INSERT 0 5000
+SELECT pg_tre_index_pending('pl_lim') <= 2730 + 60 AS bounded_by_limit;
+ bounded_by_limit 
+------------------
+ t
+(1 row)
+
+-- No limit (0): nothing merges until VACUUM.
+SET client_min_messages = warning;
+SET
+CREATE INDEX pl_nolim ON pl USING tre (s) WITH (pending_list_limit = 0);
+CREATE INDEX
+RESET client_min_messages;
+RESET
+INSERT INTO pl SELECT g, 'row ' || g || ' quick brawn fox ' || md5(g::text)
+  FROM generate_series(5501, 10500) g;
+INSERT 0 5000
+SELECT pg_tre_index_pending('pl_nolim') > 100000 AS grows_without_limit;
+ grows_without_limit 
+---------------------
+ t
+(1 row)
+
+VACUUM pl;
+VACUUM
+SELECT pg_tre_index_pending('pl_nolim') AS after_vacuum;
+ after_vacuum 
+--------------
+            0
+(1 row)
+
+DROP INDEX pl_nolim;
+DROP INDEX
+-- The index agrees with a sequential scan.
+SET client_min_messages = warning;
+SET
+SELECT count(*) >= 50 AS checks, count(*) FILTER (WHERE ok IS NOT TRUE) AS failing
+  FROM pg_tre_index_check('pl_lim', 10);
+ checks | failing 
+--------+---------
+ t      |       0
+(1 row)
+
+RESET client_min_messages;
+RESET
+-- The GUC applies when the storage parameter is unset, and the parameter
+-- can be changed online.
+ALTER INDEX pl_lim RESET (pending_list_limit);
+ALTER INDEX
+SET pg_tre.pending_list_limit = 64;
+SET
+INSERT INTO pl SELECT g, 'guc row ' || g || ' lazy dog' FROM generate_series(10501, 15500) g;
+INSERT 0 5000
+SELECT pg_tre_index_pending('pl_lim') <= 2730 + 60 AS bounded_by_guc;
+ bounded_by_guc 
+----------------
+ t
+(1 row)
+
+RESET pg_tre.pending_list_limit;
+RESET
+ALTER INDEX pl_lim SET (pending_list_limit = 128);
+ALTER INDEX
+-- fastupdate = off is refused where it is set.
+CREATE INDEX pl_bad ON pl USING tre (s) WITH (fastupdate = off);
+psql:test/sql/pending_limit.sql:52: ERROR:  pg_tre indexes do not support fastupdate = off
+ALTER INDEX pl_lim SET (fastupdate = off);
+psql:test/sql/pending_limit.sql:53: ERROR:  pg_tre indexes do not support fastupdate = off
+SET pg_tre.fastupdate = off;
+psql:test/sql/pending_limit.sql:54: ERROR:  invalid value for parameter "pg_tre.fastupdate": 0
+SET pg_tre.fastupdate = on;
+SET
+SET pg_tre.pending_list_limit = -1;
+psql:test/sql/pending_limit.sql:56: ERROR:  -1 kB is outside the valid range for parameter "pg_tre.pending_list_limit" (0 kB .. 2147483647 kB)
+ALTER INDEX pl_lim SET (pending_list_limit = -2);
+psql:test/sql/pending_limit.sql:57: ERROR:  value -2 out of bounds for option "pending_list_limit"
+-- pg_tre_index_check catches an index that misses rows: rows inserted
+-- while the index is not maintained (indisready = false) are in the heap
+-- but not in the index.
+CREATE TABLE plx (id int, s text);
+CREATE TABLE
+INSERT INTO plx SELECT g, 'alpha beta gamma ' || (g % 50) FROM generate_series(1, 200) g;
+INSERT 0 200
+SET client_min_messages = warning;
+SET
+CREATE INDEX plx_idx ON plx USING tre (s);
+CREATE INDEX
+UPDATE pg_index SET indisready = false WHERE indexrelid = 'plx_idx'::regclass;
+UPDATE 1
+RESET client_min_messages;
+RESET
+INSERT INTO plx SELECT g, 'alpha beta gamma ' || (g % 50) FROM generate_series(201, 4000) g;
+INSERT 0 3800
+SET client_min_messages = error;
+SET
+UPDATE pg_index SET indisready = true WHERE indexrelid = 'plx_idx'::regclass;
+UPDATE 1
+SELECT count(*) FILTER (WHERE ok = false) > 0 AS catches_missing_rows
+  FROM pg_tre_index_check('plx_idx', 10);
+ catches_missing_rows 
+----------------------
+ t
+(1 row)
+
+RESET client_min_messages;
+RESET
+-- Errors: not a tre index; an expression index.
+CREATE INDEX plx_btree ON plx (id);
+CREATE INDEX
+SELECT * FROM pg_tre_index_check('plx_btree');
+psql:test/sql/pending_limit.sql:77: ERROR:  "plx_btree" is not a tre index
+SET client_min_messages = warning;
+SET
+CREATE INDEX plx_expr ON plx USING tre (lower(s));
+CREATE INDEX
+RESET client_min_messages;
+RESET
+SELECT * FROM pg_tre_index_check('plx_expr');
+psql:test/sql/pending_limit.sql:81: ERROR:  pg_tre_index_check supports indexes on a single plain column; "plx_expr" is on an expression
+DROP TABLE pl, plx;
+DROP TABLE
