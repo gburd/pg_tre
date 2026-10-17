@@ -18,11 +18,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14]
-        pg: ['17', '18']
+        pg: ['17', '18', '19']
         cc: [gcc, clang]
         exclude:
           - os: macos-14
             cc: gcc
+          # Homebrew has no postgresql@19 yet.
+          - os: macos-14
+            pg: '19'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,11 +42,21 @@ jobs:
               | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
           echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          # PG 19 is a release candidate: PGDG ships it in the "testing"
+          # suite until 19.0, with the libpq it needs (main's 18.x libpq
+          # sorts higher than 19~rc1, so pin the testing suite for it).
+          # Drop this once 19 moves to -pgdg main.
+          APT_TARGET=
+          if [ "${{ matrix.pg }}" = 19 ]; then
+              echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg-testing main 19" \
+                  | sudo tee /etc/apt/sources.list.d/pgdg-testing.list >/dev/null
+              APT_TARGET="-t $(lsb_release -cs)-pgdg-testing"
+          fi
           sudo apt-get update
           sudo apt-get install -y \
-              autoconf automake libtool gettext autopoint m4 \
-              build-essential postgresql-server-dev-${{ matrix.pg }} \
-              postgresql-${{ matrix.pg }} clang
+              autoconf automake libtool gettext autopoint m4 build-essential clang
+          sudo apt-get install -y $APT_TARGET \
+              postgresql-server-dev-${{ matrix.pg }} postgresql-${{ matrix.pg }}
 
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
