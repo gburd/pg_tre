@@ -1,4 +1,4 @@
--- pg_tre 4.4.1 -- native index AM for approximate regex matching.
+-- pg_tre 4.5.0-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -305,7 +305,7 @@ CREATE FUNCTION pg_tre_index_tid_packing(regclass)
     LANGUAGE C STRICT STABLE PARALLEL SAFE;
 
 COMMENT ON FUNCTION pg_tre_index_tid_packing(regclass) IS
-    'How the index packs heap TIDs: ''dense'' (built by pg_tre 4.4.1 or '
+    'How the index packs heap TIDs: ''dense'' (built by pg_tre 4.5.0-dev or '
     'later on a heap table) or ''legacy'' (built by an earlier version, '
     'or on another table access method).  A legacy index works '
     'unchanged; REINDEX rebuilds it dense, typically 2-2.5x smaller on '
