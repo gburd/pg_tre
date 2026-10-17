@@ -241,11 +241,18 @@ SELECT :'db' AS db,
   FROM w,
        LATERAL tre_amatch_detail('pre ' || w.w || ' post', w.w, 0) d,
        LATERAL tre_amatch_detail(w.w, '^' || overlay(w.w placing '#' from 2 for 1) || '$', 1) s;
+-- found_nothing leaves out an ILIKE check whose word core's own ILIKE
+-- does not match against itself: PostgreSQL 19's ILIKE never matches '%'
+-- followed by a byte >= 0x80 in a single-byte encoding with a C ctype
+-- (1e493158d3d; 'xÆy' ILIKE '%Æ%' is false).  The index must still agree
+-- with the sequential scan (idx_ne_seq) for those checks.
 SELECT :'db' AS db, count(*) AS checks, count(*) FILTER (WHERE used) AS via_index,
        coalesce(string_agg(op || ':' || wid, ' ') FILTER (WHERE idx IS DISTINCT FROM seq),
                 'none') AS idx_ne_seq,
-       count(*) FILTER (WHERE seq IS NULL) AS found_nothing
-  FROM (SELECT op, wid, (chk_op(op, p)).*
+       count(*) FILTER (WHERE seq IS NULL
+                          AND NOT (op = '~~*' AND NOT (w ILIKE '%' || w || '%')))
+         AS found_nothing
+  FROM (SELECT op, wid, w, (chk_op(op, p)).*
           FROM w, LATERAL (VALUES ('~~', '%' || w || '%'), ('~~*', '%' || w || '%'),
                                   ('~', w), ('~*', w), ('=', w), ('~~', w || '_%'))
                                   AS o(op, p)) r;
@@ -509,7 +516,11 @@ SET client_min_messages = warning;
 DROP DATABASE pgtre_enc;
 
 -- MULE_INTERNAL has no UTF8 conversion: the session stays in its own
--- encoding and everything arrives through convert_from().
+-- encoding and everything arrives through convert_from().  PostgreSQL 19
+-- removed the encoding (77645d44e); there this section is skipped and
+-- the output is expected/encoding_matrix_1.out.
+SELECT current_setting('server_version_num')::int < 190000 AS have_mule \gset
+\if :have_mule
 \set db mule
 :ship \gset
 CREATE DATABASE pgtre_enc TEMPLATE template0 ENCODING 'MULE_INTERNAL' LOCALE 'C';
@@ -526,6 +537,7 @@ SELECT max(octet_length(convert_from(decode(split_part(x, ':', 2), 'hex'),
 \c :home
 SET client_min_messages = warning;
 DROP DATABASE pgtre_enc;
+\endif
 
 -- SQL_ASCII: bytes 0x80-0xFF are characters of their own, unvalidated.
 \set db sqlascii

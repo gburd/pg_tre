@@ -259,13 +259,24 @@ SELECT :core_equal < 60 AS bad \gset
 SELECT tre_amatch('é', '^[[:alpha:]]$', 0) AS alpha_e, 'é' ~ '^[[:alpha:]]$' AS core,
        tre_amatch('É', '(?i)^é$', 0) AS fold_e, 'É' ~* '^é$' AS core_fold;
 
--- (3) UTF8, ICU default collation: Unicode properties.
+-- (3) UTF8, ICU default collation: Unicode properties.  On PostgreSQL 17
+-- and 18 pg_tre classifies with PostgreSQL's Unicode tables, not libicu
+-- (see the header), and differs from core on exactly the characters
+-- listed in icu_known_1718.  PostgreSQL 19 exports its ctype methods
+-- (pg_iswalpha() and friends), which pg_tre calls, so there it follows
+-- libicu like core and the list must be empty.  known_as_documented
+-- checks whichever applies, so the output is the same on every major.
 \c pgtre_ct_icu
 SET client_min_messages = warning;
 SET pgtre.icu_known = on;
 CREATE EXTENSION pg_tre;
 :u8chars
-:probe;
+\set icu_known_1718 '(?i)[[:lower:]]: Ⅻ ⅻ Ⓐ; (?i)[[:upper:]]: Ⅻ ⅻ Ⓐ; (?i)[^[:upper:]]: Ⅻ ⅻ Ⓐ; \\d: ١ ٣; \\D: ١ ٣; \\w: ١ ٣ Ⅻ ⅻ Ⓐ; \\W: ١ ٣ Ⅻ ⅻ Ⓐ; ^alpha: Ⅻ ⅻ Ⓐ; a[[:digit:]]b: ١ ٣; alnum: ١ ٣ Ⅻ ⅻ Ⓐ; alpha: Ⅻ ⅻ Ⓐ; digit: ١ ٣; graph: SHY; lower: ª ⅻ; print: SHY LSEP; punct: $ + ~ © × € 😀; upper: Ⅻ Ⓐ'
+:probe \gset
+SELECT :checks AS checks, :classes_with_members AS classes_with_members,
+       :classes AS classes, :'disagree' AS disagree,
+       :'known_differences' = CASE WHEN current_setting('server_version_num')::int >= 190000
+                                   THEN 'none' ELSE :'icu_known_1718' END AS known_as_documented;
 :fold;
 :title;
 :idxsetup

@@ -50,10 +50,20 @@ for t in "${TESTS[@]}"; do
         continue
     fi
 
-    if diff -u "$expected" "$actual" > "test/results/${t}.diff"; then
+    # Like pg_regress: test/expected/<t>_N.out are alternative outputs
+    # (e.g. a PostgreSQL major that lacks a feature the test uses).
+    matched=
+    for e in "$expected" test/expected/"${t}"_[0-9].out; do
+        if [[ -f "$e" ]] && diff -q "$e" "$actual" >/dev/null; then
+            matched=$e
+            break
+        fi
+    done
+    if [[ -n "$matched" ]]; then
         rm -f "test/results/${t}.diff"
         echo "ok  $t"
     else
+        diff -u "$expected" "$actual" > "test/results/${t}.diff" || true
         echo "FAIL $t"
         sed -n '1,200p' "test/results/${t}.diff"
         fail=1
