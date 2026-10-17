@@ -178,8 +178,20 @@ typedef struct PgTreMetaPageData
      */
     uint32      tid_packing;
 
+    /*
+     * 4.5.0: 1 when the SuRF (root_surf) covers every trigram key in the
+     * index, which only ambuild establishes; a merge that adds a trigram the
+     * index did not have clears it in the same WAL record as the root swap.
+     * The scan prefilter trusts the SuRF only when this is set AND the
+     * pending list is empty.  Zero on an index built before 4.5.0: its SuRF
+     * was never kept current (anchored patterns whose leading trigram first
+     * appeared after CREATE INDEX returned no rows), so it is not used until
+     * REINDEX.  Older binaries ignore the field.
+     */
+    uint32      surf_complete;
+
     /* Reserved for forward compatibility; zero on new pages */
-    uint32      reserved[17];
+    uint32      reserved[16];
 } PgTreMetaPageData;
 
 typedef PgTreMetaPageData *PgTreMetaPage;

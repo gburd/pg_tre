@@ -1149,6 +1149,19 @@ pg_tre_surf_prefilter_rejects(IndexScanDesc scan, TreScanState *st)
     if (meta.root_surf == InvalidBlockNumber)
         return false;			/* no filter (pre-v10 or empty) */
 
+    /*
+     * The SuRF holds the trigram keys CREATE INDEX saw.  Rows inserted
+     * since put new trigrams in the pending list, and merges move them into
+     * the trees, but nothing adds them to the SuRF.  Until 4.5.0 this
+     * rejected scans whose anchored prefix first appeared after CREATE
+     * INDEX: `col ~ '^writ'` returned no rows from the index while a
+     * sequential scan found them (since 3.2.0).  Trust the SuRF only when
+     * no merge has added a trigram since the build (surf_complete; zero on
+     * indexes built before 4.5.0) and the pending list is empty.
+     */
+    if (!meta.surf_complete || meta.pending_head != InvalidBlockNumber)
+        return false;
+
     surf = pg_tre_surf_read(scan->indexRelation, meta.root_surf);
     if (surf == NULL)
         return false;

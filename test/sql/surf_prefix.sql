@@ -128,3 +128,48 @@ RESET enable_indexscan;
 RESET enable_bitmapscan;
 
 DROP TABLE surf_t CASCADE;
+
+-- (8) REGRESSION (4.5.0): a prefix that first appears AFTER CREATE INDEX.
+--     The SuRF holds the trigram keys of the build; rows inserted later
+--     (pending list, then merged by VACUUM) add trigrams it never saw.
+--     Until 4.5.0 the prefilter then rejected `~ '^warn'` outright: the
+--     index returned 0 rows for rows a sequential scan found, both before
+--     and after VACUUM.  Index and seq scan must agree at every stage.
+CREATE TABLE surf_late (id serial, body text);
+INSERT INTO surf_late (body) SELECT 'error code ' || g FROM generate_series(1, 300) g;
+SET client_min_messages = warning;
+CREATE INDEX surf_late_idx ON surf_late USING tre (body);
+RESET client_min_messages;
+INSERT INTO surf_late (body) SELECT 'warning code ' || g FROM generate_series(1, 200) g;
+CREATE FUNCTION surf_late_cmp(tag text) RETURNS TABLE(stage text, q text, seq bigint, bitmap bigint, indexscan bigint)
+LANGUAGE plpgsql AS $f$
+DECLARE p text;
+BEGIN
+  FOREACH p IN ARRAY ARRAY['body ~ ''^warn''', 'body %~~ tre_pattern(''^warning'', 0)',
+                           'body ~ ''^error''', 'body ~ ''^zzqq''', 'body LIKE ''warn%''']
+  LOOP
+    stage := tag; q := p;
+    PERFORM set_config('enable_seqscan', 'on', true);
+    PERFORM set_config('enable_indexscan', 'off', true);
+    PERFORM set_config('enable_bitmapscan', 'off', true);
+    EXECUTE 'SELECT count(*) FROM surf_late WHERE ' || p INTO seq;
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_bitmapscan', 'on', true);
+    EXECUTE 'SELECT count(*) FROM surf_late WHERE ' || p INTO bitmap;
+    PERFORM set_config('enable_bitmapscan', 'off', true);
+    PERFORM set_config('enable_indexscan', 'on', true);
+    EXECUTE 'SELECT count(*) FROM surf_late WHERE ' || p INTO indexscan;
+    RETURN NEXT;
+  END LOOP;
+END $f$;
+SELECT * FROM surf_late_cmp('pending');
+VACUUM surf_late;
+SELECT * FROM surf_late_cmp('merged');
+-- A rebuilt index's SuRF covers the new rows again (and still rejects an
+-- absent prefix: ^zzqq).
+SET client_min_messages = warning;
+REINDEX INDEX surf_late_idx;
+RESET client_min_messages;
+SELECT * FROM surf_late_cmp('reindexed');
+DROP FUNCTION surf_late_cmp(text);
+DROP TABLE surf_late;

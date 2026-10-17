@@ -83,6 +83,7 @@ pg_tre_meta_init(Page page)
      */
     meta->root_surf          = InvalidBlockNumber;
     meta->surf_n_keys        = 0;
+    meta->surf_complete      = 0;
 
     /* pg_tre_build_empty_fork overwrites this with the index's packing. */
     meta->tid_packing        = PG_TRE_TID_LEGACY;
@@ -359,6 +360,8 @@ pg_tre_meta_set_surf(Relation index, BlockNumber root_surf, uint32 surf_n_keys)
 
     meta->root_surf = root_surf;
     meta->surf_n_keys = surf_n_keys;
+    /* Only ambuild calls this, with every key of the index. */
+    meta->surf_complete = BlockNumberIsValid(root_surf) ? 1 : 0;
 
     GenericXLogFinish(state);
 

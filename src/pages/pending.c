@@ -535,6 +535,8 @@ typedef struct MergeCtx
     bool         pending_only;   /* B1.3 flush-to-run: do NOT union with
                                   * the existing posting -- the new run
                                   * holds only the pending TIDs */
+    bool         adds_trigram;   /* some merged trigram is new to the
+                                  * index: the SuRF no longer covers it */
 } MergeCtx;
 
 static int
@@ -729,6 +731,9 @@ materialize_merged_postings(Relation index, MergeCtx *mc)
             pg_tre_upper_release(&ref);
             e->seen_in_upper = true;
         }
+        else
+            mc->adds_trigram = true;    /* new to the index (or a flush-to-run
+                                         * run, which does not look) */
 
         if (existing != NULL)
         {
@@ -1106,7 +1111,8 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
                uint64 n_trigrams, uint64 n_tuples_indexed,
                BlockNumber watermark_tail, uint32 watermark_tail_n,
                uint64 *consumed_out,
-               const BlockNumber *consumed_pages, int n_consumed_pages)
+               const BlockNumber *consumed_pages, int n_consumed_pages,
+               bool adds_trigram)
 {
     Buffer  metabuf;
     Page    metapage;
@@ -1242,6 +1248,14 @@ finalize_merge(Relation index, BlockNumber new_root, BlockNumber root_range,
                    ? old_total - surviving_total : 0;
         m->pending_n_entries = surviving_total;
     }
+
+    /*
+     * A trigram the SuRF has never seen is now in the index: the prefilter
+     * must stop trusting it (same record as the root swap, so no scan sees
+     * the new tree with a SuRF that claims to cover it).
+     */
+    if (adds_trigram)
+        m->surf_complete = 0;
 
     /* Swap in the new tree roots / stats in the SAME meta write. */
     m->root_upper       = new_root;
@@ -1431,7 +1445,7 @@ pg_tre_pending_merge(Relation index)
         finalize_merge(index, meta.root_upper, meta.root_range,
                        meta.n_trigrams, meta.n_tuples_indexed,
                        wm_tail, wm_tail_n, &consumed,
-                       consumed_pages, n_consumed);
+                       consumed_pages, n_consumed, mc.adds_trigram);
         n_merged = consumed;
 
         MemoryContextSwitchTo(old);
@@ -1522,7 +1536,7 @@ pg_tre_pending_merge(Relation index)
         finalize_merge(index, new_root, meta.root_range,
                        (uint64) k, meta.n_tuples_indexed,
                        wm_tail, wm_tail_n, &consumed,
-                       consumed_pages, n_consumed);
+                       consumed_pages, n_consumed, mc.adds_trigram);
 
         n_merged = consumed;
         tid_est = consumed / 5;   /* avg ~5 trigrams per row */
