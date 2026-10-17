@@ -298,17 +298,25 @@ an earlier version miss such rows. **After upgrading, `REINDEX` every `tre`
 index on a non-UTF-8 database that holds non-ASCII text.** UTF-8 databases
 and pure-ASCII indexes need nothing.
 
-### The pending list is only merged by VACUUM
+### The pending list is merged by VACUUM, or by INSERT past a limit
 
-Every `INSERT` appends to the index's pending list, and only `VACUUM` (or a
-`REINDEX`) merges it into the main tree. The `fastupdate` and
-`pending_list_limit` reloptions and GUCs are accepted but not implemented:
-`fastupdate = false` does not bypass the list, and nothing caps its size.
-Every scan reads the whole list, so on an insert-heavy table that autovacuum
-rarely visits, searches get slower as the list grows. At 1.67 M rows the
-default `autovacuum_vacuum_insert_scale_factor` (0.2) waited for about
-334 k inserts. For such tables set a low per-table
-`autovacuum_vacuum_insert_threshold`, or schedule `VACUUM`.
+Every `INSERT` appends to the index's pending list, and every scan reads
+the whole list, so on an insert-heavy table that autovacuum rarely visits,
+searches get slower as the list grows. By default only `VACUUM` (or a
+`REINDEX`) merges it into the main tree. At 1.67 M rows the default
+`autovacuum_vacuum_insert_scale_factor` (0.2) waited for about 334 k
+inserts.
+
+Since 4.5.0, `pending_list_limit` (storage parameter, KiB; or the
+`pg_tre.pending_list_limit` GUC for indexes that do not set it) caps the
+list: the `INSERT` that pushes it past the limit merges it, unless a merge
+is already running. That `INSERT` pays for the merge, which rewrites the
+upper tree and every posting the list touches, like VACUUM's. The default
+is 0, no limit, which keeps 4.4's behaviour. The other options: set a low
+per-table `autovacuum_vacuum_insert_threshold`, or schedule `VACUUM`.
+
+There is no way to bypass the list: `fastupdate = off` is refused (4.4 and
+earlier accepted it and did nothing).
 
 In 4.2.0–4.2.2 a long pending list also widened the window for a backend
 crash. Any `ERROR` raised during a scan that had built the pending-list

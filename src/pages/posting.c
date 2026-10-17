@@ -1,26 +1,13 @@
 /*
  * src/pages/posting.c - posting-tree read/write implementation.
  *
- * Phase 2 scope: single-leaf posting trees.  Per-trigram TID sets are
- * accumulated in an in-memory sparsemap (malloc-backed, grown by
- * sparsemap's internal realloc).  On finish():
- *   - If the serialized bitmap is <= PG_TRE_INLINE_POSTING_MAX bytes,
- *     we return it as an inline blob (palloc'd in CurrentMemoryContext
- *     so it outlives the builder).
- *   - Otherwise we allocate a single leaf page, copy the sparsemap
- *     bytes into it, WAL-log an FPI a generic WAL record, and
- *     return the leaf's block number as the posting root.
- *
- * Multi-leaf posting trees (B-tree-of-leaves with right-links for
- * Lehman-Yao scans) are a Phase 4 follow-up.  Today, if a single
- * trigram's posting does not fit in one leaf, the builder raises
- * ERROR with a clear HINT.  This is acceptable for Phase 2 fixture
- * sizes (~1k rows per fixture; sparsemap RLE typically keeps
- * postings tiny).
- *
- * The reader side mirrors this: materialize() and scan_begin() read
- * either the inline blob or a single leaf; multi-leaf walks wait for
- * Phase 4.
+ * A trigram's posting is a sparsemap over packed heap TIDs.  The builder
+ * accumulates TIDs and, on finish(), stores the encoded sparsemap one of
+ * three ways: inline in the upper-tree entry (<= PG_TRE_INLINE_POSTING_MAX
+ * bytes), in a slot of a shared coalesced page, or in a chain of posting
+ * leaves linked by right_link -- one leaf when it fits a page, else
+ * slices of at most a page each (the multi-leaf path).  Readers
+ * (materialize, scan_begin/next) follow the same three forms.
  */
 
 #include "postgres.h"
@@ -406,18 +393,20 @@ write_single_leaf(Relation index, uint64 trigram_hash,
     Size    total_sz;
     GenericXLogState *state;
 
+    /*
+     * Every caller sizes the blob to one page first: the builder sends a
+     * posting that does not fit down the multi-leaf path, which cuts it into
+     * slices of at most a page, and VACUUM's inline-to-leaf migration writes
+     * survivors of an inline blob, which is far smaller than a page.  So
+     * this is an internal error, not a user-facing limit.
+     */
     total_sz = sz + payload_sz;
     if (total_sz > posting_leaf_budget())
-        ereport(ERROR,
-                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                 errmsg("pg_tre: posting for trigram %016llx "
-                        "is %zu bytes (sparsemap %zu + payload %zu), "
-                        "exceeds single-leaf budget %zu",
-                        (unsigned long long) trigram_hash, total_sz, sz, payload_sz,
-                        posting_leaf_budget()),
-                 errhint("Multi-leaf posting trees land in a Phase 4 "
-                         "follow-up; reduce fixture size or rebuild after "
-                         "that work completes.")));
+        elog(ERROR,
+             "pg_tre: posting leaf for trigram %016llx would hold %zu bytes "
+             "(sparsemap %zu + payload %zu), over the %zu-byte page budget",
+             (unsigned long long) trigram_hash, total_sz, sz, payload_sz,
+             posting_leaf_budget());
 
     buf   = pg_tre_extend(index, PG_TRE_PAGE_POSTING_L);
     blkno = BufferGetBlockNumber(buf);

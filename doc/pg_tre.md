@@ -274,33 +274,27 @@ CREATE INDEX idx_name ON table_name USING tre (column_name);
 ```sql
 CREATE INDEX idx_name ON table_name USING tre (column_name)
 WITH (
-  fastupdate = true,              -- Enable pending list (default: true)
-  pending_list_limit = 4096,      -- Pending list size in KiB (default: 4096)
-  bloom_tuple_bits = 128,         -- Per-tuple bloom size (default: 128)
-  range_size_blocks = 128,        -- Blocks per range entry (default: 128)
-  tuple_bloom_enable = true       -- Enable tier-3 blooms (default: true)
+  pending_list_limit = 4096       -- merge the pending list on INSERT past 4 MB
 );
 ```
 
-**fastupdate:** Accepted but **not implemented**: every INSERT appends to the pending list whatever its value, and only VACUUM (or a REINDEX) merges the list into the main tree. Setting `fastupdate = false` changes nothing.
+**pending_list_limit** (KiB): every INSERT appends to the index's
+pending list, which every scan reads. When an INSERT pushes the list
+past this size it merges the list into the index, as VACUUM does,
+unless another merge is already running (then it does not wait). `-1`
+(the default) uses `pg_tre.pending_list_limit`; `0` means no limit:
+only VACUUM (or REINDEX) merges. A merge rewrites the upper tree and
+every posting the list touches, so the INSERT that triggers it takes
+as long as a VACUUM's merge would; pick a limit that keeps scans fast
+without merging too often. Changing it takes a
+`ShareUpdateExclusiveLock` (concurrent reads and writes continue).
 
-**pending_list_limit:** Accepted but **not implemented**: the pending list has no size cap and is never merged on insert. Keep it small by vacuuming: scans read the whole list, so an unvacuumed insert-heavy table gets steadily slower to search. For insert-only tables set a low `autovacuum_vacuum_insert_threshold` (or `autovacuum_vacuum_insert_scale_factor`) on the table, or schedule `VACUUM`.
+**fastupdate**: must be `on` (the default). Every insert goes through
+the pending list; `fastupdate = off` is refused by `CREATE INDEX` and
+`ALTER INDEX ... SET` (4.4 and earlier accepted and ignored it).
 
-**bloom_tuple_bits:** Bits per per-tuple bloom filter. More bits = lower false-positive rate = fewer heap fetches. Range: 32-1024.
-
-**range_size_blocks:** Heap blocks summarized by each range bloom entry. Smaller = finer-grained tier-1 filtering, larger meta page.
-
-**tuple_bloom_enable:** Per-tuple bloom and positional filter
-(tier-3).  **Default: true** in 1.2.3 and later.  When enabled,
-the candidate set from tier-2 is refined per-row using a
-128-bit bloom of the row's distinct trigrams; rows whose
-blooms don't contain a required query trigram are dropped
-before the executor recheck.  History: 1.1.x and 1.2.0 kept
-this off due to a struct-vs-bytes bug in the scan-side bloom
-check; the bug was identified in 1.2.2 and the residual
-pending-overlay interaction was fixed in 1.2.3.  Disable only
-if you've measured no benefit for your workload (the storage
-overhead is ~16 bytes per row plus the upper-tree bookkeeping).
+**q**, **range_size_blocks**: accepted for compatibility; `q` must be 3,
+and `range_size_blocks` is ignored since 3.2.0.
 
 ### GUCs (Configuration Variables)
 
@@ -323,17 +317,15 @@ SET pg_tre.match_timeout_ms = 1000;     -- Abort per-row recheck after N ms
 
 These prevent catastrophic backtracking and runaway regex compilation. If you hit these limits legitimately, increase them; if you hit them on user input, the pattern is malicious or pathological.
 
-#### Index Build Defaults (apply when WITH options unset)
+#### Pending list
 
 ```sql
-SET pg_tre.pending_list_limit = 4096;    -- KiB
-SET pg_tre.range_size_blocks = 128;      -- heap blocks
-SET pg_tre.bloom_tuple_bits = 128;       -- bits
-SET pg_tre.fastupdate = true;
-SET pg_tre.tuple_bloom_enable = true;    -- 1.2.3 default
+SET pg_tre.pending_list_limit = 0;       -- KiB; 0 (default) = only VACUUM merges
+SET pg_tre.fastupdate = on;              -- must be on
 ```
 
-Context: `PGC_USERSET` (can set per-session), except `range_size_blocks` and `bloom_tuple_bits` are `PGC_SIGHUP` (require reload).
+`pg_tre.pending_list_limit` applies to indexes whose `pending_list_limit`
+storage parameter is unset (`-1`). Both are `PGC_USERSET`.
 
 ---
 
@@ -494,16 +486,6 @@ SELECT tre_parse_debug('enviro.{~2}ment');
 
 ## Known Limitations
 
-### Phase 4 Single-Leaf Posting Budget
-
-**Symptom:** `ERROR: posting for trigram ... exceeds single-leaf budget`
-
-**Cause:** Very common trigrams (e.g., "the", "ing") generate postings > 7 KB. Phase 4's single-leaf implementation can't split them.
-
-**Workaround:** Shorten the text, filter common trigrams, or REINDEX after Phase 8 ships multi-leaf posting splits.
-
-**Status:** Deferred to Phase 8 (multi-level posting trees).
-
 ### Character encoding and collations
 
 Trigrams are built from characters of the database encoding (4.3.0+; UTF-8
@@ -555,19 +537,6 @@ TRE's `regaexec` approximate-match algorithm is O(n * m * k^2) where n = text le
 ---
 
 ## Troubleshooting
-
-### Error: "posting for trigram ... exceeds single-leaf budget"
-
-**Fix:** REINDEX after Phase 8 ships, or filter common words before indexing.
-
-**Explanation:** Phase 4's posting tree is single-leaf. A single trigram posting must fit in ~7 KB. If you index 100k rows containing "the", the posting's sparsemap exceeds this.
-
-**Temporary workaround:**
-```sql
--- Exclude very common words
-CREATE INDEX docs_tre_idx ON docs USING tre (body)
-WHERE length(body) > 20 AND body !~~ '%common_word%';
-```
 
 ### Error: "regex too complex"
 
