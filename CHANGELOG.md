@@ -6,6 +6,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.4.1] - unreleased - PostgreSQL 19
+
+**No on-disk change; no REINDEX** to upgrade from 4.4.0 or to downgrade
+to it.  Nothing changes on PostgreSQL 17 or 18 except the tests.
+
+### Fixed
+
+- **pg_tre did not build on PostgreSQL 19** (reported against 19rc1).
+  Three API changes: `table_beginscan()` and `table_beginscan_parallel()`
+  take a `ScanOptions` flags argument, `utils` headers no longer include
+  `<limits.h>`, and `pg_locale_t` lost its `provider` field and `info`
+  union.  19 also builds with `-Wimplicit-fallthrough`; pg_tre's
+  fall-throughs are annotated.
+
+### Changed
+
+- **On PostgreSQL 19, character classes and `(?i)` call core's own ctype
+  functions** (`pg_iswalpha()`, `pg_towupper()` and friends, new public
+  API in 19), exactly as core's regex engine does.  Under an ICU collation
+  pg_tre now follows libicu like `~` does, so the one documented class
+  difference from core (ICU collations classified with PostgreSQL's
+  Unicode tables) applies to 17 and 18 only.
+
+### Tests and CI
+
+- CI builds and tests PG 19 (gcc and clang, `-Werror`) from PGDG's
+  testing suite.  macOS stays on 17 and 18 (Homebrew has no
+  `postgresql@19`), and the flake on 17 and 18 (nixpkgs has no
+  `postgresql_19`).
+- `encoding_matrix` skips MULE_INTERNAL on 19, which removed the
+  encoding.  It also no longer counts against pg_tre an ILIKE check that
+  core's own ILIKE gets wrong: on 19rc1, `'xÆy' ILIKE '%Æ%'` is false in
+  a LATIN1, WIN1252 or KOI8R database with a C ctype (a core bug, from
+  1e493158d3d).  The index agrees with core either way.
+- `scripts/run-regress.sh` accepts `<test>_N.out` alternative outputs as
+  pg_regress does, and prints FAIL and the diff for a failing test
+  instead of exiting silently.
+
 ## [4.4.0] - 2026-10-16 - Smaller indexes (dense TID packing); UNLOGGED indexes survive a crash; FreeBSD
 
 **On-disk format v11.**  Upgrading needs no REINDEX: an index built by

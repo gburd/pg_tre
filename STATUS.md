@@ -1,8 +1,13 @@
 # pg_tre status
 
-Released: **4.4.0** (2026-10).  See
+Released: **4.4.0** (2026-10); in development: **4.4.1**.  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.4.1 builds on PostgreSQL 19 (it failed to compile against 19rc1)
+and there classifies characters with core's own ctype functions, so
+character classes and `(?i)` agree with `~` / `~*` for every
+provider, ICU included.  No on-disk change, no REINDEX.
 
 4.4.0 changes the on-disk format (v11): new indexes pack heap TIDs
 densely and are 1.5-1.8x smaller on heap tables (14.2 GB -> 8.0 GB
