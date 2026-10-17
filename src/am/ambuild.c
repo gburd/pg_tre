@@ -498,8 +498,7 @@ extract_trigrams(BuildState *bstate, Datum value, bool isnull, ItemPointer tid)
                                                 / (1024 * 1024)),
                                    PG_TRE_SORT_TUPLE_TEMP_BYTES),
                          errhint("Raise pg_tre.build_max_entries_mb on a "
-                                 "host with enough RAM/temp space, raise "
-                                 "pg_tre.min_trigram_freq, index a "
+                                 "host with enough RAM/temp space, index a "
                                  "smaller/shorter column, or use pg_trgm "
                                  "+ tsvector for this workload.  See "
                                  "LIMITATIONS.md.")));
@@ -669,9 +668,10 @@ finish_posting(PostingOut *out, PgTrePostingBuilder *b, uint64 hash,
     uint16      cslot;
 
     /*
-     * Cardinality-aware build (1.2.1+): trigrams in fewer than
-     * pg_tre.min_trigram_freq rows are not useful filters; the recheck
-     * handles correctness.
+     * Cardinality-aware build (1.2.1-4.4.x).  Unreachable since 4.5.0:
+     * pg_tre.min_trigram_freq's check hook refuses values above 1, because
+     * a dropped posting made scans treat the trigram as absent from every
+     * row (the recheck never saw those rows).
      */
     if (pg_tre_min_trigram_freq > 1 &&
         pg_tre_posting_build_n_tids(b) < pg_tre_min_trigram_freq)

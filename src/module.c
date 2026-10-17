@@ -53,6 +53,19 @@ bool pg_tre_build_legacy_tids      = false; /* testing: build format <=10 TIDs *
 int  pg_tre_build_max_entries_mb   = 0;      /* 0 = unlimited (default since 1.8.0) */
 double pg_tre_similarity_threshold = 0.3;    /* pg_trgm-compatible %% threshold */
 
+/* pg_tre.min_trigram_freq > 1 made the index under-return; see below. */
+static bool
+pgt_check_min_trigram_freq(int *newval, void **extra, GucSource source)
+{
+    if (*newval > 1)
+    {
+        GUC_check_errdetail("Building without the postings of rare trigrams made the index return no rows for them.");
+        GUC_check_errhint("Leave it at 1, and REINDEX any tre index built with a higher value.");
+        return false;
+    }
+    return true;
+}
+
 /* pg_tre.fastupdate: there is no path that bypasses the pending list. */
 static bool
 pgt_check_fastupdate(bool *newval, void **extra, GucSource source)
@@ -224,30 +237,20 @@ pg_tre_init_guc(void)
         0.3, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 
     /*
-     * Cardinality-aware build (1.2.1+).  Posting trees with fewer
-     * than this many TIDs are dropped during ambuild.  A trigram
-     * appearing in 1-2 rows out of millions isn't a useful
-     * candidate-narrowing filter — its posting tree is mostly
-     * structural overhead (one 8 KB page per trigram).  Queries
-     * matching only such rare trigrams fall back to other trigrams
-     * in the same conjunct; if every trigram in the conjunct was
-     * dropped, the planner emits a fully-lossy bitmap covering the
-     * heap and the executor recheck filters.  Correctness is
-     * preserved either way.
-     *
-     * Default 1 (drop nothing) preserves prior behavior.  Set to 2
-     * or higher to drop singleton/doubleton trigrams; 16 is a
-     * reasonable starting point for large corpora.  PGC_SIGHUP
-     * because changing it mid-build would corrupt the index;
-     * effective on the next CREATE INDEX / REINDEX.
+     * Cardinality-aware build (1.2.1-4.4.x): posting trees with fewer
+     * than this many TIDs were dropped during ambuild.  But a trigram
+     * absent from the upper tree means "no row has it" to every scan, so
+     * the index returned no rows for rare words -- exactly the rows such
+     * a search is for.  Values above 1 are refused since 4.5.0 (and with
+     * dense packing a rare trigram's posting is a few inline bytes, so
+     * dropping it saved little).  0 and 1 keep every posting.
      */
     DefineCustomIntVariable("pg_tre.min_trigram_freq",
-        "Skip building posting trees for trigrams with fewer TIDs.",
-        "Posting trees below this threshold are not persisted, "
-        "trading some recheck work for a smaller index.  0 or 1 "
-        "disables the optimization (default).",
+        "Deprecated: must be 0 or 1 (every posting tree is built).",
+        "Values above 1 dropped the postings of rare trigrams, and the "
+        "index then returned no rows for them.",
         &pg_tre_min_trigram_freq,
-        1, 0, INT_MAX, PGC_SIGHUP, 0, NULL, NULL, NULL);
+        1, 0, INT_MAX, PGC_SIGHUP, 0, pgt_check_min_trigram_freq, NULL, NULL);
 
     MarkGUCPrefixReserved("pg_tre");
 }

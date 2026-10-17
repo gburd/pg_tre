@@ -1,12 +1,12 @@
 -- test/sql/cardinality.sql
--- Regression test for the pg_tre.min_trigram_freq GUC (cardinality-
--- aware build, added in 1.2.1).
+-- pg_tre.min_trigram_freq (cardinality-aware build, 1.2.1-4.4.x).
 --
--- The build path drops posting trees for trigrams appearing in
--- fewer than min_trigram_freq rows.  The dropped trigrams aren't
--- recorded in the upper tree at all, so queries that would have
--- relied on them fall back through the normal lossy-bitmap +
--- recheck path.  Correctness must be preserved.
+-- Values above 1 dropped the posting trees of trigrams in fewer rows
+-- than that.  A trigram missing from the upper tree reads as "in no
+-- row" to every scan, so the index returned no rows for rare words
+-- (no recheck sees rows the index never returns).  Since 4.5.0 values
+-- above 1 are refused; this checks that, and that the index agrees
+-- with a sequential scan at the default.
 CREATE EXTENSION IF NOT EXISTS pg_tre;
 psql:test/sql/cardinality.sql:11: NOTICE:  extension "pg_tre" already exists, skipping
 CREATE EXTENSION
@@ -77,3 +77,12 @@ DROP TABLE _seq;
 DROP TABLE
 DROP TABLE card_t;
 DROP TABLE
+-- Values above 1 are refused (ALTER SYSTEM runs the check hook).
+ALTER SYSTEM SET pg_tre.min_trigram_freq = 5;
+psql:test/sql/cardinality.sql:62: ERROR:  invalid value for parameter "pg_tre.min_trigram_freq": 5
+DETAIL:  Building without the postings of rare trigrams made the index return no rows for them.
+HINT:  Leave it at 1, and REINDEX any tre index built with a higher value.
+ALTER SYSTEM SET pg_tre.min_trigram_freq = 1;
+ALTER SYSTEM
+ALTER SYSTEM RESET pg_tre.min_trigram_freq;
+ALTER SYSTEM

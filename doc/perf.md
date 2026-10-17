@@ -175,10 +175,9 @@ Concrete sizing for common shapes:
 | email bodies (~1 KB) | ~500 | 500k | **6 GB** | **~8 GB** |
 | long documents (~10 KB) | ~5000 | 100k | 12 GB | OOM under typical cgroups |
 
-`pg_tre.min_trigram_freq` (default 1, no skip) reduces output
-index size on common trigrams, but **does not reduce build
-memory** — every emission is still collected before the skip
-decision.
+`pg_tre.min_trigram_freq` (1.2.1-4.4.x) dropped the postings of rare
+trigrams; it never reduced build memory, and it made the index return
+no rows for those trigrams, so since 4.5.0 it must stay at 1.
 
 A `tuplesort`-based build that bounds peak RSS by
 `maintenance_work_mem` (the same disk-spill pattern btree/gin/gist
