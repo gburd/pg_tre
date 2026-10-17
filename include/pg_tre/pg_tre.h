@@ -94,6 +94,18 @@
  * regression assertions are reconciled.
  */
 #define PG_TRE_FORMAT_VERSION_LATEST 11
+
+/* PG19's c.h has it; PG19 builds with -Wimplicit-fallthrough. */
+#ifndef pg_fallthrough
+#if defined(__has_attribute)
+#if __has_attribute(fallthrough)
+#define pg_fallthrough __attribute__((fallthrough))
+#endif
+#endif
+#ifndef pg_fallthrough
+#define pg_fallthrough
+#endif
+#endif
 #define PG_TRE_FORMAT_VERSION_MIN    6
 
 /* Back-compat alias: PG_TRE_FORMAT_VERSION continues to mean "the

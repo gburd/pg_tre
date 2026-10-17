@@ -355,7 +355,7 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
             /* A small class is a position of alternatives (see run_emit). */
             if (run_append_class(lc, ast))
                 break;
-            /* FALLTHROUGH */
+            pg_fallthrough;
         case REGEX_AST_ANY:
             /* Break the run: opaque byte. */
             run_flush(lc);

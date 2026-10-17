@@ -1034,7 +1034,11 @@ pgtre_scan_and_sort(BuildState *bstate, bool progress)
         ParallelTableScanDesc pscan =
             (ParallelTableScanDesc) ((char *) bstate->pgtshared +
                                      BUFFERALIGN(sizeof(PgTreShared)));
-        TableScanDesc scan = table_beginscan_parallel(bstate->heap, pscan);
+        TableScanDesc scan = table_beginscan_parallel(bstate->heap, pscan
+#if PG_VERSION_NUM >= 190000
+                                                      , SO_NONE
+#endif
+                                                      );
 
         bstate->heap_tuples =
             table_index_build_scan(bstate->heap, bstate->index,
@@ -1679,7 +1683,11 @@ tre_estimate_index_build(PG_FUNCTION_ARGS)
                  ? (double) rel->rd_rel->reltuples : 0.0;
 
     slot = table_slot_create(rel, NULL);
-    scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL);
+    scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL
+#if PG_VERSION_NUM >= 190000
+                           , SO_NONE
+#endif
+                           );
 
     while (sampled < TRE_ESTIMATE_SAMPLE_ROWS &&
            table_scan_getnextslot(scan, ForwardScanDirection, slot))

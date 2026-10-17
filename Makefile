@@ -144,9 +144,11 @@ OBJS = \
 #   src/query/tiling.o  -- Phase 5 READ side, uncomment when integrating
 #   src/query/uleven.o  -- Phase 5 READ side, uncomment when integrating
 
-# Sparsemap is vendored in-tree; silence upstream missing-prototype
-# warnings without disabling them globally.
-src/util/sparsemap.o: CFLAGS += -Wno-missing-prototypes
+# Sparsemap is vendored in-tree (verbatim); silence upstream
+# missing-prototype warnings, and PG19's -Wimplicit-fallthrough (its
+# fall-throughs carry comments, not attributes), without disabling them
+# globally.
+src/util/sparsemap.o: CFLAGS += -Wno-missing-prototypes -Wno-implicit-fallthrough
 
 # Grammar-generated files may have warnings; disable pedantic checks.
 src/query/tre_grammar.o: CFLAGS += -Wno-unused-parameter -Wno-missing-prototypes

@@ -23,6 +23,7 @@
 #include "utils/builtins.h"
 
 #include "pg_tre/like_translate.h"
+#include "pg_tre/pg_tre.h"
 
 /* Append c to buf, regex-escaping it if it is a regex metacharacter. */
 static void
@@ -34,7 +35,7 @@ append_escaped(StringInfo buf, char c)
         case '[': case ']': case '{': case '}': case '^': case '$':
         case '|': case '\\':
             appendStringInfoChar(buf, '\\');
-            /* fall through */
+            pg_fallthrough;
         default:
             appendStringInfoChar(buf, c);
     }

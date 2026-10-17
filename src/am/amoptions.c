@@ -8,6 +8,8 @@
 
 #include "postgres.h"
 
+#include <limits.h>
+
 #include "access/amapi.h"
 #include "access/amvalidate.h"
 #include "access/htup_details.h"
