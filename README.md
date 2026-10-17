@@ -568,8 +568,8 @@ it up front with `tre_estimate_index_build()`.  See
 
 ## Installation
 
-Requires PostgreSQL 18+, autoconf/automake/libtool/gettext/m4 for
-the vendored [TRE](https://github.com/laurikari/tre).
+Requires PostgreSQL 17, 18 or 19, and autoconf/automake/libtool/gettext/m4
+for the vendored [TRE](https://github.com/laurikari/tre).
 
 ```bash
 git clone --recurse-submodules https://codeberg.org/gregburd/pg_tre.git

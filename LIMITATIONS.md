@@ -334,22 +334,25 @@ Nondeterministic collations are refused at `CREATE INDEX`, `REINDEX` and
 any `ALTER` that rebuilds the index: equal strings under them need not
 share trigrams.
 
-### Two known differences from core `~` / `~*` in character classes
+### A known difference from core `~` / `~*` in character classes (PostgreSQL 17 and 18)
 
 TRE's classes (`[[:alpha:]]`, `\w`, `\s`, `\d`, ...) and case folding
-(`(?i)`) mirror PostgreSQL's regex engine (`regc_pg_locale.c`) for the C,
-builtin and libc strategies, on PostgreSQL 17 and 18:
+(`(?i)`) mirror PostgreSQL's regex engine (`regc_pg_locale.c`):
 `test/sql/tre_ctype_strategies.sql` checks every class and every case pair
-against `~` / `~*`. One difference remains:
+against `~` / `~*`. On PostgreSQL 19 they call the same per-collation
+ctype functions core's regex calls (`pg_iswalpha()` and friends, new in
+19), so they agree with core for every provider, ICU included. On
+PostgreSQL 17 and 18 they mirror the C, builtin and libc strategies, and
+one difference remains:
 
 - **ICU class membership follows PostgreSQL's Unicode tables, not
-  libicu.** Under an ICU collation core calls ICU's `u_isalpha()` and
-  friends; pg_tre uses PostgreSQL's own Unicode tables (`pg_u_isalpha()`
+  libicu** (17 and 18 only). Under an ICU collation core calls ICU's
+  `u_isalpha()` and friends; pg_tre uses PostgreSQL's own Unicode tables (`pg_u_isalpha()`
   and friends, with the POSIX-compatible definitions that builtin
   `C.UTF-8` uses), because `pg_tre.so` deliberately does not link ICU (it
   stays loadable into any PostgreSQL build of the same major) and
-  PostgreSQL exposes no ctype entry point an extension could call
-  instead. The two agree on ordinary letters, digits, spaces and
+  PostgreSQL 17 and 18 expose no ctype entry point an extension could
+  call instead. The two agree on ordinary letters, digits, spaces and
   punctuation; they differ on, for example, Arabic-Indic digits (`\d`),
   letter-like numbers and symbols such as `Ⅻ` and `Ⓐ` (`[[:alpha:]]`),
   the soft hyphen (`[[:graph:]]`), and symbols such as `$ + ~ © €` which
