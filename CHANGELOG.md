@@ -6,6 +6,68 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.5.0] - unreleased - Two wrong-results fixes; pending_list_limit works; pg_tre_index_check
+
+**No on-disk format change; no REINDEX to upgrade or to downgrade to
+4.4.x** -- but REINDEX any `tre` index built with
+`pg_tre.min_trigram_freq` above 1 (see below), and REINDEX any index to
+turn its SuRF prefilter back on.  Field report 2026-10-17 (solnix.io).
+
+### Fixed
+
+- **Anchored patterns missed rows inserted after CREATE INDEX** (since
+  3.2.0).  The SuRF prefilter, which returns an empty result when no
+  indexed trigram falls in an anchored prefix's range, was built once by
+  CREATE INDEX and never learned trigrams that later rows brought.  So
+  `col ~ '^warn'` (any k=0 anchored prefix of 3+ characters, also
+  `%~~ tre_pattern('^warn', 0)`) returned no rows from the index when
+  "war" first appeared after the build, before and after VACUUM, while a
+  sequential scan found them.  `LIKE 'warn%'`, `~*` and `ILIKE` were not
+  affected.  The prefilter is now used only while it still covers every
+  key and the pending list is empty; on an index built before 4.5.0 it is
+  off (correct results immediately, no REINDEX needed; REINDEX turns it
+  back on).
+- **`pg_tre.min_trigram_freq` above 1 made the index miss rare words**
+  (since 1.2.1): the build dropped the postings of rare trigrams, and a
+  missing trigram reads as "in no row" to every scan.  Values above 1 are
+  now refused.  REINDEX any index built with one.
+- `fastupdate` and `pending_list_limit` were accepted and did nothing
+  (documented since 4.2.3).  See Changed.
+- The "exceeds single-leaf budget" error advised waiting for multi-leaf
+  postings, which shipped long ago; the error is unreachable and internal
+  now, and the stale doc entries are gone.
+
+### Changed
+
+- **`pending_list_limit` works**: the INSERT that pushes the pending
+  list past the limit merges it into the index, as VACUUM does, unless a
+  merge is already running (it does not wait).  Merges are serialized by
+  a lock that scans and inserts never take.  The default is 0, no limit,
+  so nothing changes unless you set it -- per index
+  (`WITH (pending_list_limit = 4096)`, KiB) or with
+  `pg_tre.pending_list_limit`.  **An index created with an explicit
+  `pending_list_limit` before 4.5.0 starts merging at that size.**  The
+  INSERT that triggers a merge pays for it.
+- **`fastupdate = off` is refused** at CREATE INDEX and ALTER INDEX, and
+  `pg_tre.fastupdate = off` is rejected: every insert goes through the
+  pending list.  An index that already stores `fastupdate=off` still
+  opens.
+
+### Added
+
+- **`pg_tre_index_check(regclass, samples int DEFAULT 20)`**: for patterns
+  cut from the column's own values, counts matching rows by sequential
+  scan, bitmap index scan and plain index scan for `%~~` (k=0 and 1),
+  `~`, `~*`, anchored `~`/`~*`, `LIKE` and `ILIKE`, and returns one row
+  per check (`ok` false where the index disagrees).  A closing NOTICE
+  (WARNING on disagreement) reports the page formats -- flagging a mix
+  -- TID packing and pending-list size.  Run it after every upgrade; it
+  found both fixes above on its first runs.  Costs about 8 sequential
+  scans per sample.
+- `pg_tre_index_pending(regclass)`: entries in the pending list.
+- `tap/pending_limit.pl`, `test/sql/pending_limit.sql`, and a
+  late-prefix section in `surf_prefix`.
+
 ## [4.4.1] - 2026-10-17 - PostgreSQL 19
 
 **No on-disk change; no REINDEX** to upgrade from 4.4.0 or to downgrade

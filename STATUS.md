@@ -1,8 +1,17 @@
 # pg_tre status
 
-Released: **4.4.1** (2026-10).  See
+Released: **4.4.1** (2026-10); in development: **4.5.0**.  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.5.0 fixes two ways the index returned fewer rows than a sequential
+scan: anchored patterns (`~ '^warn'`) whose leading trigram first
+appeared after CREATE INDEX (since 3.2.0), and any index built with
+`pg_tre.min_trigram_freq` above 1 (now refused).  `pending_list_limit`
+works (an INSERT merges the list past it; off by default) and
+`fastupdate = off` is refused instead of silently ignored.  New:
+`pg_tre_index_check()`, which compares the index with a sequential
+scan, and `pg_tre_index_pending()`.  No on-disk change.
 
 4.4.1 builds on PostgreSQL 19 (it failed to compile against 19rc1)
 and there classifies characters with core's own ctype functions, so
