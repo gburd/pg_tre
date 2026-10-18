@@ -6,9 +6,9 @@
 # lock, the rest skip), while readers scan and a vacuumer runs VACUUM
 # (which takes the merge lock and strips dead TIDs) and deletes rows.
 # Afterwards, in one snapshot, the index (bitmap and plain index scan)
-# must return exactly what a sequential scan returns, the pending list
-# must be bounded, no backend may have raised an error, and REINDEX must
-# give the same answers.
+# must return exactly what a sequential scan returns, the next INSERT must
+# drain the pending list, no backend may have raised an error, and
+# REINDEX must give the same answers.
 
 use strict;
 use warnings FATAL => 'all';
@@ -124,9 +124,22 @@ is($kid_failures, 0, 'no writer, reader or vacuumer hit an error');
 
 my $rows = $node->safe_psql('postgres', 'SELECT count(*) FROM pl');
 cmp_ok($rows, '>', 10000, "workload inserted rows ($rows)");
+# While a VACUUM holds the merge lock (the vacuumer loops all along) and
+# while one INSERT's merge runs, other INSERTs append without merging, so
+# under this load the list is not bounded by the limit; it must drain as
+# soon as an INSERT runs with nothing else in the way.
 my $pending = $node->safe_psql('postgres', q{SELECT pg_tre_index_pending('pl_idx')});
-cmp_ok($pending, '<=', 2730 + 60 * $N_WRITERS * 40,
-	"pending list stayed bounded ($pending entries)");
+diag("pending list after the concurrent phase: $pending entries");
+# 100 rows of ~80 distinct trigrams each take the list past the
+# 2730-entry (64 kB) limit whatever it held: the row that crosses it
+# merges the whole list, and the rows after it leave less than the limit.
+$node->safe_psql('postgres', q{
+	INSERT INTO pl (w, body)
+	SELECT 0, 'after the load ' || g || ' ' || md5(g::text) || md5((g * 3)::text)
+	  FROM generate_series(1, 100) g});
+$pending = $node->safe_psql('postgres', q{SELECT pg_tre_index_pending('pl_idx')});
+cmp_ok($pending, '<', 2731,
+	"an INSERT past the limit drained the list ($pending entries left)");
 
 sub compare
 {

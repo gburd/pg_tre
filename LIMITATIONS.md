@@ -311,8 +311,12 @@ Since 4.5.0, `pending_list_limit` (storage parameter, KiB; or the
 `pg_tre.pending_list_limit` GUC for indexes that do not set it) caps the
 list: the `INSERT` that pushes it past the limit merges it, unless a merge
 is already running. That `INSERT` pays for the merge, which rewrites the
-upper tree and every posting the list touches, like VACUUM's. The default
-is 0, no limit, which keeps 4.4's behaviour. The other options: set a low
+upper tree and every posting the list touches, like VACUUM's, so a merge
+on a large table with common trigrams takes seconds. The limit is a
+trigger, not a hard cap: INSERTs that arrive while a merge runs, or while
+VACUUM runs on the table (it holds the same lock), append without
+merging, so a busy table can pass the limit until then. The default is
+0, no limit, which keeps 4.4's behaviour. The other options: set a low
 per-table `autovacuum_vacuum_insert_threshold`, or schedule `VACUUM`.
 
 There is no way to bypass the list: `fastupdate = off` is refused (4.4 and

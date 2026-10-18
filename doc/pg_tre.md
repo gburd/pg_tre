@@ -281,7 +281,8 @@ WITH (
 **pending_list_limit** (KiB): every INSERT appends to the index's
 pending list, which every scan reads. When an INSERT pushes the list
 past this size it merges the list into the index, as VACUUM does,
-unless another merge is already running (then it does not wait). `-1`
+unless another merge (or a VACUUM of the table) is running; then it does
+not wait, so a busy table can pass the limit until the next INSERT. `-1`
 (the default) uses `pg_tre.pending_list_limit`; `0` means no limit:
 only VACUUM (or REINDEX) merges. A merge rewrites the upper tree and
 every posting the list touches, so the INSERT that triggers it takes
