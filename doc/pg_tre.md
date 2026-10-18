@@ -1,6 +1,6 @@
 # pg_tre User Guide
 
-**pg_tre** is a PostgreSQL 18+ native index access method for fast approximate regex matching over text columns. It uses a three-tier filter funnel (range bloom → posting tree → per-tuple bloom) backed by the [TRE library](https://github.com/laurikari/tre) for approximate pattern recheck.
+**pg_tre** is a native index access method for PostgreSQL 17, 18 and 19 that answers approximate regex queries over text columns. The index stores compressed trigram posting lists; a query's trigram formula selects candidate rows, and the [TRE library](https://github.com/laurikari/tre) rechecks each one, so results are exact.
 
 ---
 
@@ -61,9 +61,9 @@ This query finds rows where `body` contains a word within edit-distance 2 of the
 
 ### Requirements
 
-- **PostgreSQL 18 or newer**
+- **PostgreSQL 17, 18 or 19**
 - **Build tools:** gcc/clang, make, autoconf, automake, libtool, gettext, m4
-- **Git submodules:** TRE (v0.9.0) and Lime parser generator
+- **Vendored sources:** TRE and the Lime parser generator (git submodules; included in release tarballs and the PGXN distribution)
 
 ### Build
 
@@ -254,6 +254,16 @@ tre_parse_debug(pattern text) → text
 
 tre_extract_debug(pattern text) → text
   -- Shows trigram extraction output (debugging planner)
+
+pg_tre_index_check(idx regclass, samples int DEFAULT 20) → table
+  -- Compares the index with a sequential scan for patterns cut from
+  -- the column's own values; any row with ok = false is a bug (4.5.0+)
+
+pg_tre_index_pending(idx regclass) → bigint
+  -- Entries in the index's pending list, which every scan reads (4.5.0+)
+
+pg_tre_index_tid_packing(idx regclass) → text
+  -- 'dense' or 'legacy'; REINDEX converts legacy indexes (4.4.0+)
 ```
 
 ### Access Method
@@ -353,7 +363,7 @@ SELECT * FROM docs WHERE body %~~ tre_pattern('PostgreSQL');
 --       Recheck Cond: (body %~~ 'PostgreSQL'::tre_pattern)
 ```
 
-**Why it works:** Pattern "PostgreSQL" yields trigrams `Pos`, `ost`, `stg`, ..., `SQL`. All present in row 1, absent in rows 2-3. Tier-2 posting merge produces TID set `{1}`, tier-3 bloom confirms, recheck validates.
+**Why it works:** Pattern "PostgreSQL" yields trigrams `Pos`, `ost`, `stg`, ..., `SQL`. All present in row 1, absent in rows 2-3. The posting merge produces TID set `{1}`, and the recheck confirms it.
 
 ### 2. Fuzzy Match (k=1)
 
@@ -434,21 +444,17 @@ WHERE body %~~ tre_pattern('enviro.{~2}ment.*database');
 
 **For measured benchmark numbers, see [perf.md](perf.md).**
 
-This section describes the theoretical performance characteristics of pg_tre's three-tier filter architecture. Real measurements are in `doc/perf.md` once the Phase 5 ambuild bug is resolved.
+Measurements are in `doc/perf.md`.
 
-### Three-Tier Filter Funnel
+### Scan Pipeline
 
-pg_tre uses three progressively refined filters before heap recheck:
+1. **SuRF prefilter (anchored and prefix patterns):** a succinct range filter over the indexed trigrams rejects a `^`-anchored or `LIKE 'foo%'` scan outright when no indexed trigram falls in the prefix's key range.
 
-1. **Tier 1 (Range bloom):** Groups heap blocks into ranges (default 128 blocks). Each range has a bloom filter of all trigrams in that region. Query trigrams tested against range blooms; entire ranges rejected if blooms don't match.
+2. **Posting lists:** per-trigram sparsemap postings, AND/OR merged according to the query's trigram formula (CNF for k=0, k+1 tiles OR-ed for k>0). This produces the candidate TID set.
 
-2. **Tier 2 (Posting tree):** Per-trigram sparsemap postings. AND/OR merged based on query mode (CNF for k=0, DNF for k>0 tiled). Produces candidate TID set.
+3. **Recheck:** candidate rows are fetched from the heap and TRE's `regaexec` runs the full approximate match. Recheck is mandatory: the index is lossy.
 
-3. **Tier 3 (Per-tuple bloom):** Each posting leaf stores a 128-bit bloom per TID with all trigrams from that tuple. Candidate TIDs tested; non-matches rejected without heap I/O.
-
-4. **Recheck:** Surviving TIDs fetched from heap, TRE's `regaexec` runs the full approximate-match algorithm.
-
-**False positive rate:** Tier-3 bloom has ~2% FPR at 10 trigrams/tuple. Recheck is mandatory (the index is lossy).
+The per-tuple bloom tier was removed in 3.0.0 and the range-bloom tier in 3.2.0.
 
 ### Why Recheck is Necessary
 
@@ -464,7 +470,7 @@ The recheck cost is why high k (> 3) degrades performance: TRE's approximate-mat
 The planner uses `pg_tre_amcostestimate` to decide between index scan and seq scan:
 
 - **Selectivity:** Per-trigram cardinalities from the meta page → estimated candidate rows
-- **Index cost:** posting lookup + bloom checks + recheck
+- **Index cost:** posting lookup + recheck
 - **Seq scan cost:** scan all rows + recheck all
 
 For k=0, selectivity is good (literal trigrams are precise). For k>0, tiling expands to DNF with k+1 tiles, each tile is a conjunction; the planner ORs their selectivities.
@@ -496,20 +502,6 @@ Regex classes and case folding follow the collation of the expression
 (the index column's for an index scan), as core's `~` does;
 nondeterministic collations are refused, at index build and by the match
 functions. See `LIMITATIONS.md`.
-
-### Range Bloom and Positional Filters
-
-**Status (Phase 5):** Tier-1 range bloom and positional offsets are implemented but selectivity benefits are less than design intent.
-
-- **Range bloom:** Multi-leaf since 1.5.0 — range pages carry a
-  `PgTreRangeHeader` and chain via `right_link`, so the tier-1
-  summary covers the whole heap instead of just the first page's
-  worth of ranges.  v3/v4 single-page range layouts remain
-  readable (per-page format dispatch).
-- **Positional filtering:** Wired since 1.3.0 (Phase 5.1).
-  Per-trigram positions stored in the posting payload are used
-  by the scan-side positional filter to prune candidates whose
-  trigram offsets are out of range before recheck.
 
 ### DoS Protections
 
@@ -558,9 +550,7 @@ SET pg_tre.max_nfa_states = 50000;
 3. `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output
 4. `SELECT tre_extract_debug('your_pattern');` output
 
-**Known causes (fixed in later phases):**
-- Phase 5.1 uleven expansion bugs (missing trigram variants)
-- Phase 6 selectivity underestimation (planner chooses index when it shouldn't)
+To check an index against a sequential scan, run `SELECT * FROM pg_tre_index_check('your_index');` (4.5.0+).
 
 ### Seq Scan Always Chosen
 
@@ -583,28 +573,20 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM docs WHERE body %~~ tre_pattern('your_p
 -- Compare actual cost to seq scan's actual cost
 ```
 
-### Crash After CREATE INDEX
-
-**Symptom:** `LOG: server process (PID ...) was terminated by signal 11`
-
-**Status:** Known Phase 5 bug (ambuild segfault during bloom population). Fixed in main branch commit `ff69090`.
-
-**Workaround:** Pull latest main, rebuild.
-
 ---
 
 ## Internals Pointers
 
 For architecture and on-disk format details, see:
 
-- **[doc/design.md](design.md)** — Three-tier funnel, extraction pipeline, recheck flow
+- **[doc/design.md](design.md)** — Extraction pipeline, posting lists, recheck flow
 - **[doc/onpage_format.md](onpage_format.md)** — Page layouts, WAL records, format versioning
-- **[STATUS.md](../STATUS.md)** — Phase-by-phase implementation status
+- **[STATUS.md](../STATUS.md)** — Release status
 
 For hacking on pg_tre:
 - **src/query/extract.c** — Trigram extraction and tiling
-- **src/am/amscan.c** — Three-tier filtering logic
-- **src/pages/posting.c** — Posting tree + per-tuple bloom serialization
+- **src/am/amscan.c** — Scan: SuRF prefilter, posting merge, recheck
+- **src/pages/posting.c** — Posting tree serialization
 - **vendor/tre/** — TRE library (submodule)
 
 ---

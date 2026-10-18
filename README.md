@@ -1,10 +1,11 @@
 # pg_tre
 
-**PostgreSQL 18+ native index access method for approximate regex matching.**
+**PostgreSQL 17+ native index access method for approximate regex matching.**
 
-[![Status](https://img.shields.io/badge/status-4.0.2_released-green)](STATUS.md)
+[![Status](https://img.shields.io/badge/status-released-green)](STATUS.md)
+[![PGXN version](https://badge.fury.io/pg/pg_tre.svg)](https://pgxn.org/dist/pg_tre/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-18%2B-blue)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-17%2B-blue)](https://www.postgresql.org/)
 
 pg_tre indexes text columns using sparsemap trigram postings, AND/OR-merged
 per query and backed by the [TRE
@@ -585,6 +586,15 @@ CREATE EXTENSION pg_tre;
 ```
 
 in each database that needs it.
+
+### PGXN
+
+Releases are on [PGXN](https://pgxn.org/dist/pg_tre/) with the vendored
+TRE and Lime sources included, so the same build tools are needed:
+
+```bash
+pgxn install pg_tre
+```
 
 ### Nix / flake
 
