@@ -81,3 +81,24 @@ RESET client_min_messages;
 SELECT * FROM pg_tre_index_check('plx_expr');
 
 DROP TABLE pl, plx;
+
+-- pg_tre_index_check pins its search_path (4.5.1): functions an untrusted
+-- schema puts ahead of pg_catalog are never called (4.5.0 called these 40
+-- times as the invoking user).
+CREATE SCHEMA ic_evil;
+CREATE TABLE ic_calls (note text);
+CREATE FUNCTION ic_evil.upper(text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN INSERT INTO public.ic_calls VALUES ('upper'); RETURN pg_catalog.upper($1); END $$;
+CREATE FUNCTION ic_evil.substr(text, int, int) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN INSERT INTO public.ic_calls VALUES ('substr'); RETURN pg_catalog.substr($1, $2, $3); END $$;
+CREATE TABLE ic_t (s text);
+INSERT INTO ic_t SELECT 'hello world ' || g FROM generate_series(1, 300) g;
+SET client_min_messages = warning;
+CREATE INDEX ic_t_idx ON ic_t USING tre (s);
+SET search_path = ic_evil, pg_catalog, public;
+SELECT count(*) > 0 AS checks FROM pg_tre_index_check('ic_t_idx', 5);
+RESET search_path;
+RESET client_min_messages;
+SELECT count(*) AS hijacked_calls FROM ic_calls;
+DROP TABLE ic_t, ic_calls;
+DROP SCHEMA ic_evil CASCADE;
