@@ -1,4 +1,4 @@
--- pg_tre 4.5.0 -- native index AM for approximate regex matching.
+-- pg_tre 4.5.1-dev -- native index AM for approximate regex matching.
 --
 -- Phase 0 scope: registers the `tre` access method, the legacy UDFs
 -- inherited from 0.1.0, and the handler function.  The opclass is
@@ -321,7 +321,7 @@ COMMENT ON FUNCTION pg_tre_index_pending(regclass) IS
     'scan reads in full.  VACUUM merges the list, as does an INSERT that '
     'pushes it past pending_list_limit.';
 
--- 4.5.0: pg_tre_index_check -- does the index return what a sequential
+-- 4.5.1-dev: pg_tre_index_check -- does the index return what a sequential
 -- scan returns?  For patterns cut from the indexed column's own values it
 -- counts matching rows by sequential scan, by bitmap index scan and by
 -- plain index scan of THIS index, for each operator the opclass serves.
