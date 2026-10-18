@@ -136,7 +136,14 @@ git push origin vCURRENT
 ```
 
 Codeberg picks up the tag and creates a release entry with the
-auto-generated tarball.
+auto-generated tarball.  When the tag reaches the GitHub mirror,
+`.github/workflows/pgxn-release.yml` uploads `make dist`'s tarball to
+[PGXN](https://pgxn.org/dist/pg_tre/) (account `gregburd`; the
+`PGXN_USERNAME`/`PGXN_PASSWORD` repository secrets).  Check that the run
+succeeded and that `https://api.pgxn.org/dist/pg_tre.json` lists the
+version.  `META.json` is bumped by `bump-version.sh`; PGXN rejects one
+whose `provides.pg_tre.file` does not exist, and its `prereqs` may only
+name PGXN or core extensions.
 
 ## Bumping to the Next Dev Version
 
@@ -246,6 +253,7 @@ breaking change in release notes.
 | `upgrade-tests.yml`   | PR (sql/** or pg_tre.control), weekly    | ALTER EXTENSION UPDATE matrix        |
 | `sanitizer-build-and-test.yml` | push to main                    | Regression suite in an ASan-built PostgreSQL (`scripts/asan-check.sh`) |
 | `nightly-stress.yml`  | daily                                    | stress / wal_audit / replication, plain and under ASan |
+| `pgxn-release.yml`    | `v*` tag, manual                         | Upload the release to PGXN           |
 
 These are the GitHub workflows, which run on the GitHub mirror
 (`gburd/pg_tre`) and are the release gate.  `.forgejo/workflows/ci.yml`

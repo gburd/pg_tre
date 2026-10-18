@@ -1,0 +1,90 @@
+name: pgxn-release
+
+# Publish a release to PGXN. Needs the PGXN_USERNAME and PGXN_PASSWORD
+# repository secrets (a https://manager.pgxn.org account); without them the
+# job skips instead of failing.
+#
+# A v* tag publishes that tag. A manual run publishes the branch it is run
+# on, as the version in its META.json, and only if its code is identical to
+# that version's tag (docs and metadata may differ); that is how a release
+# tagged before this workflow existed gets onto PGXN.
+#
+# This runs on the GitHub mirror only. Codeberg does not upload to PGXN, so
+# each version is uploaded exactly once (PGXN refuses a second upload).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  pgxn:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Skip if PGXN secrets are not set
+        id: check
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          if [ -z "$PGXN_USERNAME" ] || [ -z "$PGXN_PASSWORD" ]; then
+            echo "::notice::PGXN_USERNAME/PGXN_PASSWORD not set; skipping PGXN upload."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          submodules: true
+
+      - name: Check the version
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VER="$(jq -r .version META.json)"
+          CTL_VER="$(sed -n "s/^default_version *= *'\(.*\)'/\1/p" pg_tre.control)"
+          if [ "$CTL_VER" != "$VER" ] || [ "$(jq -r .provides.pg_tre.version META.json)" != "$VER" ]; then
+            echo "::error::META.json $VER, provides.pg_tre $(jq -r .provides.pg_tre.version META.json), pg_tre.control $CTL_VER"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "$GITHUB_REF_NAME" = "v$VER" ] || { echo "::error::tag $GITHUB_REF_NAME, META.json $VER"; exit 1; }
+          else
+            git fetch -q --depth=1 origin "refs/tags/v$VER:refs/tags/v$VER"
+            if ! git diff --quiet "v$VER" HEAD -- src include sql patches vendor Makefile pg_tre.control; then
+              echo "::error::$GITHUB_REF_NAME's code differs from v$VER:"
+              git diff --stat "v$VER" HEAD -- src include sql patches vendor Makefile pg_tre.control
+              exit 1
+            fi
+          fi
+          echo "VER=$VER" >> "$GITHUB_ENV"
+
+      # make dist writes a tar.gz with the vendor/tre and vendor/lime
+      # submodules included; PGXN Manager accepts tarballs and repacks
+      # them as zip.
+      - name: Build distribution
+        if: steps.check.outputs.skip != 'true'
+        run: make dist
+
+      - name: Upload to PGXN
+        if: steps.check.outputs.skip != 'true'
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          # 2xx/3xx: accepted.  409: refused, e.g. this version is already on
+          # PGXN or META.json is invalid; the response says which.
+          code=$(curl -sS -o /tmp/pgxn_resp.txt -w '%{http_code}' \
+            --user "$PGXN_USERNAME:$PGXN_PASSWORD" \
+            -H 'X-Requested-With: XMLHttpRequest' \
+            -F "archive=@pg_tre-$VER.tar.gz" \
+            https://manager.pgxn.org/upload)
+          echo "PGXN upload HTTP $code"; cat /tmp/pgxn_resp.txt || true
+          case "$code" in
+            2*|3*) echo "PGXN upload accepted." ;;
+            409)   if grep -q 'already exists' /tmp/pgxn_resp.txt; then
+                       echo "::warning::pg_tre $VER is already on PGXN."
+                   else
+                       echo "::error::PGXN refused the upload"; exit 1
+                   fi ;;
+            *)     echo "::error::PGXN upload failed (HTTP $code)"; exit 1 ;;
+          esac
