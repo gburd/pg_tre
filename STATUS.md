@@ -1,8 +1,13 @@
 # pg_tre status
 
-Released: **4.5.0** (2026-10).  See
+Released: **4.5.0** (2026-10); in development: **4.5.1**.  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.5.1 is a security fix: `pg_tre_index_check()` (new in 4.5.0) ran
+with the caller's `search_path`, so a lookalike function in a schema
+ahead of `pg_catalog` could run with the caller's privileges.  It now
+pins its search_path.  No on-disk change.
 
 4.5.0 fixes two ways the index returned fewer rows than a sequential
 scan: anchored patterns (`~ '^warn'`) whose leading trigram first

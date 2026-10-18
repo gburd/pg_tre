@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.5.1] - unreleased - Security: pg_tre_index_check pins its search_path
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.5.0 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Security
+
+- **`pg_tre_index_check()` (new in 4.5.0) ran with the caller's
+  `search_path`.**  It called `format()`, `upper()`, `substr()` and other
+  functions unqualified, so a function with a matching signature in a
+  schema ahead of `pg_catalog` on the caller's path ran in their place,
+  with the caller's privileges -- typically a superuser checking an index
+  after an upgrade.  The function now pins `search_path` to `pg_catalog,
+  pg_temp` and qualifies every function and operator.  Anyone who can
+  create functions in a schema on a superuser's `search_path` could
+  exploit it on 4.5.0; nothing else in pg_tre is affected.  Reported by
+  pgspot in CI.
+
 ## [4.5.0] - 2026-10-17 - Two wrong-results fixes; pending_list_limit works; pg_tre_index_check
 
 **No on-disk format change; no REINDEX to upgrade or to downgrade to

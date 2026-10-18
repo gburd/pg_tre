@@ -210,6 +210,7 @@ restart:
 | 4.3.1   | 4.4.0   | ⚠️ Yes, but  | On-disk format v11 (dense TID packing). No REINDEX to upgrade: old indexes keep working; `REINDEX` makes them 1.5-1.8x smaller (`pg_tre_index_tid_packing()` tells which). **Downgrade to 4.3.x needs REINDEX** of every `tre` index 4.4.0 wrote to. REINDEX any UNLOGGED `tre` index that fails "meta page magic mismatch" after a crash |
 | 4.4.0   | 4.4.1   | ✅ Yes       | No on-disk change, no REINDEX either way. Builds on PostgreSQL 19; on 19 character classes follow core (ICU included) |
 | 4.4.1   | 4.5.0   | ⚠️ Yes, but  | No on-disk change, no REINDEX to upgrade or downgrade. **REINDEX any index built with `pg_tre.min_trigram_freq` > 1** (it misses rare words). Anchored-prefix queries on pre-4.5.0 indexes no longer use the SuRF prefilter until REINDEX (they were missing rows). Indexes with an explicit `pending_list_limit` start merging on INSERT; `fastupdate = off` is refused |
+| 4.5.0   | 4.5.1   | ✅ Yes       | No on-disk change, no REINDEX either way. Security fix: `pg_tre_index_check()` pins its `search_path` (4.5.0's could run lookalike functions from a schema on the caller's path) |
 
 When releasing a version with breaking changes:
 
