@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.5.0] - unreleased - Two wrong-results fixes; pending_list_limit works; pg_tre_index_check
+## [4.5.0] - 2026-10-17 - Two wrong-results fixes; pending_list_limit works; pg_tre_index_check
 
 **No on-disk format change; no REINDEX to upgrade or to downgrade to
 4.4.x** -- but REINDEX any `tre` index built with
