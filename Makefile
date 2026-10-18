@@ -466,10 +466,12 @@ dist:
 	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-tre.tar
 	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-lime.tar
 	rm -f $(DIST_NAME)-tre.tar $(DIST_NAME)-lime.tar
+	@tar tf $(DIST_NAME).tar > $(DIST_NAME).list
 	@for f in vendor/tre/configure.ac vendor/lime/lime.c; do \
-	    tar tf $(DIST_NAME).tar | grep -qx "$(DIST_NAME)/$$f" || \
-	        { echo "dist: $$f missing from $(DIST_NAME).tar" >&2; exit 1; }; \
+	    grep -qx "$(DIST_NAME)/$$f" $(DIST_NAME).list || \
+	        { echo "dist: $$f missing from $(DIST_NAME).tar" >&2; rm -f $(DIST_NAME).list; exit 1; }; \
 	done
+	@rm -f $(DIST_NAME).list
 	gzip -f $(DIST_NAME).tar
 	@echo "    $(DIST_NAME).tar.gz ready"
 	@ls -la $(DIST_NAME).tar.gz
