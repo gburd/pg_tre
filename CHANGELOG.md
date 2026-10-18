@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.5.1] - unreleased - Security: pg_tre_index_check pins its search_path
+## [4.5.1] - 2026-10-18 - Security: pg_tre_index_check pins its search_path
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.0 with
 `ALTER EXTENSION pg_tre UPDATE`.
