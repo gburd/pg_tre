@@ -6,8 +6,9 @@ name: pgxn-release
 #
 # A v* tag publishes that tag. A manual run publishes the branch it is run
 # on, as the version in its META.json, and only if its code is identical to
-# that version's tag (docs and metadata may differ); that is how a release
-# tagged before this workflow existed gets onto PGXN.
+# that version's tag (docs, metadata and the Makefile's dist recipe may
+# differ); that is how a release tagged before this workflow existed gets
+# onto PGXN.
 #
 # This runs on the GitHub mirror only. Codeberg does not upload to PGXN, so
 # each version is uploaded exactly once (PGXN refuses a second upload).
@@ -50,7 +51,10 @@ jobs:
             [ "$GITHUB_REF_NAME" = "v$VER" ] || { echo "::error::tag $GITHUB_REF_NAME, META.json $VER"; exit 1; }
           else
             git fetch -q --depth=1 origin "refs/tags/v$VER:refs/tags/v$VER"
-            if ! git diff --quiet "v$VER" HEAD -- src include sql patches vendor Makefile pg_tre.control; then
+            # the Makefile may differ only in its dist recipe (fixed after 4.5.1)
+            nodist() { sed '/^dist:/,/^$/d'; }
+            if ! git diff --quiet "v$VER" HEAD -- src include sql patches vendor pg_tre.control ||
+               ! diff <(git show "v$VER:Makefile" | nodist) <(nodist < Makefile); then
               echo "::error::$GITHUB_REF_NAME's code differs from v$VER:"
               git diff --stat "v$VER" HEAD -- src include sql patches vendor Makefile pg_tre.control
               exit 1

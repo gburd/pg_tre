@@ -461,8 +461,15 @@ dist:
 	  > $(DIST_NAME)-tre.tar
 	@ ( cd vendor/lime && git archive --format=tar --prefix=$(DIST_NAME)/vendor/lime/ HEAD ) \
 	  > $(DIST_NAME)-lime.tar
-	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-tre.tar $(DIST_NAME)-lime.tar
+	@# one archive per --concatenate: given two, GNU tar 1.35 appends only the
+	@# first, so the 4.4.0-4.5.1 release tarballs had no vendor/lime
+	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-tre.tar
+	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-lime.tar
 	rm -f $(DIST_NAME)-tre.tar $(DIST_NAME)-lime.tar
+	@for f in vendor/tre/configure.ac vendor/lime/lime.c; do \
+	    tar tf $(DIST_NAME).tar | grep -qx "$(DIST_NAME)/$$f" || \
+	        { echo "dist: $$f missing from $(DIST_NAME).tar" >&2; exit 1; }; \
+	done
 	gzip -f $(DIST_NAME).tar
 	@echo "    $(DIST_NAME).tar.gz ready"
 	@ls -la $(DIST_NAME).tar.gz
