@@ -141,9 +141,9 @@ auto-generated tarball.  When the tag reaches the GitHub mirror,
 [PGXN](https://pgxn.org/dist/pg_tre/) (account `gregburd`; the
 `PGXN_USERNAME`/`PGXN_PASSWORD` repository secrets).  Check that the run
 succeeded and that `https://api.pgxn.org/dist/pg_tre.json` lists the
-version.  `META.json` is bumped by `bump-version.sh`; PGXN rejects one
-whose `provides.pg_tre.file` does not exist, and its `prereqs` may only
-name PGXN or core extensions.
+version.  `bump-version.sh` bumps `META.json`, including
+`provides.pg_tre.file`; PGXN does not check that the file exists, and
+`prereqs` may only name PGXN or core extensions.
 
 ## Bumping to the Next Dev Version
 

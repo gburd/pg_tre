@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **The 4.4.0, 4.5.0 and 4.5.1 release tarballs did not build.**  `make
+  dist` appended both vendored submodules with one `tar --concatenate`,
+  and GNU tar 1.35 appends only the first, so `vendor/lime` was empty
+  ("No rule to make target 'vendor/lime/lime.c'").  Building from the git
+  tags was not affected.  `make dist` now appends them one at a time and
+  fails if either is missing.
+
+### Added
+
+- **pg_tre is on PGXN** (`pgxn install pg_tre`), from 4.5.1.  Each `v*`
+  tag on the GitHub mirror publishes the release
+  (`.github/workflows/pgxn-release.yml`).
+
 ## [4.5.1] - 2026-10-18 - Security: pg_tre_index_check pins its search_path
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.0 with
