@@ -461,8 +461,9 @@ dist:
 	  > $(DIST_NAME)-tre.tar
 	@ ( cd vendor/lime && git archive --format=tar --prefix=$(DIST_NAME)/vendor/lime/ HEAD ) \
 	  > $(DIST_NAME)-lime.tar
-	@# one archive per --concatenate: given two, GNU tar 1.35 appends only the
-	@# first, so the 4.4.0-4.5.1 release tarballs had no vendor/lime
+	@# one archive per --concatenate: given two, GNU tar 1.35 leaves an
+	@# end-of-archive marker between them, which hid vendor/lime from every
+	@# reader in the 1.8.2-4.5.1 release tarballs
 	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-tre.tar
 	tar --concatenate --file=$(DIST_NAME).tar $(DIST_NAME)-lime.tar
 	rm -f $(DIST_NAME)-tre.tar $(DIST_NAME)-lime.tar

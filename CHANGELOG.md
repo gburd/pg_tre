@@ -10,12 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **The 4.4.0, 4.5.0 and 4.5.1 release tarballs did not build.**  `make
-  dist` appended both vendored submodules with one `tar --concatenate`,
-  and GNU tar 1.35 appends only the first, so `vendor/lime` was empty
-  ("No rule to make target 'vendor/lime/lime.c'").  Building from the git
-  tags was not affected.  `make dist` now appends them one at a time and
-  fails if either is missing.
+- **No release tarball since 1.8.2 built.**  `make dist` appended both
+  vendored submodules with one `tar --concatenate`.  GNU tar 1.35 wrote
+  an end-of-archive marker between them, so `tar x`, PGXN and other
+  readers stopped after `vendor/tre` and `vendor/lime` came out empty
+  ("No rule to make target 'vendor/lime/lime.c'").  This affected every
+  tarball on the GitHub releases, 1.8.2 to 4.5.1; the git tags were fine.
+  `make dist` now appends one archive at a time and fails if
+  `vendor/tre/configure.ac` or `vendor/lime/lime.c` is missing.  The
+  release tarballs were rebuilt from their tags and replaced on
+  2026-10-18; each release's notes give the old and new SHA-256.
 
 ### Added
 
