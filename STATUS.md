@@ -1,6 +1,6 @@
 # pg_tre status
 
-Released: **4.5.1** (2026-10); in development: **4.5.2**.  See
+Released: **4.5.2** (2026-10).  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
 

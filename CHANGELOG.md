@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.5.2] - unreleased - (?n) line anchors; release tarballs build
+## [4.5.2] - 2026-10-23 - (?n) line anchors; release tarballs build
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.1 with
 `ALTER EXTENSION pg_tre UPDATE`.
