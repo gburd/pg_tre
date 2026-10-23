@@ -1,8 +1,13 @@
 # pg_tre status
 
-Released: **4.5.1** (2026-10).  See
+Released: **4.5.1** (2026-10); in development: **4.5.2**.  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.5.2 fixes `(?n)`: `^` and `$` now match at line boundaries and
+`[^...]` excludes a newline, as core's `~` does (TRE applied the option
+to `.` only).  The release tarballs build again (`make dist` had hidden
+`vendor/lime` since 1.8.2).  No on-disk change.
 
 4.5.1 is a security fix: `pg_tre_index_check()` (new in 4.5.0) ran
 with the caller's `search_path`, so a lookalike function in a schema

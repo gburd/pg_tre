@@ -378,3 +378,12 @@ letters (`Ⓐ`) fold the same way under `~*` and pg_tre on every provider
 and `Ⓐ`). What a character folds to is the ctype's: FreeBSD's libc maps
 `ǅ` to itself where glibc maps it to `ǆ`, and pg_tre follows whichever
 the database uses.
+
+### `(?n)` and newlines (fixed in 4.5.2)
+
+`(?n)` turns on newline-sensitive matching for the rest of the pattern
+or group, as for core `~`: `.` and `[^...]` do not match `\n`, `^`
+matches after a newline and `$` before one.  Before 4.5.2 only `.`
+followed it, so `(?n)^foo` never matched a line after the first.
+Without `(?n)` (pg_tre never compiles with REG_NEWLINE) `^` and `$`
+anchor the whole string and `.` matches `\n`, also as core `~` does.

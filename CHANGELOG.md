@@ -6,10 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## Unreleased
+## [4.5.2] - unreleased - (?n) line anchors; release tarballs build
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.5.1 with
+`ALTER EXTENSION pg_tre UPDATE`.
 
 ### Fixed
 
+- **`(?n)` did not make `^` and `$` match at line boundaries.**
+  `E'a\nfoo' %~~ tre_pattern('(?n)^foo', 0)` was false, as were
+  `'(?n)a$'` against `E'a\nfoo'` and `'(?n)foo$'` against `E'foo\n'`;
+  core's `~` says true for all three.  TRE applied an inline `(?n)` to
+  `.` only: its matchers decided `^` and `$` from the flags pg_tre
+  compiles with (`REG_EXTENDED`), which an inline option never reaches,
+  so a line-anchored pattern never matched after the first line.
+  `[^...]` also matched a newline under `(?n)`, where core's does not.
+  Present since 1.0.0, in `tre_amatch()`, `%~~` and the index recheck
+  alike, so index and sequential scans agreed on the wrong answer
+  (patterns with `(?...)` are not indexed; the recheck decides).  The
+  fix is TRE patch 6, `patches/tre-newline-assert.patch`: `^` and `$`
+  follow the `(?n)` state where they appear, and so does `[^...]`.
+  Patterns without `(?n)` match as before.  A randomized comparison with
+  core's `~` (182,800 string/pattern pairs) found 2,179 disagreements
+  on 4.5.1 and none now.  Reported from production.
 - **No release tarball since 1.8.2 built.**  `make dist` appended both
   vendored submodules with one `tar --concatenate`.  GNU tar 1.35 wrote
   an end-of-archive marker between them, so `tar x`, PGXN and other
