@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Fri, 23 Oct 2026 12:07:07 -0400
+Subject: [PATCH] Apply an inline (?n) to ^, $ and [^...], not only to .
+
+The (?n) option turns REG_NEWLINE on for the rest of the enclosing
+group, and the parser honoured it for "." alone.  The matchers decided
+^ and $ from tnfa->cflags, the flags given to regcomp(), which an
+inline option never reaches.  So (?n)^foo did not match "a\nfoo",
+(?n)a$ did not match "a\nfoo", and (?n)a[^x]f matched "a\nfoo"
+because a non-matching list still accepted a newline.  The TRE syntax
+manual says n "forces special handling of the new line character" as
+REG_NEWLINE does, which covers all four.
+
+Decide it where the option state is known.  The parser now emits
+ASSERT_AT_BOL_NL / ASSERT_AT_EOL_NL for ^ and $ while REG_NEWLINE is
+in effect, and the plain ASSERT_AT_BOL / ASSERT_AT_EOL (string anchors)
+otherwise; CHECK_ASSERTIONS no longer reads the global flag.  A
+negated bracket parsed under REG_NEWLINE also excludes '\n'.  The
+compile-time REG_NEWLINE flag works as before, since it is simply the
+REG_NEWLINE in effect from the start of the pattern, except that
+[^...] now excludes a newline under it too, as POSIX requires.
+
+The assertion-name table in tre_do_print() had 8 entries for 9 bits;
+it now names all 11.
+---
+ lib/tre-ast.c             |  3 ++-
+ lib/tre-internal.h        |  8 +++++---
+ lib/tre-match-approx.c    |  1 -
+ lib/tre-match-backtrack.c |  1 -
+ lib/tre-match-parallel.c  |  1 -
+ lib/tre-match-utils.h     | 10 +++++++---
+ lib/tre-parse.c           | 17 +++++++++++++++--
+ 7 files changed, 29 insertions(+), 12 deletions(-)
+
+diff --git a/lib/tre-ast.c b/lib/tre-ast.c
+index 5a4bb19..94a3c87 100644
+--- a/lib/tre-ast.c
++++ b/lib/tre-ast.c
+@@ -155,7 +155,8 @@ tre_do_print(FILE *stream, tre_ast_node_t *ast, int indent)
+ 	{
+ 	  int i;
+ 	  char *assertions[] = { "bol", "eol", "ctype", "!ctype",
+-				 "bow", "eow", "wb", "!wb" };
++				 "bow", "eow", "wb", "!wb", "backref",
++				 "bol_nl", "eol_nl" };
+ 	  if (code_max >= ASSERT_LAST << 1)
+ 	    assert(0);
+ 	  fprintf(stream, "assertions: ");
+diff --git a/lib/tre-internal.h b/lib/tre-internal.h
+index 01d4e6a..b949019 100644
+--- a/lib/tre-internal.h
++++ b/lib/tre-internal.h
+@@ -231,8 +231,8 @@ struct tnfa_transition {
+ 
+ 
+ /* Assertions. */
+-#define ASSERT_AT_BOL		  1   /* Beginning of line. */
+-#define ASSERT_AT_EOL		  2   /* End of line. */
++#define ASSERT_AT_BOL		  1   /* Beginning of string. */
++#define ASSERT_AT_EOL		  2   /* End of string. */
+ #define ASSERT_CHAR_CLASS	  4   /* Character class in `class'. */
+ #define ASSERT_CHAR_CLASS_NEG	  8   /* Character classes in `neg_classes'. */
+ #define ASSERT_AT_BOW		 16   /* Beginning of word. */
+@@ -240,7 +240,9 @@ struct tnfa_transition {
+ #define ASSERT_AT_WB		 64   /* Word boundary. */
+ #define ASSERT_AT_WB_NEG	128   /* Not a word boundary. */
+ #define ASSERT_BACKREF		256   /* A back reference in `backref'. */
+-#define ASSERT_LAST		256
++#define ASSERT_AT_BOL_NL	512   /* ^ under REG_NEWLINE: also after \n. */
++#define ASSERT_AT_EOL_NL       1024   /* $ under REG_NEWLINE: also before \n. */
++#define ASSERT_LAST	       1024
+ 
+ /* Tag directions. */
+ typedef enum {
+diff --git a/lib/tre-match-approx.c b/lib/tre-match-approx.c
+index b6f4768..8dd5c68 100644
+--- a/lib/tre-match-approx.c
++++ b/lib/tre-match-approx.c
+@@ -239,7 +239,6 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+   reg_errcode_t ret;
+   int reg_notbol = eflags & REG_NOTBOL;
+   int reg_noteol = eflags & REG_NOTEOL;
+-  int reg_newline = tnfa->cflags & REG_NEWLINE;
+   int str_user_end = 0;
+ 
+   int prev_pos;
+diff --git a/lib/tre-match-backtrack.c b/lib/tre-match-backtrack.c
+index f8b9736..240c725 100644
+--- a/lib/tre-match-backtrack.c
++++ b/lib/tre-match-backtrack.c
+@@ -221,7 +221,6 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
+ #endif /* TRE_WCHAR */
+   int reg_notbol = eflags & REG_NOTBOL;
+   int reg_noteol = eflags & REG_NOTEOL;
+-  int reg_newline = tnfa->cflags & REG_NEWLINE;
+   int str_user_end = 0;
+ 
+   /* These are used to remember the necessary values of the above
+diff --git a/lib/tre-match-parallel.c b/lib/tre-match-parallel.c
+index 69da1a8..1c73786 100644
+--- a/lib/tre-match-parallel.c
++++ b/lib/tre-match-parallel.c
+@@ -126,7 +126,6 @@ tre_tnfa_run_parallel(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+   reg_errcode_t ret;
+   int reg_notbol = eflags & REG_NOTBOL;
+   int reg_noteol = eflags & REG_NOTEOL;
+-  int reg_newline = tnfa->cflags & REG_NEWLINE;
+   int str_user_end = 0;
+ 
+   char *buf;
+diff --git a/lib/tre-match-utils.h b/lib/tre-match-utils.h
+index f23cdd3..2910e6c 100644
+--- a/lib/tre-match-utils.h
++++ b/lib/tre-match-utils.h
+@@ -142,11 +142,15 @@
+ 
+ #define CHECK_ASSERTIONS(assertions)					      \
+   (((assertions & ASSERT_AT_BOL)					      \
+-    && (pos > 0 || reg_notbol)						      \
+-    && (prev_c != L'\n' || !reg_newline))				      \
++    && (pos > 0 || reg_notbol))						      \
+    || ((assertions & ASSERT_AT_EOL)					      \
++       && (next_c != L'\0' || reg_noteol))				      \
++   || ((assertions & ASSERT_AT_BOL_NL)					      \
++       && (pos > 0 || reg_notbol)					      \
++       && prev_c != L'\n')						      \
++   || ((assertions & ASSERT_AT_EOL_NL)					      \
+        && (next_c != L'\0' || reg_noteol)				      \
+-       && (next_c != L'\n' || !reg_newline))				      \
++       && next_c != L'\n')						      \
+    || ((assertions & ASSERT_AT_BOW)					      \
+        && (IS_WORD_CHAR(prev_c) || !IS_WORD_CHAR(next_c)))	              \
+    || ((assertions & ASSERT_AT_EOW)					      \
+diff --git a/lib/tre-parse.c b/lib/tre-parse.c
+index fb76ed3..b06f8ce 100644
+--- a/lib/tre-parse.c
++++ b/lib/tre-parse.c
+@@ -471,6 +471,10 @@ tre_parse_bracket(tre_parse_ctx_t *ctx, tre_ast_node_t **result)
+   status = tre_parse_bracket_items(ctx, negate, neg_classes, &num_neg_classes,
+ 				   &items, &i, &max_i);
+ 
++  /* Under REG_NEWLINE a non-matching list does not match a newline. */
++  if (status == REG_OK && negate && (ctx->cflags & REG_NEWLINE))
++    status = tre_new_item(ctx->mem, L'\n', L'\n', &i, &max_i, &items);
++
+   if (status != REG_OK)
+     goto parse_bracket_done;
+ 
+@@ -1594,6 +1598,11 @@ tre_parse(tre_parse_ctx_t *ctx)
+ 	      break;
+ 
+ 	    case CHAR_CARET:	 /* beginning of line assertion */
++	      /* Whether ^ and $ also match at a newline is decided here,
++		 from the REG_NEWLINE in effect at this point of the
++		 pattern, so an inline (?n) or (?-n) applies to them as it
++		 does to . and [^...].  The matchers used to test the
++		 compile-time flags, which an inline (?n) never reaches. */
+ 	      /* '^' has a special meaning everywhere in EREs, and in the
+ 		 beginning of the RE and after \( is BREs. */
+ 	      if (ctx->cflags & REG_EXTENDED
+@@ -1605,7 +1614,9 @@ tre_parse(tre_parse_ctx_t *ctx)
+ 		  DPRINT(("tre_parse:	      BOL: '%.*" STRF "'\n",
+ 			  REST(ctx->re)));
+ 		  result = tre_ast_new_literal(ctx->mem, ASSERTION,
+-					       ASSERT_AT_BOL);
++					       (ctx->cflags & REG_NEWLINE)
++					       ? ASSERT_AT_BOL_NL
++					       : ASSERT_AT_BOL);
+ 		  if (result == NULL)
+ 		    return REG_ESPACE;
+ 		  ctx->re++;
+@@ -1626,7 +1637,9 @@ tre_parse(tre_parse_ctx_t *ctx)
+ 		  DPRINT(("tre_parse:	      EOL: '%.*" STRF "'\n",
+ 			  REST(ctx->re)));
+ 		  result = tre_ast_new_literal(ctx->mem, ASSERTION,
+-					       ASSERT_AT_EOL);
++					       (ctx->cflags & REG_NEWLINE)
++					       ? ASSERT_AT_EOL_NL
++					       : ASSERT_AT_EOL);
+ 		  if (result == NULL)
+ 		    return REG_ESPACE;
+ 		  ctx->re++;
+-- 
+2.54.0
+
