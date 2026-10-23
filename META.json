@@ -2,7 +2,7 @@
   "name": "pg_tre",
   "abstract": "Native PostgreSQL index access method for approximate regex matching",
   "description": "pg_tre adds a \"tre\" index access method for text columns. One index answers approximate-regex queries (TRE syntax, with an edit distance k of insertions, deletions and substitutions per pattern), POSIX regex (~, ~*), LIKE, ILIKE and equality, and ORDER BY edit distance. The index stores compressed trigram posting lists; a query's trigram formula selects candidate rows and the TRE matcher rechecks each one, so results are exact. Anchored and prefix patterns can be rejected early by a succinct range filter. Supports PostgreSQL 17, 18 and 19.",
-  "version": "4.5.1",
+  "version": "4.5.2-dev",
   "maintainer": "Greg Burd <greg@burd.me>",
   "license": "mit",
   "prereqs": {
@@ -15,9 +15,9 @@
   "provides": {
     "pg_tre": {
       "abstract": "Approximate regex index access method",
-      "file": "sql/pg_tre--4.5.1.sql",
+      "file": "sql/pg_tre--4.5.2-dev.sql",
       "docfile": "README.md",
-      "version": "4.5.1"
+      "version": "4.5.2-dev"
     }
   },
   "resources": {
