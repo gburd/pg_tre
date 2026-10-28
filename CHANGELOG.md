@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.5.3] - unreleased - Security: approximate matcher backend crash
+## [4.5.3] - 2026-10-28 - Security: approximate matcher backend crash
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.2 with
 `ALTER EXTENSION pg_tre UPDATE`.
