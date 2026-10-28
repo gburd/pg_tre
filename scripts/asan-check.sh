@@ -112,6 +112,8 @@ grep -q 'whether or not c is classified' vendor/tre/lib/tre-parse.c \
     || die "TRE icase-allcases patch not applied (patches/tre-icase-allcases.patch)"
 grep -q 'ASSERT_AT_BOL_NL' vendor/tre/lib/tre-parse.c \
     || die "TRE newline-assert patch not applied (patches/tre-newline-assert.patch)"
+grep -q 'static_ringbuffer' vendor/tre/lib/tre-match-approx.c \
+    || die "TRE approx-deque-grow patch not applied (patches/tre-approx-deque-grow.patch)"
 make -s PG_CONFIG=$PGB/pg_config install >/dev/null 2>&1 || die "pg_tre install failed"
 # Capture first: under pipefail, `nm | grep -q` fails with SIGPIPE on a match.
 syms=$(nm -D "$($PGB/pg_config --pkglibdir)/pg_tre.so")

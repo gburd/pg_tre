@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Wed, 28 Oct 2026 17:28:45 -0400
+Subject: [PATCH] approx: grow the delete-handling deque instead of overflowing
+ it
+
+tre_tnfa_run_approx() kept the delete-handling deque in a fixed
+512-pointer stack array (ringbuffer[512]).  The initial fill enqueued
+every state reachable at the current position without a bound check, so
+a pattern whose TNFA has more than 512 such states wrote past the array
+-- a stack-buffer-overflow.  The propagation loop wrapped the ring but
+only asserted it was not full, so with NDEBUG (pg_tre's build) a full
+ring silently overwrote live entries.  Reachable from tre_reganexec()
+with any approximate (k >= 1) match on an attacker-supplied pattern, so
+through pg_tre's %~~ / tre_amatch at edit distance >= 1 it crashed the
+backend for any user.
+
+Upstream laurikari/tre PR #156 (reported as issue #154): count the live
+entries and move the deque to the heap, doubling it, when the stack
+array would fill; free it at the end and on allocation failure; the ring
+order is preserved on growth so matching is unchanged.  Applied verbatim
+on top of the five existing TRE patches.
+
+Reported by 1820893135-pixel upstream; found here because pg_tre vendors
+TRE and exposes its approximate matcher to unprivileged SQL.
+---
+ lib/tre-match-approx.c | 63 ++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 51 insertions(+), 12 deletions(-)
+
+diff --git a/lib/tre-match-approx.c b/lib/tre-match-approx.c
+index 8dd5c68..128787a 100644
+--- a/lib/tre-match-approx.c
++++ b/lib/tre-match-approx.c
+@@ -587,10 +587,43 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 	 pretending that all transitions are epsilon transitions, until
+ 	 no more states can be reached with better costs. */
+       {
+-	/* XXX - dynamic ringbuffer size */
+-	tre_tnfa_approx_reach_t *ringbuffer[512];
++	/* The deque starts on the stack and moves to the heap when the
++	   number of states reachable at one position needs more room. */
++	tre_tnfa_approx_reach_t *static_ringbuffer[512];
++	tre_tnfa_approx_reach_t **ringbuffer = static_ringbuffer;
++	size_t ringbuffer_size = sizeof(static_ringbuffer)
++	  / sizeof(static_ringbuffer[0]);
++	size_t deque_len = 0;
+ 	tre_tnfa_approx_reach_t **deque_start, **deque_end;
+ 
++#define DEQUE_ADD(p)							\
++	do {								\
++	  if (deque_len + 1 >= ringbuffer_size)				\
++	    {								\
++	      size_t i, off = (size_t)(deque_start - ringbuffer);	\
++	      tre_tnfa_approx_reach_t **larger;				\
++	      larger = xmalloc(sizeof(*larger) * ringbuffer_size * 2);	\
++	      if (larger == NULL)					\
++		{							\
++		  if (ringbuffer != static_ringbuffer)			\
++		    xfree(ringbuffer);					\
++		  goto approx_oom;					\
++		}							\
++	      for (i = 0; i < deque_len; i++)				\
++		larger[i] = ringbuffer[(off + i) % ringbuffer_size];	\
++	      if (ringbuffer != static_ringbuffer)			\
++		xfree(ringbuffer);					\
++	      ringbuffer = larger;					\
++	      ringbuffer_size *= 2;					\
++	      deque_start = ringbuffer;					\
++	      deque_end = ringbuffer + deque_len;			\
++	    }								\
++	  *deque_end++ = (p);						\
++	  deque_len++;							\
++	  if (deque_end >= ringbuffer + ringbuffer_size)		\
++	    deque_end = ringbuffer;					\
++	} while (0)
++
+ 	deque_start = deque_end = ringbuffer;
+ 
+ 	/* Add all states in `reach_next' to the deque. */
+@@ -598,9 +631,7 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 	  {
+ 	    if (reach_next[id].pos != pos)
+ 	      continue;
+-	    *deque_end = &reach_next[id];
+-	    deque_end++;
+-	    assert(deque_end != deque_start);
++	    DEQUE_ADD(&reach_next[id]);
+ 	  }
+ 
+ 	/* Repeat until the deque is empty. */
+@@ -632,7 +663,8 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 		/* Too many errors or cost too large. */
+ 		DPRINT(("  delete: from %03d: cost too large\n", id));
+ 		deque_start++;
+-		if (deque_start >= (ringbuffer + 512))
++		deque_len--;
++		if (deque_start >= ringbuffer + ringbuffer_size)
+ 		  deque_start = ringbuffer;
+ 		continue;
+ 	      }
+@@ -728,17 +760,17 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+ 		  }
+ 
+ 		/* Add to the end of the deque. */
+-		*deque_end = &reach_next[dest_id];
+-		deque_end++;
+-		if (deque_end >= (ringbuffer + 512))
+-		  deque_end = ringbuffer;
+-		assert(deque_end != deque_start);
++		DEQUE_ADD(&reach_next[dest_id]);
+ 	      }
+ 	    deque_start++;
+-	    if (deque_start >= (ringbuffer + 512))
++	    deque_len--;
++	    if (deque_start >= ringbuffer + ringbuffer_size)
+ 	      deque_start = ringbuffer;
+ 	  }
+ 
++	if (ringbuffer != static_ringbuffer)
++	  xfree(ringbuffer);
++#undef DEQUE_ADD
+       }
+ 
+ #ifdef TRE_DEBUG
+@@ -955,4 +987,11 @@ tre_tnfa_run_approx(const tre_tnfa_t *tnfa, const void *string, ssize_t len,
+     xfree(buf);
+ #endif /* !TRE_USE_ALLOCA */
+   return ret;
++
++approx_oom:
++#ifndef TRE_USE_ALLOCA
++  if (buf)
++    xfree(buf);
++#endif /* !TRE_USE_ALLOCA */
++  return REG_ESPACE;
+ }
+-- 
+2.54.0
+
