@@ -1,8 +1,12 @@
 # pg_tre status
 
-Released: **4.5.2** (2026-10).  See
+Released: **4.5.2** (2026-10); in development: **4.5.3**.  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.5.3 is a security fix: an approximate (`k >= 1`) match on a pattern
+with more than 512 NFA states reachable at one position crashed the
+backend (a DoS any user could trigger).  No on-disk change.
 
 4.5.2 fixes `(?n)`: `^` and `$` now match at line boundaries and
 `[^...]` excludes a newline, as core's `~` does (TRE applied the option

@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.5.3] - unreleased - Security: approximate matcher backend crash
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.5.2 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Security
+
+- **An approximate match on a many-state pattern crashed the backend.**
+  TRE's approximate matcher (`tre_tnfa_run_approx()`) held its
+  delete-handling work list in a fixed 512-pointer stack array and
+  filled it with no bound check, so a pattern whose NFA had more than
+  512 states reachable at one input position wrote past the array and
+  segfaulted the backend; with asserts off (the shipped build) a full
+  ring also silently overwrote live entries.  `tre_amatch()` and `%~~`
+  at edit distance >= 1 run this matcher, and the opclass functions are
+  `PUBLIC`, so any user could crash the server, e.g.
+  `SELECT tre_amatch('aaaa', repeat('a|', 599) || 'a', 1);`.  A crash of
+  one backend restarts the whole cluster, so this is a denial of
+  service, reachable by anyone who can run a query.  Present since TRE
+  was first vendored (every release).  Fixed by TRE patch 7,
+  `patches/tre-approx-deque-grow.patch` (upstream laurikari/tre PR #156,
+  reported as issue #154): the work list grows onto the heap, preserving
+  order, instead of overflowing.  `pg_tre.max_nfa_states` (default
+  10000) still bounds the pattern, so the growth is bounded, not
+  unbounded.  Found while triaging upstream TRE issues after 4.5.2.
+
 ## [4.5.2] - 2026-10-23 - (?n) line anchors; release tarballs build
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.1 with
