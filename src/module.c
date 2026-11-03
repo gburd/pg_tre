@@ -452,7 +452,7 @@ pg_tre_match_guarded(void *compiled, Oid collation,
                      const char *str, int str_len,
                      int max_cost, int cost_ins, int cost_del,
                      int cost_subst, int max_ins, int max_del,
-                     int max_subst, int max_err)
+                     int max_subst, int max_err, bool want_offsets)
 {
     TreMatchResult result;
 
@@ -475,7 +475,7 @@ pg_tre_match_guarded(void *compiled, Oid collation,
     {
         result = tre_do_match(compiled, str, str_len,
                               max_cost, cost_ins, cost_del, cost_subst,
-                              max_ins, max_del, max_subst, max_err);
+                              max_ins, max_del, max_subst, max_err, want_offsets);
     }
     PG_FINALLY();
     {
@@ -993,7 +993,7 @@ pg_tre_amatch(PG_FUNCTION_ARGS)
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
 
     PG_RETURN_BOOL(result.matched != 0);
 }
@@ -1017,7 +1017,7 @@ pg_tre_amatch_cost(PG_FUNCTION_ARGS)
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
 
     if (!result.matched)
         PG_RETURN_NULL();
@@ -1047,7 +1047,7 @@ pg_tre_amatch_with_costs(PG_FUNCTION_ARGS)
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, cost_ins, cost_del, cost_subst,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
 
     PG_RETURN_BOOL(result.matched != 0);
 }
@@ -1099,7 +1099,7 @@ pg_tre_amatch_detail(PG_FUNCTION_ARGS)
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, true);
 
     if (result.matched)
     {
@@ -1147,7 +1147,7 @@ tre_compute_similarity(Oid collation, const char *input, int input_len,
     compiled = tre_cache_lookup(pattern, pattern_len, collation);
     result = pg_tre_match_guarded(compiled, collation, input, input_len,
                           max_cost, 1, 1, 1,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, true);
 
     if (!result.matched)
         return 0.0;
@@ -1210,7 +1210,7 @@ pg_tre_distance(PG_FUNCTION_ARGS)
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
 
     if (!result.matched)
         PG_RETURN_NULL();
@@ -1273,7 +1273,7 @@ pg_tre_distance_pattern(PG_FUNCTION_ARGS)
                           VARDATA_ANY(input),
                           VARSIZE_ANY_EXHDR(input),
                           max_cost, 1, 1, 1,
-                          INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                          INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
 
     if (!result.matched)
         PG_RETURN_NULL();

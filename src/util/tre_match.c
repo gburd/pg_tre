@@ -158,7 +158,7 @@ TreMatchResult
 tre_do_match(void *compiled, const char *str, int str_len,
              int max_cost, int cost_ins, int cost_del,
              int cost_subst, int max_ins, int max_del,
-             int max_subst, int max_err)
+             int max_subst, int max_err, int want_offsets)
 {
     regex_t        *preg = (regex_t *) compiled;
     regaparams_t    params;
@@ -200,7 +200,20 @@ tre_do_match(void *compiled, const char *str, int str_len,
     }
 
     memset(&amatch, 0, sizeof(amatch));
-    amatch.nmatch = 1;
+    /*
+     * Early-exit: a boolean/cost recheck (want_offsets == false) does not
+     * need the submatch offsets.  At k=0 the exact matcher (tre_match, via
+     * tre_match_approx's fast path) then runs tagless and BREAKS at the
+     * first match instead of scanning for the leftmost-longest one -- a
+     * win on large rows, where a boolean %~~ recheck otherwise scans the
+     * whole multi-MB value after the match is already decided.
+     *
+     * Keep nmatch = 1 when offsets are wanted (tre_amatch_detail), and at
+     * k > 0 regardless: the approximate matcher must scan the whole string
+     * to find the minimum-cost match, so stopping early would report a
+     * wrong cost.
+     */
+    amatch.nmatch = (!want_offsets && max_cost == 0) ? 0 : 1;
     amatch.pmatch = &pmatch;
 
     /*
@@ -234,8 +247,19 @@ tre_do_match(void *compiled, const char *str, int str_len,
         result.num_ins     = amatch.num_ins;
         result.num_del     = amatch.num_del;
         result.num_subst   = amatch.num_subst;
-        result.match_start = (int) pmatch.rm_so;
-        result.match_end   = (int) pmatch.rm_eo;
+        /* pmatch is filled only when nmatch > 0; otherwise we asked for no
+         * offsets (boolean/cost recheck at k=0).  Leave them -1 so a stale
+         * read is obvious; no such caller reads them. */
+        if (amatch.nmatch > 0)
+        {
+            result.match_start = (int) pmatch.rm_so;
+            result.match_end   = (int) pmatch.rm_eo;
+        }
+        else
+        {
+            result.match_start = -1;
+            result.match_end   = -1;
+        }
     }
 
     return result;

@@ -1568,7 +1568,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     r = tre_do_match(compiled,
                                      VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
                                      max_cost, cost_ins, cost_del, cost_subst,
-                                     INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                                     INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
                     pg_tre_check_match_timeout(&r);
                     if (!r.matched)
                         continue;       /* NULLS LAST: drop no-match rows */
@@ -1674,7 +1674,7 @@ knn_build(IndexScanDesc scan, TreScanState *st)
                     r = tre_do_match(compiled,
                                      VARDATA_ANY(body), VARSIZE_ANY_EXHDR(body),
                                      max_cost, cost_ins, cost_del, cost_subst,
-                                     INT_MAX, INT_MAX, INT_MAX, INT_MAX);
+                                     INT_MAX, INT_MAX, INT_MAX, INT_MAX, false);
                     ReleaseBuffer(buf);
 
                     pg_tre_check_match_timeout(&r);

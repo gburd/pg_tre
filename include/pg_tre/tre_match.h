@@ -86,7 +86,7 @@ int tre_pattern_num_states(void *compiled);
 TreMatchResult tre_do_match(void *compiled, const char *str, int str_len,
                             int max_cost, int cost_ins, int cost_del,
                             int cost_subst, int max_ins, int max_del,
-                            int max_subst, int max_err);
+                            int max_subst, int max_err, int want_offsets);
 
 /* Return a human-readable error message for a TRE error code. */
 const char *tre_errmsg(int errcode);
