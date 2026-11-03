@@ -6,6 +6,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.0] - unreleased - Fewer recheck candidates; faster sparsemap
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.5.3 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Changed
+
+- **The trigram extractor is tighter, so queries hand far fewer
+  candidate rows to the recheck** (issue #2).  Two cases that used to
+  extract fewer trigrams than the pattern forces:
+  - **Fixed-count repetitions.**  A repetition's child was inlined at
+    most twice, so `su{3}` (= `suuu`) extracted only the trigram `suu`
+    and lost `uuu`.  A fixed count of a literal is now inlined up to four
+    times, so every forced trigram is required.  On a 400k-row
+    EXPLAIN-plan corpus `plan %~~ 'su{3}'` went from 3315 candidate rows
+    to 320 (the rows that actually hold both trigrams).
+  - **Character classes.**  A single run with class positions was
+    extracted as a loose conjunction (AND of per-position alternatives),
+    which accepts combinations no matching string needs.  When the run
+    expands to at most 64 concrete strings it is now extracted as the
+    exact disjunction (OR of each string's trigram set).
+    `plan %~~ 'aa[bc]c[b-d]'` went from 1026 candidates to 465.
+
+  Both are sound (they never drop a matching row) and need no REINDEX:
+  extraction is a query-time decision.  Patterns that already extracted
+  tightly are unaffected.  A query whose matches are genuinely large
+  rows stays costly, because confirming those matches still reads the
+  rows; this only removes candidates that were never going to match.
+
+- **Vendored sparsemap updated to 5.8.4** (from 5.8.3): a read-cursor
+  speedup (it no longer re-walks the gap before the cached chunk on
+  every lookup) and an out-of-bounds read fix in `__sm_remove_data`.
+
 ## [4.5.3] - 2026-10-28 - Security: approximate matcher backend crash
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.2 with

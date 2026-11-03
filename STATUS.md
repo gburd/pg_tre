@@ -1,8 +1,15 @@
 # pg_tre status
 
-Released: **4.5.3** (2026-10).  See
+Released: **4.5.3** (2026-10); in development: **4.6.0**.  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.6.0 tightens trigram extraction so queries hand fewer candidate rows
+to the recheck: a fixed-count repetition contributes every trigram it
+forces (`su{3}` extracted only one of two before), and a single
+character-class run is extracted as the exact disjunction instead of a
+loose conjunction.  It also vendors sparsemap 5.8.4 (a read-cursor
+speedup and an out-of-bounds read fix).  No on-disk change, no REINDEX.
 
 4.5.3 is a security fix: an approximate (`k >= 1`) match on a pattern
 with more than 512 NFA states reachable at one position crashed the

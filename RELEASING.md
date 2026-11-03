@@ -220,6 +220,7 @@ restart:
 | 4.5.0   | 4.5.1   | ✅ Yes       | No on-disk change, no REINDEX either way. Security fix: `pg_tre_index_check()` pins its `search_path` (4.5.0's could run lookalike functions from a schema on the caller's path) |
 | 4.5.1   | 4.5.2   | ✅ Yes       | No on-disk change, no REINDEX either way. `(?n)` makes `^`/`$` match at line boundaries and `[^...]` exclude `\n`, as core's `~` does (results of `(?n)` patterns change) |
 | 4.5.2   | 4.5.3   | ✅ Yes       | No on-disk change, no REINDEX either way. Security fix: an approximate (`k >= 1`) match on a >512-state pattern crashed the backend (DoS, any user); no behaviour change for patterns that did not crash |
+| 4.5.3   | 4.6.0   | ✅ Yes       | No on-disk change, no REINDEX either way. Tighter trigram extraction (fixed repetitions, character-class DNF) cuts recheck candidates; sparsemap 5.8.4. Same results, fewer rows examined |
 
 When releasing a version with breaking changes:
 
