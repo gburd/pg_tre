@@ -1,8 +1,14 @@
 # pg_tre status
 
-Released: **4.6.0** (2026-11).  See
+Released: **4.6.1** (2026-11).  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.6.1 makes the exact-match recheck stop at the first match instead of
+scanning each candidate for the leftmost-longest one, since a boolean or
+edit-distance query never reads the match offsets.  On a corpus of
+multi-kilobyte rows this trims recheck time by about 6-7%; results are
+identical.  No on-disk change, no REINDEX.
 
 4.6.0 tightens trigram extraction so queries hand fewer candidate rows
 to the recheck: a fixed-count repetition contributes every trigram it

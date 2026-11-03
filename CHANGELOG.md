@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.1] - 2026-11-03 - Faster exact-match recheck
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.6.0 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Changed
+
+- **The exact-match recheck stops at the first match instead of scanning
+  for the leftmost-longest one.**  A boolean `%~~` / `tre_amatch` recheck
+  and the `ORDER BY` edit-distance scan read only whether a row matches
+  and its edit cost, never the match offsets.  At edit distance 0 the
+  matcher can therefore run tagless and break as soon as it finds a
+  match, rather than scanning the whole value to locate the longest one.
+  On a 400k-row corpus of multi-kilobyte `EXPLAIN` plans this trimmed
+  recheck time by about 6-7%; the result set is identical.  The win is
+  modest because the dominant cost of such a query is reading and
+  decompressing the large candidate rows, not matcher CPU.
+
+  `tre_amatch_detail()`, which does return the match offsets, is
+  unaffected and still reports the leftmost-longest match.  Edit distance
+  >= 1 is unaffected: the approximate matcher must scan the whole value
+  to find the minimum-cost match.
+
 ## [4.6.0] - 2026-11-03 - Fewer recheck candidates; faster sparsemap
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.3 with
