@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.6.0] - unreleased - Fewer recheck candidates; faster sparsemap
+## [4.6.0] - 2026-11-03 - Fewer recheck candidates; faster sparsemap
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.5.3 with
 `ALTER EXTENSION pg_tre UPDATE`.
