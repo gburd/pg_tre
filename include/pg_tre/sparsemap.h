@@ -350,10 +350,10 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "5.8.3"
+#define SM_VERSION_STRING "5.8.4"
 #define SM_VERSION_MAJOR  5
 #define SM_VERSION_MINOR  8
-#define SM_VERSION_PATCH  3
+#define SM_VERSION_PATCH  4
 
 /** Handle to a sparsemap instance.
  *
@@ -457,7 +457,8 @@ struct SM_ALIGNED(8) sparsemap {
  *
  * A cursor caches the most-recently-located chunk so a SEQUENCE of
  * monotonically NON-DECREASING idx lookups on an UNMUTATED map resumes
- * the chunk walk from there instead of from chunk 0, turning an
+ * the chunk walk from there (or, for an idx in the gap before it, from
+ * its left neighbour) instead of from chunk 0, turning an
  * otherwise O(N^2) scan into O(N).  Only sm_contains(), sm_next_member(),
  * and sm_prev_member() accept one.
  *
