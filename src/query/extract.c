@@ -93,6 +93,14 @@ typedef struct TrigramAccum
 /* Alternatives per trigram window, and OR-groups per pattern. */
 #define OR_ALTS_MAX       64
 #define OR_GROUPS_MAX     64
+/* Copies of a fixed-count repetition child inlined into the literal run.
+ * Covers {2}..{4} fully for a one-character child; bounds the run for
+ * larger fixed counts.  See REGEX_AST_REP in lin_append_node. */
+#define REP_INLINE_MAX    4
+/* Maximum number of concrete strings a single classful run may expand to
+ * for exact-pieces (DNF) emission.  aa[bc]c[b-d] is 6.  Above this the
+ * run stays CNF (per-window OR-groups), which is looser but bounded. */
+#define RUN_PIECES_MAX    64
 
 static void
 accum_init(TrigramAccum *a, MemoryContext cxt)
@@ -327,6 +335,120 @@ run_flush(LinCtx *lc)
     lc->flushes++;
 }
 
+/*
+ * Is this AST node a fixed-length, flush-free literal shape -- a literal
+ * or a concat of literals?  Only these are safe to inline more than twice
+ * for a fixed-count repetition: every copy adds the same number of
+ * contiguous run positions and nothing inside breaks the run, so a trigram
+ * window spanning copies is genuinely required.  Anything with a class,
+ * alternation, ANY, or a nested repetition can change length or flush the
+ * run between copies and is handled by the conservative two-copy path.
+ */
+static bool
+rep_child_is_fixed_literal(const RegexAst *ast)
+{
+    if (ast == NULL)
+        return false;
+    switch (ast->kind)
+    {
+        case REGEX_AST_LITERAL:
+            return true;
+        case REGEX_AST_CONCAT:
+            return rep_child_is_fixed_literal(ast->u.concat.left) &&
+                   rep_child_is_fixed_literal(ast->u.concat.right);
+        default:
+            return false;
+    }
+}
+
+/*
+ * Exact-pieces (DNF) emission for a single contiguous run.
+ *
+ * The default k=0 path emits CNF: each trigram window becomes an AND
+ * conjunct, and a window over class positions becomes an OR-group of the
+ * window's codepoint combinations.  CNF is sound but loose for a run with
+ * several class positions: 'aa[bc]c[b-d]' becomes {aab,aac} AND {abc,acc}
+ * AND {bcb..ccd}, which accepts cross-window combinations no single
+ * matching string needs (measured: 1026 candidates vs 465 that hold all
+ * trigrams of one concrete string -- issue #2).
+ *
+ * When the whole pattern is ONE contiguous run (no run break -- no ANY,
+ * alternation, min=0 repetition, or opaque byte) and it expands to at most
+ * RUN_PIECES_MAX concrete strings, we can do better: enumerate the
+ * strings, and for each emit the AND of its own contiguous trigrams as one
+ * PIECES-mode piece.  A row matches iff it holds every trigram of at least
+ * one string, which is exactly the DNF the pattern requires -- tighter
+ * than CNF and still sound (every piece's trigrams are genuinely required
+ * of that string).
+ *
+ * Returns true and fills *out in PIECES mode on success; false to leave
+ * the caller on the CNF path (run too short, no class position so CNF is
+ * already exact, or the product exceeds the cap).
+ */
+static bool
+try_build_run_pieces(const LinCtx *lc, int32 max_cost,
+                     TrigramQuery *out, MemoryContext cxt)
+{
+    long        prod = 1;
+    bool        has_class = false;
+    int         i, nwin, p;
+    int        *digit;      /* mixed-radix counter over run positions */
+    MemoryContext old;
+
+    if (lc->run_n < 3)
+        return false;       /* no trigram window */
+
+    for (i = 0; i < lc->run_n; i++)
+    {
+        if (lc->run[i].n > 1)
+            has_class = true;
+        prod *= lc->run[i].n;
+        if (prod > RUN_PIECES_MAX)
+            return false;   /* too many concrete strings; stay CNF */
+    }
+    if (!has_class)
+        return false;       /* a pure literal run: CNF is already exact */
+
+    nwin = lc->run_n - 2;   /* trigrams per concrete string */
+    old = MemoryContextSwitchTo(cxt);
+
+    out->global_max_cost = max_cost;
+    out->min_match_len   = 3;
+    out->always_true     = false;
+    out->mode            = TRIGRAM_QUERY_PIECES;
+    out->n               = (int32) prod;
+    out->conjuncts       = palloc((Size) prod * sizeof(TrigramConjunct));
+
+    digit = palloc0(lc->run_n * sizeof(int));
+    for (p = 0; p < prod; p++)
+    {
+        TrigramConjunct *piece = &out->conjuncts[p];
+        int              w;
+
+        piece->n    = nwin;
+        piece->alts = palloc((Size) nwin * sizeof(TrigramDisjunct));
+        for (w = 0; w < nwin; w++)
+        {
+            int32 t[3] = { lc->run[w].cp[digit[w]],
+                           lc->run[w + 1].cp[digit[w + 1]],
+                           lc->run[w + 2].cp[digit[w + 2]] };
+            piece->alts[w].trigram_hash = pg_tre_hash_trigram_cp(t);
+            piece->alts[w].min_offset = 0;
+            piece->alts[w].max_offset = INT32_MAX;
+        }
+        /* increment the mixed-radix counter (least-significant = pos 0) */
+        for (i = 0; i < lc->run_n; i++)
+        {
+            if (++digit[i] < lc->run[i].n)
+                break;
+            digit[i] = 0;
+        }
+    }
+
+    MemoryContextSwitchTo(old);
+    return true;
+}
+
 static void
 lin_append_node(LinCtx *lc, const RegexAst *ast)
 {
@@ -433,9 +555,33 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
             }
             else
             {
-                /* Guaranteed at least one occurrence -- inline the
-                 * child m times (capped at 2 to keep the run bounded). */
-                int k = (m > 2) ? 2 : m;
+                /*
+                 * Guaranteed at least one occurrence.  Inline the child a
+                 * bounded number of times so the literal run carries every
+                 * trigram the repetition forces.
+                 *
+                 * For a FIXED count (max_rep == min_rep) the child occurs
+                 * exactly m times in a row, so inlining up to REP_INLINE_MAX
+                 * copies keeps the run contiguous and every emitted trigram
+                 * is genuinely required.  Two copies were not enough: 'su{3}'
+                 * inlined 'u' twice gave the run [s,u,u] and emitted only
+                 * "suu", losing "uuu", so the index handed ~10x too many
+                 * candidates to the recheck (issue #2).  Four copies cover a
+                 * one-character child up to {4} fully and bound the run for
+                 * larger counts (the windows inside the first REP_INLINE_MAX
+                 * copies are still all required).
+                 *
+                 * For a VARIABLE count (max_rep != min_rep, e.g. b+, b{1,3})
+                 * keep inlining at most two copies and, when a single
+                 * one-character copy was inlined, end the run after it: a
+                 * trigram must not span from before the repetition through a
+                 * copy that may repeat, or 'ab+c' would demand "abc" and drop
+                 * "abbc".
+                 */
+                int k = (ast->u.rep.max_rep == m &&
+                         rep_child_is_fixed_literal(ast->u.rep.child))
+                        ? (m > REP_INLINE_MAX ? REP_INLINE_MAX : m)
+                        : (m > 2 ? 2 : m);
                 int i;
                 int before = lc->run_n;
                 int flushes = lc->flushes;
@@ -443,15 +589,6 @@ lin_append_node(LinCtx *lc, const RegexAst *ast)
                 for (i = 0; i < k; i++)
                     lin_append_node(lc, ast->u.rep.child);
 
-                /*
-                 * A single inlined copy that put just one character in
-                 * the run lets a trigram span from before the repetition
-                 * to after it -- 'ab+c' demanded "abc", and the index
-                 * dropped rows holding only "abbc".  When more copies may
-                 * follow, end the run there.  Two inlined copies, or one
-                 * of two or more characters, keep every window inside the
-                 * first or last copy, which is sound.
-                 */
                 if (ast->u.rep.max_rep != m && k == 1 &&
                     lc->flushes == flushes && lc->run_n - before <= 1)
                     run_flush(lc);
@@ -655,6 +792,33 @@ regex_extract_query(TreParseCtx *ctx, int32 max_cost, TrigramQuery *out)
     lc.run_cap = 0;
 
     lin_append_node(&lc, ctx->root);
+
+    /*
+     * If the whole pattern linearized to one contiguous run (no break),
+     * try the tighter exact-pieces (DNF) emission for a classful run
+     * before falling back to CNF.  lc.flushes == 0 means no ANY / alt /
+     * min=0 rep / opaque byte split the run, so lc.run[0..run_n) is the
+     * entire required substring and PIECES is sound.
+     */
+    if (lc.flushes == 0 && !acc.overflowed &&
+        try_build_run_pieces(&lc, max_cost, out, ctx->mcxt))
+    {
+        /* Same anchored-prefix SuRF range the CNF path records: a
+         * piece-able run may still begin with >= 3 leading literals
+         * (e.g. 'abc[de]f'), and the range is a sound hard requirement. */
+        if (max_cost == 0 && !out->always_true)
+        {
+            uint64 lo, hi;
+
+            if (extract_anchored_prefix_key(ctx->root, &lo, &hi))
+            {
+                out->has_surf_range = true;
+                out->surf_lo = lo;
+                out->surf_hi = hi;
+            }
+        }
+        return true;
+    }
 
     /* Flush any residual literal run. */
     run_emit(&lc, &acc);

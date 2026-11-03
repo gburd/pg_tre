@@ -1,0 +1,98 @@
+-- test/sql/class_dnf.sql
+--
+-- A single contiguous run with character-class positions is extracted as
+-- exact PIECES (DNF): one piece per concrete string, each the AND of its
+-- own trigrams, OR-ed across strings.  The default CNF (per-window
+-- OR-groups AND-ed) is sound but accepts cross-window combinations no
+-- single matching string needs, so it hands the recheck more candidates.
+--
+-- 'aa[bc]c[b-d]' expands to 6 strings (aabcb aabcc aabcd aaccb aaccc
+-- aaccd); CNF gave {aab,aac} AND {abc,acc} AND {6 trigrams}; PIECES gives
+-- the OR of 6 three-trigram ANDs (measured on a 400k EXPLAIN-plan corpus:
+-- 1026 CNF candidates vs 465 that hold all trigrams of one string).
+-- Issue #2.
+CREATE EXTENSION IF NOT EXISTS pg_tre;
+psql:test/sql/class_dnf.sql:15: NOTICE:  extension "pg_tre" already exists, skipping
+CREATE EXTENSION
+\set VERBOSITY terse
+SET client_min_messages = warning;
+SET
+-- Classful single runs take PIECES mode with one piece per concrete string.
+SELECT split_part(tre_extract_debug('aa[bc]c[b-d]'), E'\n', 1) AS line1;  -- k=0 mode=PIECES
+      line1      
+-----------------
+ k=0 mode=PIECES
+(1 row)
+
+SELECT tre_extract_debug('aa[bc]c[b-d]') LIKE '%PIECES%' AS is_pieces,
+       (SELECT count(*) FROM regexp_matches(tre_extract_debug('aa[bc]c[b-d]'),
+               'Piece ', 'g')) AS piece_count;
+ is_pieces | piece_count 
+-----------+-------------
+ t         |           6
+(1 row)
+
+-- A pure-literal run stays CNF (nothing to gain from PIECES).
+SELECT tre_extract_debug('abcdef') LIKE '%CNF%' AS literal_run_is_cnf;
+ literal_run_is_cnf 
+--------------------
+ t
+(1 row)
+
+-- A run broken by ANY/alt does NOT become one PIECES set (flush > 0):
+-- falls back to CNF, still sound.
+SELECT tre_extract_debug('ab.[cd]e') LIKE '%CNF%' AS broken_run_is_cnf;
+ broken_run_is_cnf 
+-------------------
+ t
+(1 row)
+
+-- A large class product exceeds the cap and stays CNF.
+SELECT tre_extract_debug('[a-z][a-z][a-z][a-z]') NOT LIKE '%PIECES%' AS big_product_stays_cnf;
+ big_product_stays_cnf 
+-----------------------
+ t
+(1 row)
+
+-- Correctness: the PIECES extraction must agree with a sequential scan.
+DROP TABLE IF EXISTS cdt;
+DROP TABLE
+CREATE TABLE cdt (id int, s text);
+CREATE TABLE
+INSERT INTO cdt VALUES
+  (1,'xaabcbx'), (2,'yaaccdy'), (3,'aabccz'),         -- true matches
+  (4,'aab...acc...bcd'), (5,'has aab and acc and ccb apart'),  -- CNF false positives
+  (6,'nothing here'), (7,'aaccc');
+INSERT 0 7
+INSERT INTO cdt SELECT g, 'filler '||g||' aa bc cb' FROM generate_series(100,600) g;
+INSERT 0 501
+CREATE INDEX cdt_tre ON cdt USING tre (s);
+CREATE INDEX
+ANALYZE cdt;
+ANALYZE
+CREATE FUNCTION cdt_agree(pat text) RETURNS boolean LANGUAGE plpgsql AS $$
+DECLARE a int[]; b int[];
+BEGIN
+  PERFORM set_config('enable_seqscan','off',true);
+  PERFORM set_config('enable_bitmapscan','on',true);
+  PERFORM set_config('enable_indexscan','off',true);
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM cdt WHERE s %~~ tre_pattern($1,0)' INTO a USING pat;
+  PERFORM set_config('enable_seqscan','on',true);
+  PERFORM set_config('enable_bitmapscan','off',true);
+  EXECUTE 'SELECT array_agg(id ORDER BY id) FROM cdt WHERE tre_amatch(s,$1,0)' INTO b USING pat;
+  RETURN a IS NOT DISTINCT FROM b;
+END $$;
+CREATE FUNCTION
+SELECT bool_and(cdt_agree(p)) AS all_class_patterns_agree
+FROM (VALUES
+  ('aa[bc]c[b-d]'), ('a[bc]c'), ('[ab][cd][ef]'), ('x[0-9]z'),
+  ('ab.[cd]e'), ('[a-z][a-z][a-z][a-z]'), ('abc[de]f')) v(p);
+ all_class_patterns_agree 
+--------------------------
+ t
+(1 row)
+
+DROP TABLE cdt;
+DROP TABLE
+DROP FUNCTION cdt_agree(text);
+DROP FUNCTION

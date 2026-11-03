@@ -98,7 +98,7 @@ SELECT p, k, split_part(tre_extract_debug(p, k), E'\n', 1) AS mode,
                ('développement', 2), ('mysql', 1)) v(p, k);
           p          | k |      mode       | filtered 
 ---------------------+---+-----------------+----------
- aa[bc]c[b-d]        | 0 | k=0 mode=CNF    | t
+ aa[bc]c[b-d]        | 0 | k=0 mode=PIECES | t
  (?<=e.)aa[bc]c[b-d] | 0 | k=0 mode=CNF    | t
  postgresql          | 1 | k=1 mode=PIECES | t
  quick brown fox     | 3 | k=3 mode=PIECES | t
