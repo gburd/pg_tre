@@ -1,8 +1,14 @@
 # pg_tre status
 
-Released: **4.6.1** (2026-11).  See
+Released: **4.6.2** (2026-11).  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.6.2 vendors sparsemap 5.8.5, a correctness fix to the read-cursor
+speedup picked up in 4.6.0: a cursor carried across a mutation could
+start its walk mid-chunk and answer wrong.  pg_tre uses the cursor
+correctly, but the fix hardens the exact lookup paths it runs on every
+candidate scan.  No on-disk change, no REINDEX.
 
 4.6.1 makes the exact-match recheck stop at the first match instead of
 scanning each candidate for the leftmost-longest one, since a boolean or

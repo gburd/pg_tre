@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.2] - 2026-11-05 - sparsemap read-cursor correctness fix
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.6.1 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Fixed
+
+- **Vendored sparsemap updated to 5.8.5** (from 5.8.4): a correctness
+  fix to the read-cursor speedup this extension picked up in 4.6.0.
+  5.8.4 let a lookup in the gap before the cursor's cached chunk resume
+  from a hint that nothing proved was a chunk start, so a cursor carried
+  across a mutation could start its walk mid-chunk and answer wrong
+  (`sm_contains()` returning false for a member that is present);
+  `sm_next_member()` resumed from its cached offset without checking it
+  at all.  Both now validate the cached offset before trusting it, as
+  5.8.3 did, while keeping the 5.8.4 speedup.  Reported by pg_fts, found
+  with a CBMC proof and reproduced natively.  No API, ABI, or
+  wire-format change: serialized output is byte-identical to 5.8.4, so
+  no REINDEX.  pg_tre threads a read cursor through its posting-list,
+  pending-list and SuRF scans (`sm_next_member` with a fresh cursor on an
+  unmutated map), so it uses the cursor the correct way; this fix hardens
+  the exact lookup paths pg_tre runs on every candidate scan.
+
 ## [4.6.1] - 2026-11-03 - Faster exact-match recheck
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.6.0 with
