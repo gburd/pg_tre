@@ -350,10 +350,10 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "5.8.4"
+#define SM_VERSION_STRING "5.8.5"
 #define SM_VERSION_MAJOR  5
 #define SM_VERSION_MINOR  8
-#define SM_VERSION_PATCH  4
+#define SM_VERSION_PATCH  5
 
 /** Handle to a sparsemap instance.
  *
@@ -455,21 +455,26 @@ struct SM_ALIGNED(8) sparsemap {
 
 /** @brief Caller-owned read cursor for accelerated sequential lookups.
  *
- * A cursor caches the most-recently-located chunk so a SEQUENCE of
+ * A cursor caches a recently-located chunk so a SEQUENCE of
  * monotonically NON-DECREASING idx lookups on an UNMUTATED map resumes
- * the chunk walk from there (or, for an idx in the gap before it, from
- * its left neighbour) instead of from chunk 0, turning an
- * otherwise O(N^2) scan into O(N).  Only sm_contains(), sm_next_member(),
- * and sm_prev_member() accept one.
+ * the chunk walk from there instead of from chunk 0, turning an
+ * otherwise O(N^2) scan into O(N).  A lookup that falls in the gap
+ * before a chunk caches that chunk's left neighbour, so the next lookup
+ * in the same gap still resumes.  sm_contains() and sm_next_member()
+ * use the cursor; sm_prev_member() accepts one but ignores it.
  *
  * Contract:
  *   - Initialize with `sm_cursor_t c = SM_CURSOR_INIT;` before the loop.
  *   - Pass `&c` to consecutive lookups with non-decreasing idx.
  *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
  *     sm_set_data_size / sm_clear / sm_split / the *_inplace ops / ...)
- *     between two cursor uses invalidates the cursor.  Using a stale
- *     cursor afterwards is undefined behavior; reset it with
- *     SM_CURSOR_INIT.
+ *     between two cursor uses invalidates the cursor; reset it with
+ *     SM_CURSOR_INIT.  The library checks that the word at the cached
+ *     offset still holds the cached start, which catches a chunk that
+ *     moved, but a payload word can hold the same value: a stale cursor
+ *     can give a WRONG answer, not just a slower one.  The exception is
+ *     sm_add_grow_cursor(), which keeps its cursor valid across its own
+ *     inserts.
  *   - Do not share one cursor across a mutation or across maps.
  *   - Passing NULL means "no acceleration" (walk from chunk 0); always
  *     safe.
@@ -478,9 +483,9 @@ typedef struct sm_cursor {
 	size_t offset;      /* byte offset of cached chunk; SIZE_MAX = invalid */
 	uint64_t start_idx; /* cached chunk's start bit */
 	size_t prev_offset; /* byte offset of the chunk immediately BEFORE
-	                     * `offset`, or SIZE_MAX; a free left-neighbor
-	                     * hint captured during the forward walk and used
-	                     * to skip a head-walk in the coalescing path */
+	                     * `offset`, or SIZE_MAX; a left-neighbour hint
+	                     * for the coalescing path, which checks it before
+	                     * use.  Lookups never resume from it. */
 } sm_cursor_t;
 #define SM_CURSOR_INIT { (size_t)-1, 0, (size_t)-1 }
 

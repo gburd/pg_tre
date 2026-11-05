@@ -2248,10 +2248,17 @@ __sm_get_size_impl(const sm_t *map)
  * map with N chunks this is O(N) per lookup, so a sequence of N
  * ascending lookups is O(N^2).  When the caller threads a cursor
  * (see sm_cursor_t) the walk resumes from the most-recently-located
- * chunk whenever the new idx is at or after that chunk's start, or
- * from its left neighbour when idx falls in the gap before it,
- * making an ascending sequence O(N) overall.  Passing NULL (every
- * mutator does) walks from chunk 0.
+ * chunk whenever the new idx is at or after that chunk's start,
+ * making an ascending sequence O(N) overall.  A lookup that falls in
+ * the gap before a chunk caches that chunk's left neighbour instead
+ * (see the end of the walk), so the next ascending lookup in the same
+ * gap still resumes.  Passing NULL (every mutator does) walks from
+ * chunk 0.
+ *
+ * The walk starts only at chunk 0 or at cur->offset, and only after
+ * the start index stored at cur->offset matches cur->start_idx.
+ * cur->prev_offset is never a walk start: it is a hint for the
+ * coalescing path, which validates it before use.
  *
  * The cursor is caller-owned and purely an in-memory speedup; the
  * on-disk format is unchanged.  ANY mutation of the map invalidates
@@ -2279,6 +2286,9 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	 * during the forward walk and handed back to the caller so the
 	 * coalescing path can find the left neighbor without a head-walk. */
 	size_t prev_off = SIZE_MAX;
+	/* The chunk before prev_off, when the walk itself passed it (else
+	 * SIZE_MAX): recorded when a gap lookup caches prev_off. */
+	size_t prev2_off = SIZE_MAX;
 
 	if (count == 0) {
 		return (-1);
@@ -2290,51 +2300,28 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	/*
 	 * Cursor fast-path.  If the caller passed a valid cursor whose
 	 * cached chunk starts at or before idx, resume the walk from the
-	 * cached byte offset instead of from the head; if idx precedes it,
-	 * from its left neighbour (below).  Otherwise walk from chunk 0.
-	 * We never index chunks by ordinal here, so a relocated buffer is
-	 * fine as long as the offset is still in range.
+	 * cached byte offset instead of from the head.  Otherwise walk from
+	 * chunk 0.  We never index chunks by ordinal here, so a relocated
+	 * buffer is fine as long as the offset is still in range.
 	 */
 	if (cur != NULL && cur->offset != SIZE_MAX &&
-	    cur->offset + sizeof(__sm_idx_t) <= stream_end) {
-		/* Self-validate the cached offset before trusting it: a prior
-		 * mutation (a chunk shrinking to RLE, a leftward coalesce, a
-		 * separate) can shift or remove the cached chunk without the
-		 * caller resetting.  If the chunk now at the cached offset no
-		 * longer starts where we recorded, the cursor is stale -- walk
-		 * from the head instead. */
+	    cur->offset + sizeof(__sm_idx_t) <= stream_end &&
+	    idx >= cur->start_idx) {
+		/* Check the cached offset before trusting it: a prior mutation
+		 * (a chunk shrinking to RLE, a leftward coalesce, a separate)
+		 * can shift or remove the cached chunk without the caller
+		 * resetting.  If the word at the cached offset is not the start
+		 * we recorded, the cursor is stale -- walk from the head.  This
+		 * catches a shifted chunk, not every stale cursor: payload words
+		 * can equal the recorded start.  Reset a cursor after mutating
+		 * the map (sm_cursor_t). */
 		const __sm_idx_t at = __sm_load_idx(base + cur->offset);
-		if (at == cur->start_idx && idx >= cur->start_idx) {
+		if (at == cur->start_idx) {
 			p = base + cur->offset;
 			/* A resume that lands in this same chunk (no loop
 			 * advance below) must still carry the left-neighbor
 			 * hint the caller cached, or it would be lost. */
 			prev_off = cur->prev_offset;
-		} else if (at == cur->start_idx &&
-		    cur->prev_offset != SIZE_MAX &&
-		    cur->offset >= SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) &&
-		    cur->prev_offset <= cur->offset - SM_SIZEOF_OVERHEAD -
-		    sizeof(__sm_bitvec_t)) {
-			/* idx precedes the cached chunk.  A lookup that falls in
-			 * the gap BEFORE a chunk caches that chunk (the walk
-			 * stops at the first chunk ending after idx), so for a
-			 * sparse map nearly every ascending lookup lands here --
-			 * a scan testing live ids against sparse deletions
-			 * head-walked the whole chunk list per lookup (found by
-			 * pg_fts).  Resume from the cached chunk's left
-			 * neighbour instead, when idx is at or after its start
-			 * and it really is the neighbour (it ends exactly where
-			 * the cached chunk begins).  Its own neighbour is
-			 * unknown: prev_off stays SIZE_MAX, which only costs
-			 * the coalescing path a head-walk. */
-			uint8_t *pp = base + cur->prev_offset;
-			__sm_chunk_t pc;
-			__sm_chunk_init(&pc, pp + SM_SIZEOF_OVERHEAD);
-			if (idx >= __sm_load_idx(pp) &&
-			    cur->prev_offset + SM_SIZEOF_OVERHEAD +
-			    __sm_chunk_get_size(&pc) == cur->offset) {
-				p = pp;
-			}
 		}
 	}
 
@@ -2350,14 +2337,33 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (idx >= s + __sm_chunk_get_capacity(&chunk) &&
 		    next_off < stream_end) {
+			prev2_off = prev_off;
 			prev_off = (size_t)(p - base);
 			p = base + next_off;
 			continue;
 		}
 		if (cur != NULL) {
-			cur->offset = (size_t)(p - base);
-			cur->start_idx = s;
-			cur->prev_offset = prev_off;
+			if (idx < s && prev_off != SIZE_MAX) {
+				/* idx is in the gap before this chunk.  Caching
+				 * this chunk would make the next ascending lookup
+				 * in the same gap (idx < its start) walk from the
+				 * head: O(lookups x chunks) over a sparse map (found
+				 * by pg_fts).  Cache the left neighbour, which this
+				 * walk just stepped over, so that lookup resumes
+				 * there and steps once.  Its own neighbour is
+				 * prev2_off when the walk passed it, else unknown.
+				 * The return value is unchanged.  (5.8.4 instead
+				 * resumed from cur->prev_offset, which nothing
+				 * verified was a chunk start.) */
+				cur->offset = prev_off;
+				cur->start_idx =
+				    __sm_load_idx(base + prev_off);
+				cur->prev_offset = prev2_off;
+			} else {
+				cur->offset = (size_t)(p - base);
+				cur->start_idx = s;
+				cur->prev_offset = prev_off;
+			}
 		}
 		return (p - base);
 	}
@@ -5188,8 +5194,11 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	 * located chunk keeps its position; every path below that inserts,
 	 * separates, or shifts chunk layout at/before `offset` resets it to
 	 * SIZE_MAX so a stale hint is never produced.  A SIZE_MAX hint just
-	 * makes __sm_coalesce_chunk fall back to a head-walk. */
-	left_hint = (cur != NULL) ? cur->prev_offset : SIZE_MAX;
+	 * makes __sm_coalesce_chunk fall back to a head-walk.  A gap lookup
+	 * leaves the cursor on the left neighbour instead of the returned
+	 * chunk; its prev_offset is then not this chunk's neighbour. */
+	left_hint = (cur != NULL && cur->offset == offset) ?
+	    cur->prev_offset : SIZE_MAX;
 
 	if ((ssize_t)offset == -1) {
 		/*
@@ -7663,11 +7672,16 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		 * is the dominant scan-side hot path.  Without a cursor each
 		 * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
 		 * Resume from the cached chunk when prev_idx is not earlier than
-		 * that chunk's start.
+		 * that chunk's start, after checking that the word at the cached
+		 * offset is the start we recorded, as __sm_get_chunk_offset does.
+		 * Through 5.8.4 this resumed unchecked, so a cursor left at a
+		 * shifted offset walked from the middle of a chunk.
 		 */
 		if (prev_idx != SM_IDX_MAX && cur != NULL &&
-		    cur->offset != SIZE_MAX && cur->offset < stream_end &&
-		    cur->start_idx <= prev_idx) {
+		    cur->offset != SIZE_MAX &&
+		    cur->offset + sizeof(__sm_idx_t) <= stream_end &&
+		    cur->start_idx <= prev_idx &&
+		    __sm_load_idx(base + cur->offset) == cur->start_idx) {
 			p = base + cur->offset;
 		}
 
