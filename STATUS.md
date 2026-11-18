@@ -1,8 +1,15 @@
 # pg_tre status
 
-Released: **4.6.2** (2026-11).  See
+Released: **4.6.3** (2026-11).  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.6.3 vendors sparsemap 5.9.0, a correctness and performance release: it
+fixes data-loss and wrong-answer bugs in 5.8.5 (RLE-run corruption on
+removal, over-long runs, the top of the universe) that reach the
+`sm_remove` and vacuum paths pg_tre runs, and speeds up contains, next
+and rank/select.  No wire-format change, byte-identical serialization,
+no REINDEX.
 
 4.6.2 vendors sparsemap 5.8.5, a correctness fix to the read-cursor
 speedup picked up in 4.6.0: a cursor carried across a mutation could

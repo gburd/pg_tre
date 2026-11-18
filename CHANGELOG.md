@@ -6,6 +6,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.3] - 2026-11-18 - sparsemap 5.9.0 (correctness and performance)
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.6.2 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Fixed
+
+- **Vendored sparsemap updated to 5.9.0** (from 5.8.5): a correctness
+  and performance release that fixes a batch of data-loss and
+  wrong-answer bugs present in 5.8.5, found by a review against the sucds
+  and vers-vecs crates, a differential fuzz campaign of about 2.5 billion
+  checks against a sorted-interval oracle, and the CBMC cursor proofs.
+  The ones in paths pg_tre runs:
+  - Removing a chunk's last member next to an RLE run corrupted the run
+    (it cleared the following run's last 2048 bits and resurrected the
+    removed bits), with cardinality and `sm_validate` still passing.
+    Reached through `sm_remove` and the inline vacuum repack.
+  - RLE runs of 2^31 bits or more were truncated to their low 31 bits.
+  - A chunk or run ending at 2^64 computed its end as 0, losing members
+    across set operations and misplacing `sm_add_range` output.
+  - `sm_split` could leave an empty chunk; `sm_validate` now rejects one
+    and readers drop it from older streams.
+
+  No wire-format change (still version 2); serialized output is
+  byte-identical to 5.8.5 for every map 5.8.5 encoded correctly, so no
+  REINDEX.  `sizeof(struct sparsemap)` and `sizeof(sm_cursor_t)` are
+  unchanged.  5.9.0 also speeds up `sm_contains`, `sm_next_member` and
+  the rank/select operations, and adds APIs (a two-level locator, batch
+  rank/select, a frozen Elias-Fano form) that pg_tre does not yet use.
+
 ## [4.6.2] - 2026-11-05 - sparsemap read-cursor correctness fix
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.6.1 with

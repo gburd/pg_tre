@@ -223,6 +223,7 @@ restart:
 | 4.5.3   | 4.6.0   | ✅ Yes       | No on-disk change, no REINDEX either way. Tighter trigram extraction (fixed repetitions, character-class DNF) cuts recheck candidates; sparsemap 5.8.4. Same results, fewer rows examined |
 | 4.6.0   | 4.6.1   | ✅ Yes       | No on-disk change, no REINDEX either way. The exact-match recheck stops at the first match (~6-7% faster on large rows); identical results |
 | 4.6.1   | 4.6.2   | ✅ Yes       | No on-disk change, no REINDEX either way. sparsemap 5.8.5: a read-cursor correctness fix (a cursor carried across a mutation could answer wrong). Byte-identical serialization |
+| 4.6.2   | 4.6.3   | ✅ Yes       | No on-disk change, no REINDEX either way. sparsemap 5.9.0: fixes data-loss and wrong-answer bugs in the remove / RLE / set-operation paths, plus faster contains and rank/select. Byte-identical serialization |
 
 When releasing a version with breaking changes:
 
