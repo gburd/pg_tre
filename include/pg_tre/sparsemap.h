@@ -62,6 +62,17 @@
  * chunks, each tagged with a 4-byte starting offset.  The map grows and
  * shrinks the underlying byte buffer as chunks are added or removed.
  *
+ * ## The member universe
+ *
+ * A member is any index in [0, 2^64 - 1), that is 0 through 2^64 - 2.
+ * Index 2^64 - 1 is `SM_IDX_MAX`, the "not found" value every lookup
+ * returns, so it is never a member: sm_add() and the other adders reject
+ * it with `errno` = `EINVAL`, the bulk builders reject an input that
+ * holds it, sm_contains() is false for it, and sm_validate() (and so
+ * sm_open(), sm_open_copy() and sm_deserialize()) rejects a buffer that
+ * sets it.  Every run therefore ends at or below 2^64 - 1 exclusive, and
+ * a half-open range [lo, hi) with hi <= UINT64_MAX covers only members.
+ *
  * ## Encoding transitions
  *
  * - A sparse chunk whose vectors are all ones (2048 consecutive set bits)
@@ -251,7 +262,9 @@ typedef SSIZE_T ssize_t;
 #define sm_t                 SM__P(sm_t)
 #define sm_allocator_t       SM__P(sm_allocator_t)
 #define sm_cursor_t          SM__P(sm_cursor_t)
+#define sm_frozen_t          SM__P(sm_frozen_t)
 #define sm_membership_t      SM__P(sm_membership_t)
+#define sm_op_t              SM__P(sm_op_t)
 #define sm_stats_t           SM__P(sm_stats_t)
 #define sm_subset_relation_t SM__P(sm_subset_relation_t)
 
@@ -286,6 +299,18 @@ typedef SSIZE_T ssize_t;
 #define sm_fill_factor              SM__P(sm_fill_factor)
 #define sm_flip_range               SM__P(sm_flip_range)
 #define sm_free                     SM__P(sm_free)
+#define sm_freeze                   SM__P(sm_freeze)
+#define sm_frozen_cardinality       SM__P(sm_frozen_cardinality)
+#define sm_frozen_contains          SM__P(sm_frozen_contains)
+#define sm_frozen_deserialize       SM__P(sm_frozen_deserialize)
+#define sm_frozen_free              SM__P(sm_frozen_free)
+#define sm_frozen_next_member       SM__P(sm_frozen_next_member)
+#define sm_frozen_prev_member       SM__P(sm_frozen_prev_member)
+#define sm_frozen_rank              SM__P(sm_frozen_rank)
+#define sm_frozen_select            SM__P(sm_frozen_select)
+#define sm_frozen_serialize         SM__P(sm_frozen_serialize)
+#define sm_frozen_serialized_size   SM__P(sm_frozen_serialized_size)
+#define sm_frozen_size              SM__P(sm_frozen_size)
 #define sm_get_capacity             SM__P(sm_get_capacity)
 #define sm_get_data                 SM__P(sm_get_data)
 #define sm_get_size                 SM__P(sm_get_size)
@@ -301,6 +326,8 @@ typedef SSIZE_T ssize_t;
 #define sm_locator_build            SM__P(sm_locator_build)
 #define sm_locator_contains         SM__P(sm_locator_contains)
 #define sm_locator_free             SM__P(sm_locator_free)
+#define sm_locator_next_member      SM__P(sm_locator_next_member)
+#define sm_locator_prev_member      SM__P(sm_locator_prev_member)
 #define sm_locator_rank             SM__P(sm_locator_rank)
 #define sm_locator_select           SM__P(sm_locator_select)
 #define sm_locator_t                SM__P(sm_locator_t)
@@ -309,6 +336,7 @@ typedef SSIZE_T ssize_t;
 #define sm_membership               SM__P(sm_membership)
 #define sm_minimum                  SM__P(sm_minimum)
 #define sm_next_member              SM__P(sm_next_member)
+#define sm_next_member_op           SM__P(sm_next_member_op)
 #define sm_nonempty_difference      SM__P(sm_nonempty_difference)
 #define sm_offset                   SM__P(sm_offset)
 #define sm_open                     SM__P(sm_open)
@@ -320,10 +348,13 @@ typedef SSIZE_T ssize_t;
 #define sm_pop_last                 SM__P(sm_pop_last)
 #define sm_prev_member              SM__P(sm_prev_member)
 #define sm_rank                     SM__P(sm_rank)
+#define sm_rank_many                SM__P(sm_rank_many)
 #define sm_remove                   SM__P(sm_remove)
 #define sm_remove_range             SM__P(sm_remove_range)
 #define sm_scan                     SM__P(sm_scan)
+#define sm_scan_op                  SM__P(sm_scan_op)
 #define sm_select                   SM__P(sm_select)
+#define sm_select_many              SM__P(sm_select_many)
 #define sm_serialize                SM__P(sm_serialize)
 #define sm_serialized_size          SM__P(sm_serialized_size)
 #define sm_set_allocator            SM__P(sm_set_allocator)
@@ -334,6 +365,7 @@ typedef SSIZE_T ssize_t;
 #define sm_split                    SM__P(sm_split)
 #define sm_statistics               SM__P(sm_statistics)
 #define sm_subset_compare           SM__P(sm_subset_compare)
+#define sm_thaw                     SM__P(sm_thaw)
 #define sm_to_array                 SM__P(sm_to_array)
 #define sm_union                    SM__P(sm_union)
 #define sm_union_cardinality        SM__P(sm_union_cardinality)
@@ -350,10 +382,10 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "5.8.5"
+#define SM_VERSION_STRING "5.9.0"
 #define SM_VERSION_MAJOR  5
-#define SM_VERSION_MINOR  8
-#define SM_VERSION_PATCH  5
+#define SM_VERSION_MINOR  9
+#define SM_VERSION_PATCH  0
 
 /** Handle to a sparsemap instance.
  *
@@ -461,11 +493,14 @@ struct SM_ALIGNED(8) sparsemap {
  * otherwise O(N^2) scan into O(N).  A lookup that falls in the gap
  * before a chunk caches that chunk's left neighbour, so the next lookup
  * in the same gap still resumes.  sm_contains() and sm_next_member()
- * use the cursor; sm_prev_member() accepts one but ignores it.
+ * use the cursor for ascending lookups; sm_prev_member() uses it for a
+ * descending scan (see its documentation for what that saves).
  *
  * Contract:
  *   - Initialize with `sm_cursor_t c = SM_CURSOR_INIT;` before the loop.
- *   - Pass `&c` to consecutive lookups with non-decreasing idx.
+ *   - Pass `&c` to consecutive lookups with non-decreasing idx (or, for
+ *     sm_prev_member(), non-increasing idx).  Out-of-order lookups are
+ *     still correct, only slower.
  *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
  *     sm_set_data_size / sm_clear / sm_split / the *_inplace ops / ...)
  *     between two cursor uses invalidates the cursor; reset it with
@@ -516,40 +551,66 @@ typedef struct sm_cursor_cached {
 } sm_cursor_cached_t;
 #define SM_CURSOR_CACHED_INIT { {0}, {0}, {0}, 0, 0 }
 
-/** @brief Transient two-level sqrt(n) directory over a map's chunks.
+/** @brief Transient two-level directory over a map's chunks.
  *
  * A locator is a caller-owned, read-only acceleration index built once
- * over an UNMUTATED map with sm_locator_build().  It samples every
- * stride-th chunk (stride ~= sqrt(chunk count)) into a superblock
- * directory, so contains / rank / select run in O(sqrt n) instead of
- * O(n) chunks.  Nothing here is serialized and sm_t is unchanged.
+ * over an UNMUTATED map with sm_locator_build().  It records where every
+ * chunk starts, its byte offset, and how many set bits precede it, in two
+ * levels: an absolute record per 16 chunks and a packed 8-byte delta
+ * record per chunk, about 10 bytes per chunk in all.  contains / rank /
+ * select / next / prev then run in O(log chunks) instead of O(chunks).
+ * Nothing here is serialized and sm_t is unchanged.
  *
  * Contract:
  *   - Build with sm_locator_build(map); free with sm_locator_free().
- *   - ANY mutation of the map invalidates the locator: REBUILD it.
- *   - A stale locator still returns CORRECT results (it detects the
- *     mismatch and falls back to the plain O(n) sm_contains / sm_rank /
- *     sm_select path) but loses the speedup.
- *   - rank/select for value == false fall back to the plain path
- *     (correct, not accelerated); the sqrt speedup is for value==true.
+ *     The locator keeps a pointer to the map and reads its buffer, so
+ *     the map must outlive it.
+ *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
+ *     sm_add_range / sm_set_data_size / sm_clear / sm_split / the
+ *     *_inplace ops / ...) invalidates the locator: REBUILD it.  A
+ *     stale locator gives unspecified answers, possibly WRONG ones, not
+ *     merely slow ones.
+ *   - Each query first compares a cheap fingerprint of the map (the
+ *     data pointer, the used size, the chunk count, the first and last
+ *     chunk starts, and the cardinality cache when it was populated at
+ *     build time) with the one recorded at build time.  A mismatch
+ *     means the map's shape changed, and the query falls back to the
+ *     plain sm_contains / sm_rank / sm_select / sm_next_member /
+ *     sm_prev_member path on the live map.  This catches a mutation
+ *     that inserts, removes, or moves a chunk, but not one that flips a
+ *     bit inside an existing chunk without moving any bytes: sm_t has
+ *     no change counter, so that case cannot be detected in O(1).  Do
+ *     not rely on the fallback.
  *
  * The struct layout is exposed only so the type name resolves; treat
  * it as opaque and use it only through the sm_locator_* functions.
  */
 typedef struct sm_locator {
 	const sm_t *map;      /* the map this locator indexes */
+	const uint8_t *data;  /* map->m_data at build (fingerprint) */
+	size_t used;          /* map->m_data_used at build (fingerprint) */
+	size_t card_plus1;    /* map's cardinality cache at build, or 0 */
 	size_t count;         /* chunk count at build time */
 	uint64_t first_start; /* first chunk start (staleness fingerprint) */
 	uint64_t last_start;  /* last chunk start (staleness fingerprint) */
 	size_t last_offset;   /* base-relative offset of the last chunk */
-	size_t stride;        /* chunks per superblock (~sqrt(count)) */
-	size_t n_sb;          /* number of superblock entries */
-	uint64_t *sb_start;   /* [n_sb] start index of each stride-th chunk */
-	size_t *sb_offset;    /* [n_sb] base-relative byte offset of it */
-	size_t *sb_prefix;    /* [n_sb] cumulative SET bits BEFORE it */
+	uint64_t total;       /* set bits in the whole map */
+	bool small;           /* map was in small-set mode (no directory) */
+	size_t n_grp;         /* groups of 16 chunks */
+	uint64_t *g_start;    /* [n_grp] start of each group's first chunk */
+	uint64_t *g_set;      /* [n_grp] set bits before it */
+	size_t *g_offset;     /* [n_grp] its base-relative byte offset */
+	size_t *g_wide;       /* [n_grp] slot in w_*, or SIZE_MAX */
+	uint64_t *c_rel;      /* [count] packed per-chunk deltas */
+	size_t n_wide;        /* groups stored in w_start / w_set */
+	uint64_t *w_start;    /* [16 n_wide] absolute starts, wide groups */
+	uint64_t *w_set;      /* [16 n_wide] absolute set prefixes */
 } sm_locator_t;
 
-/** Sentinel value returned when a lookup finds no matching bit. */
+/** Sentinel value returned when a lookup finds no matching bit.
+ *
+ * Also the one index that is not a member: the member universe is
+ * [0, SM_IDX_MAX), see "The member universe" above. */
 #define SM_IDX_MAX UINT64_MAX
 
 /** Evaluates to true when \a x represents a valid (found) index. */
@@ -814,7 +875,8 @@ void *sm_get_data(const sm_t *map);
  * @param[in] idx  0-based bit position.
  * @param[in] cur  Optional read cursor for sequential acceleration, or
  *                 NULL.  See sm_cursor_t.
- * @returns true if bit \a idx is 1, false if 0 or out of range.
+ * @returns true if bit \a idx is 1, false if 0 or out of range.  Always
+ *          false for SM_IDX_MAX, which is not a member.
  */
 bool sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur);
 
@@ -853,7 +915,9 @@ bool sm_contains_cached(const sm_t *map, uint64_t idx,
  * @param[in,out] map    The sparsemap to modify.
  * @param[in]     idx    0-based bit position.
  * @param[in]     value  true to set, false to clear.
- * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
+ * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC, or
+ *          with errno=EINVAL when \a value is true and \a idx is
+ *          SM_IDX_MAX (not a member; the map is unchanged).
  *
  * Example:
  * @code
@@ -879,8 +943,10 @@ uint64_t sm_assign(sm_t *map, uint64_t idx, bool value);
  * construction.
  *
  * @param[in,out] map  The sparsemap to modify.
- * @param[in]     idx  0-based bit position to set.
- * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
+ * @param[in]     idx  0-based bit position to set, below SM_IDX_MAX.
+ * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC, or with
+ *          errno=EINVAL when \a idx is SM_IDX_MAX (not a member; the map
+ *          is unchanged).
  *
  * Example:
  * @code
@@ -908,12 +974,15 @@ uint64_t sm_add(sm_t *map, uint64_t idx);
  *
  * On ENOSPC, doubles the buffer (with a 4 KiB floor) and retries.
  * If the grow succeeds but the retry still ENOSPCs, returns
- * SM_IDX_MAX and leaves *map valid (and possibly grown).
+ * SM_IDX_MAX and leaves *map valid (and possibly grown).  Any other
+ * failure is returned without growing: \a idx == SM_IDX_MAX gives
+ * SM_IDX_MAX with errno=EINVAL and leaves the map unchanged.
  *
  * @param[in,out] map  Pointer to the map pointer.  Updated to the
  *                     possibly-relocated map after a grow.
- * @param[in]     idx  Bit to set.
- * @returns idx on success, or SM_IDX_MAX on allocation failure.
+ * @param[in]     idx  Bit to set, below SM_IDX_MAX.
+ * @returns idx on success, or SM_IDX_MAX on allocation failure or
+ *          EINVAL.
  */
 uint64_t sm_add_grow(sm_t **map, uint64_t idx);
 
@@ -936,7 +1005,8 @@ uint64_t sm_add_grow(sm_t **map, uint64_t idx);
  * @param[in,out] cur  Caller-owned cursor (SM_CURSOR_INIT before the
  *                     first call).  May be NULL to opt out of the
  *                     acceleration.
- * @returns idx on success, or SM_IDX_MAX on allocation failure.
+ * @returns idx on success, or SM_IDX_MAX on allocation failure, or with
+ *          errno=EINVAL (no grow) when \a idx is SM_IDX_MAX.
  */
 uint64_t sm_add_grow_cursor(sm_t **map, uint64_t idx, sm_cursor_t *cur);
 
@@ -951,7 +1021,9 @@ uint64_t sm_add_grow_cursor(sm_t **map, uint64_t idx, sm_cursor_t *cur);
  *
  * @param[in,out] map  The sparsemap to modify.
  * @param[in]     idx  0-based bit position to clear.
- * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
+ * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.  For
+ *          \a idx == SM_IDX_MAX, which is never a member, the map is
+ *          unchanged and the result is SM_IDX_MAX with errno=EINVAL.
  */
 uint64_t sm_remove(sm_t *map, uint64_t idx);
 
@@ -1016,13 +1088,26 @@ size_t sm_rank(sm_t *map, uint64_t x, uint64_t y, bool value);
  * select(map, 0, true) returns the index of the first set bit.
  * select(map, 2, false) returns the index of the third unset bit.
  *
- * For RLE chunks this is O(1); for sparse chunks it scans bit vectors.
+ * Both values are selected over the universe [0, 2^64 - 1), that is
+ * every position except SM_IDX_MAX itself, which is the "not found"
+ * return.  For value == true the answer is the n'th member.  For
+ * value == false it is the n'th position that is not a member,
+ * counting the unset bits before the first chunk, inside chunks,
+ * between chunks, and after the last chunk; so select0 is defined for
+ * every n below 2^64 - 1 - cardinality, and sm_select(map, n, false)
+ * equals n plus the number of members <= the answer.  The identity
+ * sm_select(map, sm_rank(map, 0, x - 1, false), false) == x holds for
+ * every unset x > 0 (and select0(0) is the first unset bit).
  *
- * @param[in] map    The sparsemap to query.
+ * O(chunks): whole chunks are skipped by their population count; only
+ * the chunk holding the answer is scanned, one 64-bit word at a time.
+ * A small-set map (every member below 1024) is answered from its words.
+ *
+ * @param[in] map    The sparsemap to query (NULL is the empty map).
  * @param[in] n      Number of matching bits to skip (0 = first match).
  * @param[in] value  true to find set bits, false to find unset bits.
  * @returns 0-based index of the matching bit, or SM_IDX_MAX if
- *          fewer than n+1 matching bits exist.
+ *          fewer than n+1 matching bits exist in [0, 2^64 - 1).
  *
  * Example:
  * @code
@@ -1031,6 +1116,52 @@ size_t sm_rank(sm_t *map, uint64_t x, uint64_t y, bool value);
  * @endcode
  */
 uint64_t sm_select(sm_t *map, uint64_t n, bool value);
+
+/** @brief Count set bits below many positions in one sweep (batched).
+ *
+ * out[i] receives the number of set bits strictly below idxs[i], i.e.
+ * in [0, idxs[i]).  That is the rank1 of the succinct-structure
+ * literature, and it differs from sm_rank()'s inclusive range: for
+ * idxs[i] > 0, out[i] == sm_rank(map, 0, idxs[i] - 1, true), and for
+ * idxs[i] == 0, out[i] == 0.  The exclusive form needs no special case
+ * at 0, and the count of set bits in [x, y] is out[j] - out[i] for
+ * queries x and y + 1.  Unset bits below x are x - out[i].
+ *
+ * Done in a single O(chunks + n) pass instead of n independent
+ * O(chunks) calls.
+ *
+ * @param[in]  map   The sparsemap to query (NULL -> all 0).
+ * @param[in]  idxs  Query positions, MUST be sorted ascending.
+ * @param[out] out   out[i] receives the rank of idxs[i].
+ * @param[in]  n     Number of queries (0 is a no-op).
+ *
+ * The ascending-order requirement is a hard precondition (debug-asserted
+ * under SPARSEMAP_DIAGNOSTIC); unsorted input yields unspecified but
+ * memory-safe results.  NULL \a idxs or \a out with n > 0 sets errno to
+ * EINVAL and writes nothing.
+ */
+void sm_rank_many(const sm_t *map, const uint64_t *idxs, size_t *out,
+    size_t n);
+
+/** @brief Select many set bits in one sweep (batched).
+ *
+ * out[i] receives sm_select(map, ks[i], true): the position of the
+ * ks[i]-th (0-based) set bit, or SM_IDX_MAX when the map has ks[i] or
+ * fewer members.  Done in a single O(chunks + n) pass instead of n
+ * independent O(chunks) calls.  There is no unset-bit variant.
+ *
+ * @param[in]  map  The sparsemap to query (NULL -> all SM_IDX_MAX).
+ * @param[in]  ks   0-based member ranks, MUST be sorted ascending.
+ * @param[out] out  out[i] receives the position for ks[i].
+ * @param[in]  n    Number of queries (0 is a no-op).
+ *
+ * The ascending-order requirement is a hard precondition (debug-asserted
+ * under SPARSEMAP_DIAGNOSTIC); unsorted input yields unspecified but
+ * memory-safe results.  NULL \a ks or \a out with n > 0 sets errno to
+ * EINVAL and writes nothing.
+ */
+void sm_select_many(const sm_t *map, const uint64_t *ks, uint64_t *out,
+    size_t n);
 
 /** @brief Find the first contiguous run of \a len bits matching \a value.
  *
@@ -1047,43 +1178,79 @@ uint64_t sm_select(sm_t *map, uint64_t n, bool value);
 uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
 
 /* -------------------------------------------------------------------
- * sqrt(n) locator: transient O(sqrt n) contains / rank / select
+ * Locator: transient O(log chunks) contains / rank / select / next / prev
  * ------------------------------------------------------------------- */
 
-/** @brief Build a transient sqrt(n) locator over \a map.
+/** @brief Build a transient chunk directory over \a map.
  *
- * O(chunk count) one-pass build.  The returned locator accelerates
- * sm_locator_contains / _rank / _select to O(sqrt n).  See
- * sm_locator_t for the (re)build-on-mutation contract.
+ * One O(chunk count) pass.  The returned locator answers
+ * sm_locator_contains / _rank / _select / _next_member / _prev_member in
+ * O(log chunks).  It costs about 10 bytes per chunk, plus 16 more per
+ * chunk in any group of 16 chunks that spans over 2^27 bits (those store
+ * absolute values).  See sm_locator_t for the rebuild-on-mutation
+ * contract.
  *
- * @param[in] map  The sparsemap to index.
+ * @param[in] map  The sparsemap to index.  It must outlive the locator.
  * @returns A heap-allocated locator (free with sm_locator_free), or
- *          NULL on allocation failure or when \a map is NULL/empty.
+ *          NULL on allocation failure or when \a map is NULL.  An empty
+ *          map, whether fresh or emptied by removals, gets a locator
+ *          that answers as the empty map.  A small-set map gets a
+ *          locator that queries its words directly.
  */
 sm_locator_t *sm_locator_build(const sm_t *map);
 
 /** @brief Release a locator built by sm_locator_build (NULL-safe). */
 void sm_locator_free(sm_locator_t *loc);
 
-/** @brief O(sqrt n) membership test; equals sm_contains(map, idx, NULL). */
+/** @brief O(log chunks) membership test; equals sm_contains(map, idx, NULL).
+ *
+ * A NULL locator contains nothing.
+ */
 bool sm_locator_contains(const sm_locator_t *loc, uint64_t idx);
 
-/** @brief O(sqrt n) rank over inclusive [lo, hi]; equals sm_rank.
+/** @brief O(log chunks) rank over inclusive [lo, hi]; equals sm_rank.
  *
- * For value == true this uses the superblock prefix directory.  For
- * value == false it falls back to the plain sm_rank path (correct, not
- * accelerated).
+ * Two directory lookups.  For value == false the answer is the range
+ * width minus the set count, saturated at SIZE_MAX for the full 2^64
+ * range exactly as sm_rank saturates it.  lo > hi gives 0; a NULL
+ * locator gives 0.
  */
 size_t sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi,
     bool value);
 
-/** @brief O(sqrt n) select; equals sm_select(map, n, value).
+/** @brief O(log chunks) select of the \a n'th (0-based) matching bit.
  *
- * For value == true this uses the superblock prefix directory.  For
- * value == false it falls back to the plain sm_select path (correct,
- * not accelerated).
+ * For value == true this equals sm_select(map, n, true): the position
+ * of the n-th set bit, or SM_IDX_MAX when the map has n or fewer.
+ * For value == false it is the position of the n-th unset bit in
+ * [0, 2^64 - 1), counting the gaps between and after chunks and the
+ * positions a chunk does not cover; SM_IDX_MAX when there is none.
+ * A NULL locator gives SM_IDX_MAX.
  */
 uint64_t sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value);
+
+/** @brief O(log chunks) successor; equals sm_next_member(map, x, NULL).
+ *
+ * The lowest set bit strictly greater than \a prev_idx; SM_IDX_MAX as
+ * \a prev_idx means "from the start".  Each call is independent, so a
+ * forward scan costs O(log chunks) per member however the members are
+ * spread over chunks.
+ *
+ * @returns The next set bit, or SM_IDX_MAX if none (or a NULL locator).
+ */
+uint64_t sm_locator_next_member(const sm_locator_t *loc, uint64_t prev_idx);
+
+/** @brief O(log chunks) predecessor; equals sm_prev_member(map, x, NULL).
+ *
+ * The highest set bit strictly less than \a prev_idx; SM_IDX_MAX as
+ * \a prev_idx means "from the end".  Unlike sm_prev_member, which walks
+ * from chunk 0 whenever it steps back to an earlier chunk, a reverse
+ * scan costs O(log chunks) per member.
+ *
+ * @returns The previous set bit, or SM_IDX_MAX if none (or a NULL
+ *          locator).
+ */
+uint64_t sm_locator_prev_member(const sm_locator_t *loc, uint64_t prev_idx);
 
 /* -------------------------------------------------------------------
  * Iteration
@@ -1187,12 +1354,15 @@ uint64_t sm_split(sm_t *map, uint64_t idx, sm_t *other);
  *
  * Every set bit at position i in \a map appears at position i + offset in
  * the result.  Bits shifted below 0 are silently dropped (matching
- * CRoaring and PostgreSQL semantics).
+ * CRoaring and PostgreSQL semantics).  A positive shift that would move
+ * the largest member to SM_IDX_MAX or past it leaves the member universe
+ * and fails as a whole with errno=ERANGE; no member is dropped at the
+ * top.
  *
  * @param[in] map     The source sparsemap.
  * @param[in] offset  Signed shift amount (positive = right, negative = left).
  * @returns A newly allocated sparsemap (caller must free()), or NULL if all
- *          bits are shifted away or on allocation failure.
+ *          bits are shifted away, on ERANGE, or on allocation failure.
  */
 sm_t *sm_offset(const sm_t *map, ssize_t offset);
 
@@ -1309,18 +1479,210 @@ uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
  * Standard idiom for reverse iteration:
  * @code
  *   uint64_t i = SM_IDX_MAX;  // start past-the-end
- *   while ((i = sm_prev_member(map, i, NULL)) != SM_IDX_MAX) {
+ *   sm_cursor_t c = SM_CURSOR_INIT;
+ *   while ((i = sm_prev_member(map, i, &c)) != SM_IDX_MAX) {
  *       // i is the previous set bit
  *   }
  * @endcode
  *
+ * Without a cursor every call walks the chunk list from chunk 0, so it
+ * costs O(chunks).  With a cursor, the chunk that held the answer is
+ * recorded, and the next call starts its walk there once it has checked
+ * the chunk's start word (as sm_next_member() does).  A descending scan
+ * is then O(1) per member while it stays inside one chunk.  Stepping
+ * back to an EARLIER chunk still walks from chunk 0, because the walk
+ * may not start anywhere it has not verified, so a reverse scan over a
+ * map with many chunks costs O(chunks) per chunk crossed.  For
+ * O(log chunks) reverse steps use a locator.  The cursor contract of
+ * sm_cursor_t applies: reset it after mutating the map.
+ *
  * @param[in] map       The sparsemap to scan.
  * @param[in] prev_idx  Upper exclusive bound (use SM_IDX_MAX for "start at end").
- * @param[in] cur       Optional read cursor (currently unused for reverse
- *                      iteration; accepted for API symmetry), or NULL.
+ * @param[in,out] cur   Optional read cursor for a descending scan, or
+ *                      NULL.  See sm_cursor_t.
  * @returns The previous set bit index, or SM_IDX_MAX if none.
+ * @see sm_locator_prev_member()
  */
 uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
+
+/* -------------------------------------------------------------------
+ * Lazy iteration over a combined set
+ *
+ * Walk the members of (a OP b) without building the result map.  For
+ * callers that combine two maps only to iterate the result once.
+ * ------------------------------------------------------------------- */
+
+/** @brief The set operation a lazy iteration applies. */
+typedef enum {
+	SM_OP_AND = 0,    /**< members of both a and b */
+	SM_OP_OR = 1,     /**< members of a or b or both */
+	SM_OP_ANDNOT = 2, /**< members of a that b lacks */
+	SM_OP_XOR = 3     /**< members of exactly one of a and b */
+} sm_op_t;
+
+/** @brief Find the lowest member of (a OP b) at index > \a prev_idx.
+ *
+ * Gives the same answer as sm_next_member() on the map sm_and(),
+ * sm_or(), sm_andnot() or sm_xor() would build, without building it.
+ * Pass `SM_IDX_MAX` to start at the first member.
+ *
+ * @code
+ *   sm_cursor_t ca = SM_CURSOR_INIT, cb = SM_CURSOR_INIT;
+ *   uint64_t i = SM_IDX_MAX;
+ *   while ((i = sm_next_member_op(a, b, SM_OP_AND, i, &ca, &cb)) !=
+ *       SM_IDX_MAX) {
+ *       // i is in both a and b
+ *   }
+ * @endcode
+ *
+ * Cost: AND leapfrogs the two member streams, so each step skips to
+ * the larger of the two next members; OR takes the smaller of the two
+ * next members; ANDNOT and XOR jump over a stretch of members common
+ * to both maps in one step per chunk it spans.  None of them walks a
+ * run bit by bit, so a long RLE run in one map against an empty or
+ * sparse other map costs O(chunks), not O(run length).  Without
+ * cursors each call walks both chunk lists from chunk 0, O(chunks)
+ * per call.  With cursors an ascending scan is O(chunks(a) +
+ * chunks(b) + members) overall.
+ *
+ * @param[in] a         First map (NULL is the empty set).
+ * @param[in] b         Second map (NULL is the empty set).
+ * @param[in] op        The operation; any other value returns
+ *                      SM_IDX_MAX with errno = EINVAL.
+ * @param[in] prev_idx  Lower exclusive bound (SM_IDX_MAX: from the start).
+ * @param[in,out] cur_a Optional read cursor over \a a, or NULL.
+ * @param[in,out] cur_b Optional read cursor over \a b, or NULL.  Use
+ *                      two cursors, one per map; see sm_cursor_t.
+ * @returns The next member of a OP b, or SM_IDX_MAX if none.
+ */
+uint64_t sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    uint64_t prev_idx, sm_cursor_t *cur_a, sm_cursor_t *cur_b);
+
+/** @brief Invoke a callback for every member of (a OP b).
+ *
+ * The lazy counterpart of sm_scan() over the map sm_and(), sm_or(),
+ * sm_andnot() or sm_xor() would build.  The callback receives the
+ * members in ascending order, in batches of at most 64; the first
+ * \a skip members of the result are not delivered.  The batch sizes
+ * may differ from those sm_scan() would use on the built map; the
+ * sequence of indices is the same.
+ *
+ * Cost is O(runs(a) + runs(b) + delivered members): both maps are read
+ * run by run, and skipped members are counted, not visited.  Uses about
+ * 33 KB of heap scratch for the two run readers.
+ *
+ * @param[in] a     First map (NULL is the empty set).
+ * @param[in] b     Second map (NULL is the empty set).
+ * @param[in] op    The operation.
+ * @param[in] fn    Callback invoked with (array_of_indices, count, aux).
+ * @param[in] skip  Number of result members to skip first.
+ * @param[in] aux   Opaque pointer forwarded to \a fn.
+ *
+ * Does nothing and sets errno to EINVAL when \a fn is NULL or \a op is
+ * not an sm_op_t; sets errno to ENOMEM and delivers nothing when the
+ * scratch allocation fails.
+ */
+void sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    void (*fn)(uint64_t vec[], size_t n, void *aux), size_t skip, void *aux);
+
+/* -------------------------------------------------------------------
+ * Frozen maps: a read-only Elias-Fano copy for very sparse sets
+ *
+ * A sparsemap spends about 22 bytes on an isolated member (chunk start,
+ * descriptor and one payload word).  sm_freeze() copies a map into a
+ * separate, immutable Elias-Fano structure that spends about 2 + L bits
+ * per member, L = floor(log2(universe / members)): about 2 bytes per
+ * member at density 1e-4.  It is for very sparse sets that are built
+ * once and then only queried.  It is not a sparsemap: it has its own
+ * serialized format and cannot be mutated; sm_thaw() turns it back
+ * into an sm_t.
+ *
+ * Costs: freeze, thaw and (de)serialize are O(members) time and space,
+ * so freezing a map that holds a long RLE run materializes every member
+ * of the run.  select is O(1) (a sampled select plus a word scan);
+ * contains, rank, next and prev are O(1 + bucket size), where a bucket
+ * holds about 2 members on average.  A NULL frozen map is the empty set.
+ * ------------------------------------------------------------------- */
+
+/** @brief Opaque read-only Elias-Fano copy of a map. */
+typedef struct sm_frozen sm_frozen_t;
+
+/** @brief Build a frozen copy of \a map.
+ *
+ * O(cardinality) time and space; see the section comment.
+ *
+ * @param[in] map  Source map (NULL or empty gives an empty frozen map).
+ * @returns A new frozen map (free with sm_frozen_free()), or NULL on
+ *          allocation failure.
+ */
+sm_frozen_t *sm_freeze(const sm_t *map);
+
+/** @brief Release a frozen map (NULL-safe). */
+void sm_frozen_free(sm_frozen_t *f);
+
+/** @brief Bytes of memory the frozen map occupies (0 for NULL). */
+size_t sm_frozen_size(const sm_frozen_t *f);
+
+/** @brief Number of members (0 for NULL). */
+size_t sm_frozen_cardinality(const sm_frozen_t *f);
+
+/** @brief Membership test; equals sm_contains() on the source map. */
+bool sm_frozen_contains(const sm_frozen_t *f, uint64_t idx);
+
+/** @brief Members in the inclusive range [\a x, \a y].
+ *
+ * Equals sm_rank(map, x, y, true) on the source map; 0 when x > y.
+ */
+size_t sm_frozen_rank(const sm_frozen_t *f, uint64_t x, uint64_t y);
+
+/** @brief The \a n'th member (0-based), or SM_IDX_MAX if there are not
+ * n + 1 members.  Equals sm_select(map, n, true) on the source map. */
+uint64_t sm_frozen_select(const sm_frozen_t *f, uint64_t n);
+
+/** @brief Lowest member > \a prev_idx (SM_IDX_MAX: from the start), or
+ * SM_IDX_MAX.  Equals sm_next_member() on the source map. */
+uint64_t sm_frozen_next_member(const sm_frozen_t *f, uint64_t prev_idx);
+
+/** @brief Highest member < \a prev_idx (SM_IDX_MAX: from the end), or
+ * SM_IDX_MAX.  Equals sm_prev_member() on the source map. */
+uint64_t sm_frozen_prev_member(const sm_frozen_t *f, uint64_t prev_idx);
+
+/** @brief Build a mutable map with the frozen map's members.
+ *
+ * @returns A new owned-contiguous map (empty for NULL), or NULL on
+ *          allocation failure.
+ */
+sm_t *sm_thaw(const sm_frozen_t *f);
+
+/** @brief Bytes sm_frozen_serialize() writes (0 for NULL). */
+size_t sm_frozen_serialized_size(const sm_frozen_t *f);
+
+/** @brief Serialize a frozen map.
+ *
+ * The format is its own (magic "mfrozf01", version 1), not the
+ * sparsemap wire format, and always little-endian: a 32-byte header
+ * (magic, version and low-bit width, member count, largest member)
+ * followed by the packed low bits and the unary high bits as
+ * little-endian 64-bit words.  The select samples are rebuilt on read.
+ *
+ * @returns Bytes written, or 0 when \a f or \a out is NULL or
+ *          \a out_size is too small.
+ */
+size_t sm_frozen_serialize(const sm_frozen_t *f, uint8_t *out,
+    size_t out_size);
+
+/** @brief Read a frozen map written by sm_frozen_serialize().
+ *
+ * Validates the magic, version, sizes, the low-bit width, the number
+ * of members the high bits encode, and that the members strictly
+ * increase and end at the recorded maximum, which must be below
+ * SM_IDX_MAX, so no query on the result can read out of bounds.  O(n)
+ * bytes.
+ *
+ * @returns A new frozen map, or NULL on malformed input or allocation
+ *          failure.
+ */
+sm_frozen_t *sm_frozen_deserialize(const uint8_t *in, size_t n);
 
 /* -------------------------------------------------------------------
  * Cardinality without allocation
@@ -1371,7 +1733,9 @@ double sm_jaccard_index(const sm_t *a, const sm_t *b);
  * @param[in]     n    Length of `arr`.
  * @returns true if every add succeeded; false if a scratch allocation
  *          failed or any add returned SPARSEMAP_IDX_MAX (capacity
- *          exhausted -- use sm_add_many_grow to grow instead).
+ *          exhausted -- use sm_add_many_grow to grow instead).  An
+ *          input holding SM_IDX_MAX is rejected whole: false with
+ *          errno=EINVAL and the map unchanged.
  */
 bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
 
@@ -1387,7 +1751,9 @@ bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
  * @param[in]     arr  Array of indices (any order).
  * @param[in]     n    Length of `arr`.
  * @returns true on success; false if a scratch allocation failed or
- *          sm_add_grow exhausted its grow retries.
+ *          sm_add_grow exhausted its grow retries.  An input holding
+ *          SM_IDX_MAX is rejected whole: false with errno=EINVAL and the
+ *          map unchanged.
  */
 bool sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n);
 
@@ -1418,24 +1784,35 @@ void sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out);
 
 /** @brief Set every bit in `[lo, hi)`.
  *
- * Equivalent to looping `sm_add(map, i)` for i in [lo, hi).
- * Implementation is currently the naive loop; a chunk-aware fast
- * path may land in a future release.
+ * Equivalent to looping `sm_add(map, i)` for i in [lo, hi), but
+ * run-based: O(runs + output chunks) however wide the range, so a
+ * 2^31-bit run costs a few chunks.  The map is rewritten in place and
+ * never relocates.
+ *
+ * The range is half open and hi is at most UINT64_MAX, so it never
+ * includes SM_IDX_MAX: [lo, UINT64_MAX) reaches the last member.
  *
  * @param[in,out] map  Destination.
  * @param[in]     lo   Inclusive lower bound.
- * @param[in]     hi   Exclusive upper bound (lo == hi is a no-op).
- * @returns true if every bit was added; false if any add returned
- *          SPARSEMAP_IDX_MAX (capacity exhausted).
+ * @param[in]     hi   Exclusive upper bound (lo >= hi is a no-op).
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_add_range(sm_t *map, uint64_t lo, uint64_t hi);
 
 /** @brief Clear every bit in `[lo, hi)`.
  *
+ * Run-based: O(runs + output chunks) however wide the range, so
+ * clearing a span of a 2^31-bit run costs a few chunks.  The map is
+ * rewritten in place and never relocates.
+ *
  * @param[in,out] map  Destination.
  * @param[in]     lo   Inclusive lower bound.
- * @param[in]     hi   Exclusive upper bound.
- * @returns true if every bit was cleared; false if any remove failed.
+ * @param[in]     hi   Exclusive upper bound (lo >= hi is a no-op).
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi);
 
@@ -1489,12 +1866,15 @@ size_t sm_xor_cardinality(const sm_t *a, const sm_t *b);
  * Convenience wrapper around `sm_create()` + `sm_add()`.  Mirrors
  * PostgreSQL's `bms_make_singleton`.
  *
- * @param[in] idx  The single bit to set.
- * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ * @param[in] idx  The single bit to set, below SM_IDX_MAX.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure,
+ *          or NULL with errno=EINVAL when \a idx is SM_IDX_MAX.
  */
 sm_t *sm_create_singleton(uint64_t idx);
 
 /** @brief Create a sparsemap containing every bit in `[lo, hi)`.
+ *
+ * Half open with hi <= UINT64_MAX, so it never includes SM_IDX_MAX.
  *
  * @param[in] lo  Inclusive lower bound.
  * @param[in] hi  Exclusive upper bound.
@@ -1507,7 +1887,8 @@ sm_t *sm_create_from_range(uint64_t lo, uint64_t hi);
  *
  * @param[in] arr  Array of indices.
  * @param[in] n    Length of `arr`.
- * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure,
+ *          or NULL with errno=EINVAL when `arr` holds SM_IDX_MAX.
  */
 sm_t *sm_create_from_array(const uint64_t *arr, size_t n);
 
@@ -1621,9 +2002,13 @@ sm_t *sm_xor_inplace(sm_t *dst, const sm_t *src);
 
 /** @brief Complement every bit in `[lo, hi)`: set bits become unset and vice versa.
  *
- * In-place.  Naive implementation: O(hi-lo) sm_assign calls.
+ * In-place and run-based: O(runs + output chunks) however wide the
+ * range, and the map never relocates.  The range is half open with
+ * hi <= UINT64_MAX, so it never reaches SM_IDX_MAX.
  *
- * @returns true on success, false if the buffer was too small to grow.
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi);
 
@@ -1639,6 +2024,8 @@ bool sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi);
  *   - each chunk's claimed size fits within m_data_used
  *   - chunk start offsets are monotonically increasing
  *   - sum of chunk sizes + SM_SIZEOF_OVERHEAD == m_data_used
+ *   - no chunk overlaps the span of the one before it
+ *   - bit SM_IDX_MAX is not set (it is not a member)
  *
  * Useful as an after-deserialize sanity check.
  *
@@ -1690,10 +2077,12 @@ sm_t *sm_shrink_to_fit(sm_t *map);
  *
  * The magic and body are written with native memcpy, so the stream is
  * host-endian: a little-endian writer emits the magic bytes 73 6d 31 30
- * and a big-endian writer 30 31 6d 73.  Cross-endian deserialization is
- * not yet supported; sm_deserialize returns NULL if the source endian
- * flag doesn't match the host.  Serialized maps are therefore portable
- * only between hosts of the same byte order.
+ * and a big-endian writer 30 31 6d 73.  Every body field is a 64-bit
+ * word, so sm_deserialize reads a stream from either byte order: when
+ * the endian flag differs from the host it byte-swaps each 8-byte body
+ * word, then validates as usual.  The writer is unchanged.  sm_open()
+ * and sm_open_copy() take a raw body with no header, so they cannot
+ * tell the byte order and read host order only.
  * ------------------------------------------------------------------- */
 
 /** @brief Compute the buffer size needed to serialize \a map.
@@ -1713,9 +2102,11 @@ size_t sm_serialize(const sm_t *map, uint8_t *out, size_t out_size);
 
 /** @brief Deserialize a previously-serialized buffer into a fresh map.
  *
- * Bounded-safe: validates the header magic, version, endianness, and
- * that each chunk's claimed size fits in the remaining buffer.
- * Returns NULL on any malformed input rather than crashing.
+ * Bounded-safe: validates the header magic, version, and that each
+ * chunk's claimed size fits in the remaining buffer.  A stream written
+ * on a host of the other byte order is byte-swapped word by word and
+ * then validated the same way.  Returns NULL on any malformed input
+ * rather than crashing.
  *
  * @param[in] in   Source buffer.
  * @param[in] n    Source buffer size.
