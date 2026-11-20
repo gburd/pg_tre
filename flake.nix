@@ -3,6 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # PostgreSQL 19.0 landed in nixpkgs master before it reached the
+    # unstable channel (which still carries 19rc2).  Pin a master rev that
+    # ships postgresql_19 = 19.0 for the pg19 output only, so pg17/pg18
+    # stay on the unstable pin and this does not churn their closures.
+    # Drop this once nixos-unstable has postgresql_19 = 19.0 and fold pg19
+    # onto the main nixpkgs input.
+    nixpkgs-pg19.url = "github:NixOS/nixpkgs/3b7e1760b8ef4c4be84eb35c3a787fee07f3a7df";
     flake-utils.url = "github:numtide/flake-utils";
 
     # Vendored build dependencies, pinned to the same commits as the
@@ -28,10 +35,11 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, tre-src, lime-src }:
+  outputs = { self, nixpkgs, nixpkgs-pg19, flake-utils, tre-src, lime-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        pkgs19 = import nixpkgs-pg19 { inherit system; };
 
         # ------------------------------------------------------------------
         # Build the pg_tre extension against a given PostgreSQL package.
@@ -47,7 +55,11 @@
         #
         # requires shared_preload_libraries = 'pg_tre' at runtime.
         # ------------------------------------------------------------------
-        mkPgTre = postgresql:
+        # mkPgTre takes the nixpkgs set to build with (its stdenv, icu,
+        # readline, ...) and the PostgreSQL package to target.  pg19 passes
+        # pkgs19 so its icu/readline come from the same nixpkgs that built
+        # postgresql_19, avoiding a shared-library soname skew at load time.
+        mkPgTre = pkgs: postgresql:
           let
             pgConfig =
               if postgresql ? pg_config then postgresql.pg_config else postgresql;
@@ -193,14 +205,20 @@
       {
         packages = {
           # Built extension, per PostgreSQL major -- mirrors pg_fts.
-          pg17 = mkPgTre pkgs.postgresql_17;
-          pg18 = mkPgTre pkgs.postgresql_18;
+          pg17 = mkPgTre pkgs pkgs.postgresql_17;
+          pg18 = mkPgTre pkgs pkgs.postgresql_18;
+          # PG19 builds against postgresql_19 (19.0) from the pinned master
+          # nixpkgs; see the nixpkgs-pg19 input.
+          pg19 = mkPgTre pkgs19 pkgs19.postgresql_19;
           # `nix build .#extension` and the flake default both target PG18,
           # the project's baseline.
-          extension = mkPgTre pkgs.postgresql_18;
-          default = mkPgTre pkgs.postgresql_18;
+          extension = mkPgTre pkgs pkgs.postgresql_18;
+          default = mkPgTre pkgs pkgs.postgresql_18;
           # Convenience: the pinned PostgreSQL for scripting.
           postgresql = postgresql;
+          # PostgreSQL 19.0 from the pinned master nixpkgs, so CI's flake TAP
+          # leg can load the pg19 extension into a matching server.
+          postgresql19 = pkgs19.postgresql_19;
         };
 
         devShells.default = pkgs.mkShell {
