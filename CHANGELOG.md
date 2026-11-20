@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.5] - 2026-11-20 - Nix flake builds against PostgreSQL 19
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.6.4 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Changed
+
+- **The Nix flake now builds a `pg19` output against PostgreSQL 19.0.**
+  The flake exposed `pg17` and `pg18` but not `pg19`, because its nixpkgs
+  pin (`nixos-unstable`) still carried `postgresql_19` at a release
+  candidate.  19.0 reached nixpkgs master first, so a second nixpkgs
+  input pinned to a master revision that ships `postgresql_19` = 19.0
+  feeds the `pg19` output; `pg17` and `pg18` stay on the unstable pin, so
+  their closures do not change.  `nix build .#pg19` now produces the
+  extension for PostgreSQL 19, and CI loads it into a matching 19.0
+  server to run the `scan_cancel` TAP test.  No extension code change.
+
 ## [4.6.4] - 2026-11-20 - PostgreSQL 19 general availability
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.6.3 with

@@ -225,6 +225,7 @@ restart:
 | 4.6.1   | 4.6.2   | ✅ Yes       | No on-disk change, no REINDEX either way. sparsemap 5.8.5: a read-cursor correctness fix (a cursor carried across a mutation could answer wrong). Byte-identical serialization |
 | 4.6.2   | 4.6.3   | ✅ Yes       | No on-disk change, no REINDEX either way. sparsemap 5.9.0: fixes data-loss and wrong-answer bugs in the remove / RLE / set-operation paths, plus faster contains and rank/select. Byte-identical serialization |
 | 4.6.3   | 4.6.4   | ✅ Yes       | No on-disk change, no REINDEX either way. PostgreSQL 19 is now a released, CI-tested target (installed from PGDG main). No code change |
+| 4.6.4   | 4.6.5   | ✅ Yes       | No on-disk change, no REINDEX either way. Nix flake gains a pg19 output (PostgreSQL 19.0). No extension code change |
 
 When releasing a version with breaking changes:
 

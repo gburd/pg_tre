@@ -1,8 +1,14 @@
 # pg_tre status
 
-Released: **4.6.4** (2026-11).  See
+Released: **4.6.5** (2026-11).  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.6.5 adds a `pg19` output to the Nix flake, built against PostgreSQL
+19.0 from a pinned nixpkgs master revision (unstable still carries a
+release candidate).  No extension code change; `nix build .#pg19` now
+works and CI exercises it on a 19.0 server.  No on-disk change, no
+REINDEX.
 
 4.6.4 marks PostgreSQL 19 as a released, CI-tested target: now that 19.0
 is generally available, CI builds and tests against it from the PGDG
