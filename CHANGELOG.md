@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.4] - 2026-11-20 - PostgreSQL 19 general availability
+
+**No on-disk change; no REINDEX either way.**  Upgrade from 4.6.3 with
+`ALTER EXTENSION pg_tre UPDATE`.
+
+### Changed
+
+- **PostgreSQL 19 is now a released, CI-tested target.**  pg_tre has
+  built on 19 since 4.4.1; with 19.0 now generally available, CI installs
+  it from the PGDG `main` suite alongside 17 and 18 (the earlier pin to
+  the `-pgdg-testing` suite, needed while 19 was a release candidate, is
+  gone).  The regression suite, TAP suite, and an index-vs-sequential
+  differential all pass against a from-source 19.0 build.  No code change
+  was needed: 19 shares the server API path pg_tre already uses for 18.
+
 ## [4.6.3] - 2026-11-18 - sparsemap 5.9.0 (correctness and performance)
 
 **No on-disk change; no REINDEX either way.**  Upgrade from 4.6.2 with

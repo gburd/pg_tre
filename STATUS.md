@@ -1,8 +1,13 @@
 # pg_tre status
 
-Released: **4.6.3** (2026-11).  See
+Released: **4.6.4** (2026-11).  See
 `CHANGELOG.md` for full release notes and `doc/design.md` for the
 architecture this file tracks against.
+
+4.6.4 marks PostgreSQL 19 as a released, CI-tested target: now that 19.0
+is generally available, CI builds and tests against it from the PGDG
+main suite alongside 17 and 18.  No code change; pg_tre has compiled on
+19 since 4.4.1.  No on-disk change, no REINDEX.
 
 4.6.3 vendors sparsemap 5.9.0, a correctness and performance release: it
 fixes data-loss and wrong-answer bugs in 5.8.5 (RLE-run corruption on
